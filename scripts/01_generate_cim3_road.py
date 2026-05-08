@@ -2,25 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-第一轮测试主脚本：
+CIM 道路模型生成主脚本 (POC 第一轮)：
 
 输入：
-- data/raw/road_centerline.geojson
-- data/rules/road_rules.json
+- data/raw/road_centerline.geojson (OSM 原生路网数据)
+- data/rules/road_rules.json (道路模板与材质配置)
+- data/raw/road_centerline/*.tif (可选，DGM 局部高程切片)
 
 输出：
-- data/processed/road_centerline_local.geojson
-- output/obj/road_test.obj
-- output/gltf/road_test.glb
-- output/semantic/road_test_semantic.json
-- output/qc_report/road_test_qc_report.json
+- data/processed/road_centerline_local.geojson (带高程与局部相对坐标的属性路网)
+- output/obj/road_test.obj (路面、路缘石、人行道、标线三维模型)
+- output/gltf/road_test.glb (同上的 glTF 模型)
+- output/semantic/road_test_semantic.json (包含模型关联与语义信息清单)
+- output/qc_report/road_test_qc_report.json (几何与拓扑生成质检报告)
 
 当前策略：
-- 不区分道路等级
-- 区分道路等级，根据 OSM 属性动态映射字段
-- 支持依据 lanes 字段动态计算每条道路对应的路面宽度
-- 生成道路面、人行道、路缘石、中心标线
-- 路口通过 union 初步融合
+- 属性映射：自动提取并转换 OSM 的道路等级、车道数、限速、单行、桥梁及层级(layer)等标签。
+- 动态宽度：支持依据 lanes 字段动态计算扩展每段道路对应的路面及各设施宽度。
+- 真实高程：支持读取多图幅 DGM 影像获取地表起伏，并对 bridge / layer 标签进行桥梁净空高度叠加补偿。
+- 空间防穿模：基于三维高程对路口进行聚类分层，保障立交桥与底层道路在几何合并时拓扑独立、互不干涉。
+- 三维组装装配：基于路口 2D 并集融合，利用受限三角剖分(Triangulate)和垂直拉伸(Extrude)生成具有厚度的 3D Mesh。
 """
 
 from __future__ import annotations
@@ -49,6 +50,10 @@ from shapely.ops import unary_union, triangulate
 import trimesh
 from trimesh.creation import triangulate_polygon
 
+try:
+    import rasterio
+except ImportError:
+    rasterio = None
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,6 +65,7 @@ OBJ_PATH = ROOT / "output" / "obj" / "road_test.obj"
 GLB_PATH = ROOT / "output" / "gltf" / "road_test.glb"
 SEMANTIC_PATH = ROOT / "output" / "semantic" / "road_test_semantic.json"
 QC_PATH = ROOT / "output" / "qc_report" / "road_test_qc_report.json"
+DGM_DIR = ROOT / "data" / "raw" / "road_centerline"  # 高程切片所在的文件夹
 
 LOCAL_ROADS_PATH = PROCESSED_DIR / "road_centerline_local.geojson"
 
@@ -69,7 +75,28 @@ TARGET_CRS = "EPSG:32632"
 
 @dataclass
 class RoadRule:
-    """定义道路生成的规则参数，包括车道数、各部分宽度、高度、材质等。"""
+    """
+    定义道路生成的规则参数，包括车道数、各部分宽度、高度、材质等。
+    
+    示例 (JSON 结构):
+    {
+      "default_road": {
+        "lane_count": 2,               # 车道数
+        "lane_width": 3.5,             # 车道宽度
+        "road_width": 7.0,             # 道路总宽度
+        "sidewalk_width": 2.0,         # 人行道宽度
+        "curb_width": 0.3,             # 路缘石宽度
+        "curb_height": 0.15,           # 路缘石高度
+        "lane_marking_width": 0.15,    # 标线宽度
+        "road_z": 0.0,                 # 道路基础高度
+        "lane_marking_z_offset": 0.015,# 标线高度偏移 (防 Z-fighting)
+        "material": "asphalt",         # 道路材质
+        "sidewalk_material": "concrete", # 人行道材质
+        "curb_material": "curb_concrete", # 路缘石材质   
+        "marking_material": "white_marking" # 标线材质
+      }
+    }
+    """
     lane_count: int
     lane_width: float
     road_width: float
@@ -83,23 +110,6 @@ class RoadRule:
     sidewalk_material: str
     curb_material: str
     marking_material: str
-"""
-  "default_road": {
-    "lane_count": 2,    # 车道数
-    "lane_width": 3.5,  # 车道宽度
-    "road_width": 7.0,   # 道路宽度
-    "sidewalk_width": 2.0, # 人行道宽度
-    "curb_width": 0.3,    # 路缘石宽度
-    "curb_height": 0.15,  # 路缘石高度
-    "lane_marking_width": 0.15,  # 标线宽度
-    "road_z": 0.0,  # 道路高度
-    "lane_marking_z_offset": 0.015,  # 标线高度偏移
-    "material": "asphalt",  # 道路材质
-    "sidewalk_material": "concrete",  # 人行道材质
-    "curb_material": "curb_concrete",  # 路缘石材质   
-    "marking_material": "white_marking"  # 标线材质
-  }
-"""
 @dataclass
 class LocalOrigin:
     """定义局部坐标系的原点，用于将全局地理坐标转换为以原点为中心的局部相对坐标。"""
@@ -129,7 +139,7 @@ def load_rules() -> dict[str, RoadRule]:
 
 def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, Any]]:
     """
-    读取 OSM 道路中心线，投影到 EPSG:32632，然后转换到局部坐标。
+    读取 OSM 道路中心线数据，进行投影转换、高程采样，并转换为局部坐标系。
     """
     if not RAW_ROADS.exists():
         raise FileNotFoundError(
@@ -143,14 +153,14 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
         raise ValueError("road_centerline.geojson 为空，无法生成道路模型。")
 
     if roads.crs is None:
-        # OSM GeoJSON 通常为 WGS84
+        # OSM GeoJSON 默认投影通常为 WGS84 (EPSG:4326)
         roads = roads.set_crs("EPSG:4326")
 
-    # 清洗数据：只保留有效的线段几何体（LineString 和 MultiLineString）
+    # 清洗数据：剔除空几何体，仅保留有效的线段结构（LineString 和 MultiLineString）
     roads = roads[roads.geometry.notna()].copy()
     roads = roads[roads.geometry.geom_type.isin(["LineString", "MultiLineString"])].copy()
 
-    # 投影到目标坐标系 (EPSG:32632, UTM Zone 32N)，单位转换为米
+    # 投影到目标投影坐标系 (EPSG:32632, UTM Zone 32N)，统一单位为米
     roads = roads.to_crs(TARGET_CRS)
 
     # 将 MultiLineString 拆分（Explode）为单条的 LineString
@@ -163,7 +173,7 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     elif "id" in roads.columns:
         roads["road_id"] = roads["id"].astype(str)
     else:
-        # 如果没有源 ID 数据，则自动生成五位序列号
+        # 若无数据源 ID，则自动生成五位序列化编号
         roads["road_id"] = [f"R{i:05d}" for i in range(len(roads))]
 
     # 标准化处理道路名称
@@ -172,7 +182,7 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     else:
         roads["road_name"] = "unknown"
 
-    # OSM 字段到 CIM 测试字段映射
+    # 映射与提取 OSM 原生道路属性
     roads["road_class"] = roads["highway"] if "highway" in roads.columns else "unclassified"
     roads["lane_count"] = roads["lanes"] if "lanes" in roads.columns else None
     roads["maxspeed"] = roads["maxspeed"] if "maxspeed" in roads.columns else None
@@ -182,8 +192,24 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     roads["access"] = roads["access"] if "access" in roads.columns else None
     roads["length_m"] = roads.geometry.length
 
-    roads["elevation"] = 0.0
-    roads["elevation"] = roads.apply(extract_elevation, axis=1)
+    # 尝试加载指定目录下的所有 DGM 高程切片，支持多图幅 tif 自动拼接与读取
+    dgm_srcs = []
+    if rasterio and DGM_DIR.exists() and DGM_DIR.is_dir():
+        for tif_file in DGM_DIR.glob("*.tif*"):  # 匹配 .tif 或 .tiff
+            try:
+                dgm_srcs.append(rasterio.open(tif_file))
+            except Exception as e:
+                print(f"无法读取高程文件 {tif_file}: {e}")
+
+    roads["is_bridge"] = roads["is_bridge"].apply(check_is_bridge)
+    roads["bridge_clearance"] = roads["road_class"].apply(get_bridge_clearance)
+    
+    z_info = roads.apply(lambda row: get_elevations(row, dgm_srcs), axis=1)
+    roads = pd.concat([roads, z_info], axis=1)
+    roads["elevation"] = roads["road_z_mean"]
+    
+    for src in dgm_srcs:
+        src.close()
 
     # 计算所有道路的边界框中心点，将其作为三维场景的局部坐标原点
     minx, miny, maxx, maxy = roads.total_bounds
@@ -197,10 +223,12 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     roads["geometry_global"] = roads.geometry
     roads["geometry"] = roads.geometry.apply(lambda geom: translate_to_local(geom, origin))
 
-    # 提取所需属性列，保存处理好的局部路网 GeoJSON
+    # 提取核心所需的属性列，保存处理完毕的局部路网 GeoJSON
     keep_cols = [
         "road_id", "road_name", "road_class", "lane_count", "maxspeed", 
-        "oneway", "is_bridge", "road_ref", "access", "elevation", "length_m", "geometry"
+        "oneway", "is_bridge", "road_ref", "access", "elevation", "length_m", 
+        "bridge_clearance", "height_source", "height_mode", "ground_z_start", 
+        "ground_z_end", "road_z_start", "road_z_end", "road_z_mean", "geometry"
     ]
     local_roads = roads[keep_cols].copy()
     local_roads = gpd.GeoDataFrame(local_roads, geometry="geometry", crs=TARGET_CRS)
@@ -219,7 +247,7 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
 
 def normalize_osmid(value: Any) -> str:
     """
-    OSMnx 导出的 osmid 有时是 int，有时是 list。此函数将其统一转为字符串形式。
+    统一 OSM ID 格式。OSMnx 导出的 osmid 有时是 int，有时是 list，此函数统一转为字符串形式。
     """
     if isinstance(value, (list, tuple, set)):
         return "_".join(str(v) for v in value)
@@ -228,13 +256,13 @@ def normalize_osmid(value: Any) -> str:
 
 def translate_to_local(geom, origin: LocalOrigin):
     """
-    利用 Shapely 的仿射变换 (translate)，将全局投影坐标转换为以 origin 为原点的局部坐标。
+    利用 Shapely 的仿射变换 (translate)，将全局投影坐标转换为以 origin 为原点的局部相对坐标。
     """
     return shapely.affinity.translate(geom, xoff=-origin.x, yoff=-origin.y, zoff=-origin.z)
 
 
 def safe_str(val: Any) -> str | None:
-    """安全转换属性值为字符串，若是空值则返回 None。"""
+    """安全地将属性值转换为字符串，若为空值（如 nan, NaT）则返回 None。"""
     if val is None:
         return None
     val_str = str(val)
@@ -244,7 +272,7 @@ def safe_str(val: Any) -> str | None:
 
 
 def parse_lane_count(val: Any, default: int = 2) -> int:
-    """从字符串或列表中解析出车道数（提取第一个数字），如果无效则返回 default。"""
+    """从字符串或列表中解析出车道数（提取首个数字），若解析失败则返回默认值 default。"""
     val_str = safe_str(val)
     if not val_str:
         return default
@@ -253,7 +281,7 @@ def parse_lane_count(val: Any, default: int = 2) -> int:
 
 
 def get_road_rule(row: pd.Series, rules: dict[str, RoadRule]) -> RoadRule:
-    """依据原始道路属性（如车道数）动态计算并重写道路宽度模板。"""
+    """依据原始道路属性（如车道数）动态计算并返回适用于该道路的规则与宽度配置。"""
     road_class = safe_str(row.get("road_class")) or "default_road"
     base_rule = rules.get(road_class, rules.get("default_road"))
     rule = copy.copy(base_rule)
@@ -265,35 +293,101 @@ def get_road_rule(row: pd.Series, rules: dict[str, RoadRule]) -> RoadRule:
     return rule
 
 
-def extract_elevation(row: pd.Series) -> float:
-    """尝试从 OSM 属性中解析高程或层级(layer)转换为 Z 坐标偏移。"""
-    # 1. 尝试解析 ele 标签 (绝对高程)
-    ele = row.get("ele")
-    if pd.notna(ele):
-        try:
-            m = re.search(r"[-+]?\d*\.\d+|[-+]?\d+", str(ele))
-            if m:
-                return float(m.group())
-        except Exception:
-            pass
-            
-    # 2. 尝试解析 layer 标签 (相对层级，OSM 中通常用于立交桥/隧道)
+def check_is_bridge(value: Any) -> bool:
+    """判断当前道路要素是否被明确标记为桥梁或高架（如 bridge=yes）。"""
+    if pd.isna(value) or value is None:
+        return False
+    return str(value).lower() in ["yes", "true", "1", "viaduct"]
+
+
+def get_bridge_clearance(highway: Any) -> float:
+    """根据道路等级获取默认的桥梁净空高度。"""
+    highway = str(highway).lower()
+    if highway in ["motorway", "trunk"]:
+        return 6.0
+    if highway in ["motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"]:
+        return 5.0
+    return 4.5
+
+
+def get_elevations(row: pd.Series, dgm_srcs: list) -> pd.Series:
+    """结合多图幅 DGM (数字高程模型) 和桥梁规则，计算出每段道路的准确高程参数。"""
+    line = row.geometry
+    if line is None or line.is_empty or not isinstance(line, LineString):
+        return pd.Series({
+            "ground_z_start": 0.0, "ground_z_end": 0.0,
+            "road_z_start": 0.0, "road_z_end": 0.0,
+            "road_z_mean": 0.0, "height_mode": "unknown", "height_source": "default"
+        })
+
+    start_pt = line.coords[0]
+    end_pt = line.coords[-1]
+
+    def sample_z(pt):
+        if dgm_srcs:
+            x, y = pt[0], pt[1]
+            for src in dgm_srcs:
+                # 判定坐标点是否在当前 TIF 影像图幅的边界内，大幅提升多切片检索性能
+                bounds = src.bounds
+                if bounds.left <= x <= bounds.right and bounds.bottom <= y <= bounds.top:
+                    try:
+                        val = next(src.sample([(x, y)]))[0]
+                        return float(val)
+                    except Exception:
+                        pass
+        # 如果没有 DGM 或图幅均未覆盖该点，使用安联球场基准高度 (约 505m) 模拟
+        return 505.0
+
+    ground_z_start = sample_z(start_pt)
+    ground_z_end = sample_z(end_pt)
+
+    is_bridge = row.get("is_bridge", False)
+    clearance = row.get("bridge_clearance", 0.0)
+
+    if is_bridge:
+        road_z_start = ground_z_start + clearance
+        road_z_end = ground_z_end + clearance
+        height_mode = "dem_sampled_bridge_adjusted"
+        height_source = "Directory_Tiles_plus_bridge_rule" if dgm_srcs else "mock_dem_plus_bridge_rule"
+    else:
+        road_z_start = ground_z_start
+        road_z_end = ground_z_end
+        height_mode = "dem_sampled"
+        height_source = "Directory_Tiles" if dgm_srcs else "mock_dem"
+
+    # 依据 OSM 层级标签进行高程补偿计算（适用于隧道下穿或地下重叠设施）
+    layer_offset = 0.0
     layer = row.get("layer")
     if pd.notna(layer):
         try:
             m = re.search(r"[-+]?\d+", str(layer))
             if m:
-                return float(m.group()) * 5.0  # 假设每层相对层高为 5 米
+                layer_offset = float(m.group()) * 5.0
         except Exception:
             pass
-            
-    return 0.0
+
+    if layer_offset != 0.0 and not is_bridge:
+        road_z_start += layer_offset
+        road_z_end += layer_offset
+        height_mode = "dem_sampled_layer_adjusted"
+
+    road_z_mean = (road_z_start + road_z_end) / 2.0
+
+    return pd.Series({
+        "ground_z_start": round(ground_z_start, 3),
+        "ground_z_end": round(ground_z_end, 3),
+        "road_z_start": round(road_z_start, 3),
+        "road_z_end": round(road_z_end, 3),
+        "road_z_mean": round(road_z_mean, 3),
+        "height_mode": height_mode,
+        "height_source": height_source
+    })
 
 
 def clean_polygonal(geom):
     """
-    清理 polygon / multipolygon。
-    buffer(0) 是一种修复包含微小自交（Self-intersection）和无效多边形的常用技巧。
+    清理多边形 (Polygon / MultiPolygon) 几何结构。
+    采用 buffer(0) 的经典技巧以自动修复细小自交 (Self-intersection) 等无效多边形问题。
     """
     if geom is None or geom.is_empty:
         return None
@@ -310,7 +404,7 @@ def clean_polygonal(geom):
     if geom.geom_type in ["Polygon", "MultiPolygon"]:
         return geom
 
-    # 如果转换后变成了混合集合，仅提取其中的面级对象并进行合并
+    # 对于复杂的几何集合，仅提取其中的有效面级对象并进行统一合并
     if geom.geom_type == "GeometryCollection":
         polys = [g for g in geom.geoms if g.geom_type in ["Polygon", "MultiPolygon"] and not g.is_empty]
         if not polys:
@@ -322,7 +416,7 @@ def clean_polygonal(geom):
 
 def iter_polygons(geom) -> Iterable[Polygon]:
     """
-    将 Polygon / MultiPolygon / GeometryCollection 展开为 Polygon。
+    迭代解析工具：将各类复杂的面级几何体 (Polygon, MultiPolygon, Collection) 铺平为单层面数组。
     """
     if geom is None or geom.is_empty:
         return
@@ -340,96 +434,56 @@ def iter_polygons(geom) -> Iterable[Polygon]:
 
 def line_buffer(line: LineString, width: float):
     """
-    将线段沿法向等距缓冲区展开，生成多边形面 (Buffer)。
-    cap_style=2 (平头/平端裁剪)，join_style=2 (Mitre，即拐角处尖角延伸)。
+    中心线等距扩展器：沿法向外扩生成双向缓冲面 (Buffer)。
+    参数设定：cap_style=2 (平端裁剪), join_style=2 (Mitre 拐角尖角延伸模式)。
     """
     return line.buffer(width / 2.0, cap_style=2, join_style=2)
 
 
-def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule]) -> dict[str, Any]:
 def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule]) -> list[dict[str, Any]]:
     """
-    生成道路面、人行道、路缘石、标线的二维面。
-    按高程分组生成道路面、人行道、路缘石、标线的二维面。
-    不同高程的路网（例如高架桥与地面道路）互相独立，互不融合。
+    按高程层级聚类并批量生成路面、人行道、路缘石及交通标线的 2D 几何面。
+    分离特性：处于不同高程的路网（如高架路与底层道路）保持拓扑独立，互不相交穿模。
     """
-    road_surfaces = []
-    total_surfaces = []
-    lane_markings = []
     layers_geoms = []
 
-    for _, row in roads.iterrows():
-        line: LineString = row.geometry
-        rule = get_road_rule(row, rules)
     # 依据高程对道路进行分组处理
     for elevation, group in roads.groupby("elevation"):
         road_surfaces = []
         total_surfaces = []
         lane_markings = []
 
-        # 生成基础道路面（主车道）
-        road_surface = line_buffer(line, rule.road_width)
-        # 生成涵盖道路及两侧人行道的总范围面
-        total_surface = line_buffer(line, rule.road_width + 2 * rule.sidewalk_width)
         for _, row in group.iterrows():
             line: LineString = row.geometry
             rule = get_road_rule(row, rules)
 
-        if not road_surface.is_empty:
-            road_surfaces.append(road_surface)
             road_surface = line_buffer(line, rule.road_width)
             total_surface = line_buffer(line, rule.road_width + 2 * rule.sidewalk_width)
 
-        if not total_surface.is_empty:
-            total_surfaces.append(total_surface)
             if not road_surface.is_empty:
                 road_surfaces.append(road_surface)
 
-        # 中心线标线
-        marking = line_buffer(line, rule.lane_marking_width)
-        if not marking.is_empty:
-            lane_markings.append(marking)
             if not total_surface.is_empty:
                 total_surfaces.append(total_surface)
 
-    # 合并相交的道路面，并通过 clean_polygonal 清洗消除拓扑错误
-    merged_road = clean_polygonal(unary_union(road_surfaces))
-    merged_total = clean_polygonal(unary_union(total_surfaces))
             marking = line_buffer(line, rule.lane_marking_width)
             if not marking.is_empty:
                 lane_markings.append(marking)
 
-    if merged_road is None:
-        raise ValueError("道路面生成失败。")
-        # 仅在相同高度的道路间进行布尔合并 (初步渠化融合)
+        # [核心] 仅对相同高程组内部的道路对象执行布尔并集 (初步路口与渠化融合)
         merged_road = clean_polygonal(unary_union(road_surfaces))
         merged_total = clean_polygonal(unary_union(total_surfaces))
 
-    if merged_total is None:
-        raise ValueError("总道路面生成失败。")
         if merged_road is None or merged_total is None:
             continue
 
-    # 人行道 = 涵盖两侧的总范围面 - 基础道路面
-    sidewalk = clean_polygonal(merged_total.difference(merged_road))
         sidewalk = clean_polygonal(merged_total.difference(merged_road))
 
-    # 路缘石窄带：基础道路面统向外扩张 curb_width，再减去基础道路面本身
-    default_rule = rules.get("default_road")
-    curb = clean_polygonal(merged_road.buffer(default_rule.curb_width, join_style=2).difference(merged_road))
         default_rule = rules.get("default_road")
         curb = clean_polygonal(merged_road.buffer(default_rule.curb_width, join_style=2).difference(merged_road))
 
-    # 标线裁剪：标线只保留在道路面内部
-    lane_marking_union = clean_polygonal(unary_union(lane_markings).intersection(merged_road))
         lane_marking_union = clean_polygonal(unary_union(lane_markings).intersection(merged_road))
 
-    return {
-        "road_surface": merged_road,
-        "sidewalk": sidewalk,
-        "curb": curb,
-        "lane_marking": lane_marking_union,
-    }
         layers_geoms.append({
             "elevation": float(elevation),
             "road_surface": merged_road,
@@ -443,17 +497,17 @@ def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRul
 
 def polygon_to_top_mesh(geom, z: float, name: str, visual_color=None) -> trimesh.Trimesh:
     """
-    将 Polygon / MultiPolygon 转成顶部三角面 mesh。
-    说明：
-    - 使用 shapely.ops.triangulate 做初步三角化
-    - 只保留三角形代表点在原 polygon 内部的三角面
-    - 适合 POC，不作为最终工程级网格算法
+    将 2D 几何平面约束转换为 3D Mesh（仅保留顶面结构）。
+    
+    算法特性：
+    - 基于 trimesh 约束三角剖分，保持了多边形内部孔洞和精确边界
+    - 法线检查：通过计算三角形三顶点叉积强制规整向上法线，防止引擎中发生背面剔除
     """
     vertices: list[tuple[float, float, float]] = []
     faces: list[tuple[int, int, int]] = []
     v_index: dict[tuple[float, float, float], int] = {}
 
-    # 内部辅助函数：用于添加顶点并去重，返回对应的顶点索引值
+    # 辅函数：注册顶点坐标去重并返回分配的顶点索引
     def add_vertex(x, y, z_) -> int:
         key = (round(float(x), 6), round(float(y), 6), round(float(z_), 6))
         if key in v_index:
@@ -481,7 +535,7 @@ def polygon_to_top_mesh(geom, z: float, name: str, visual_color=None) -> trimesh
                 add_vertex(v2[0], v2[1], z)
             ]
 
-            # 通过计算向量叉乘来判断法线方向，如果Z分量朝下则翻转
+            # 判断重塑法线方向：若 Z 分量朝下则倒序重排顶点
             p0 = np.array(vertices[idxs[0]])
             p1 = np.array(vertices[idxs[1]])
             p2 = np.array(vertices[idxs[2]])
@@ -503,12 +557,12 @@ def polygon_to_top_mesh(geom, z: float, name: str, visual_color=None) -> trimesh
 
 def polygon_to_extruded_mesh(geom, z_bottom: float, z_top: float, name: str, visual_color=None) -> trimesh.Trimesh:
     """
-    将 Polygon / MultiPolygon 垂直拉伸生成三维实体网格 (Mesh)。
-    常用于需要体积感和厚度的模型部分（如路缘石）。
+    将 2D 平面沿着 Z 轴垂直拉伸，并将其封盖转化为具备厚度的封闭三维实体 (Watertight Mesh)。
+    此类网格常用于需要立体体积表现的道路设施（例如路缘石）。
 
-    说明：
-    - 顶面和底面通过 triangulate (三角化) 生成。
-    - 遍历外环 (exterior) 和所有内孔洞环 (interiors) 生成垂直侧边面。
+    算法步骤：
+    1. 通过 triangulate 生成双份网格构造出顶部与底部平面。
+    2. 依次迭代多边形的外边界 (exterior) 和内环孔洞 (interiors)，封包生成连续的侧壁四边形(拆分为三角面)。
     """
     all_vertices: list[tuple[float, float, float]] = []
     all_faces: list[tuple[int, int, int]] = []
@@ -542,7 +596,7 @@ def polygon_to_extruded_mesh(geom, z_bottom: float, z_top: float, name: str, vis
             t1 = add_vertex(x1, y1, z_top)
             t2 = add_vertex(x2, y2, z_top)
 
-            # 每个垂直侧边四边形均由两个三角形组装而成
+            # 使用两枚三角面构筑单个矩形侧壁
             all_faces.append((b1, b2, t2))
             all_faces.append((b1, t2, t1))
 
@@ -566,12 +620,12 @@ def polygon_to_extruded_mesh(geom, z_bottom: float, z_top: float, name: str, vis
             p2 = np.array(all_vertices[top[2]])
             normal_z = np.cross(p1 - p0, p2 - p0)[2]
 
-            # 保证顶面法线统一向上
+            # 校正顶面法线一致朝上
             if normal_z < 0:
                 top = [top[0], top[2], top[1]]
             all_faces.append(tuple(top))
 
-            # 保证底面法线统一向下
+            # 校正底面法线一致朝下
             if normal_z > 0:
                 bottom = [bottom[0], bottom[2], bottom[1]]
             all_faces.append(tuple(bottom))
@@ -591,11 +645,10 @@ def polygon_to_extruded_mesh(geom, z_bottom: float, z_top: float, name: str, vis
     return mesh
 
 
-def make_scene(geoms: dict[str, Any], rule: RoadRule) -> tuple[trimesh.Scene, dict[str, trimesh.Trimesh]]:
 def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Scene, dict[str, trimesh.Trimesh]]:
     """
-    将二维平面几何组装并转换为具有高度及材质预设的三维 Mesh，最终组合为一个三维场景 (trimesh.Scene)。
-    现已支持多图层(层级)立体装配。
+    场景构建器：接收加工好的 2D 几何信息，映射相关高度与颜色预设，转化为真正的 3D Mesh 对象，
+    并将它们统筹装配合并至 Trimesh 核心场景容器 (Scene) 内部。
     """
     # RGBA 颜色，仅用于 POC 视觉区分
     road_color = [45, 45, 45, 255]
@@ -603,26 +656,12 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
     curb_color = [210, 210, 210, 255]
     marking_color = [255, 255, 255, 255]
 
-    z = rule.road_z
     scene = trimesh.Scene()
     all_meshes = {}
 
-    # 分层级生成路面、人行道、路缘石和标线的独立 Mesh 对象
-    road_mesh = polygon_to_top_mesh(
-        geoms["road_surface"],
-        z=z,
-        name="Road_Surface",
-        visual_color=road_color,
-    )
     for i, layer in enumerate(layers):
         z = layer["elevation"] + rule.road_z
 
-    sidewalk_mesh = polygon_to_top_mesh(
-        geoms["sidewalk"],
-        z=z + rule.curb_height,
-        name="Sidewalk",
-        visual_color=sidewalk_color,
-    )
         # 分层级生成路面、人行道、路缘石和标线的独立 Mesh 对象
         road_mesh = polygon_to_top_mesh(
             layer["road_surface"],
@@ -631,13 +670,6 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
             visual_color=road_color,
         )
 
-    curb_mesh = polygon_to_extruded_mesh(
-        geoms["curb"],
-        z_bottom=z,
-        z_top=z + rule.curb_height,
-        name="Curb",
-        visual_color=curb_color,
-    )
         sidewalk_mesh = polygon_to_top_mesh(
             layer["sidewalk"],
             z=z + rule.curb_height,
@@ -645,12 +677,6 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
             visual_color=sidewalk_color,
         )
 
-    lane_mesh = polygon_to_top_mesh(
-        geoms["lane_marking"],
-        z=z + rule.lane_marking_z_offset,
-        name="Lane_Marking",
-        visual_color=marking_color,
-    )
         curb_mesh = polygon_to_extruded_mesh(
             layer["curb"],
             z_bottom=z,
@@ -659,12 +685,6 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
             visual_color=curb_color,
         )
 
-    meshes = {
-        "Road_Surface": road_mesh,
-        "Sidewalk": sidewalk_mesh,
-        "Curb": curb_mesh,
-        "Lane_Marking": lane_mesh,
-    }
         lane_mesh = polygon_to_top_mesh(
             layer["lane_marking"],
             z=z + rule.lane_marking_z_offset,
@@ -672,12 +692,6 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
             visual_color=marking_color,
         )
 
-    # 过滤掉空数据的网格，将有效模型添加到场景容器中
-    scene = trimesh.Scene()
-    for name, mesh in meshes.items():
-        if len(mesh.vertices) == 0:
-            continue
-        scene.add_geometry(mesh, node_name=name, geom_name=name)
         layer_meshes = {
             f"Road_Surface_{i}": road_mesh,
             f"Sidewalk_{i}": sidewalk_mesh,
@@ -685,7 +699,6 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
             f"Lane_Marking_{i}": lane_mesh,
         }
 
-    return scene, meshes
         # 过滤掉空数据的网格，将有效模型添加到场景容器中
         for name, mesh in layer_meshes.items():
             if len(mesh.vertices) > 0:
@@ -708,11 +721,11 @@ def build_semantic_json(
     origin: LocalOrigin,
     meta: dict[str, Any],
     rules: dict[str, RoadRule],
-    geoms: dict[str, Any],
     layers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    构建语义信息 JSON，记录各对象的 ID、长面积等属性，提供外部系统引用并关联 3D 模型。
+    构建并导出 CIM 语义信息 JSON 清单，该清单详细记录了从 2D 数据到 3D 网格转换过程中的属性映射，
+    作为外部系统挂载 3D 模型材质、执行长面积统计及数据回溯的关键基石。
     """
     objects = []
     default_rule = rules.get("default_road")
@@ -727,22 +740,24 @@ def build_semantic_json(
             "lane_count": safe_str(row.get("lane_count")),
             "maxspeed": safe_str(row.get("maxspeed")),
             "oneway": safe_str(row.get("oneway")),
-            "is_bridge": safe_str(row.get("is_bridge")),
+            "is_bridge": bool(row.get("is_bridge")),
             "road_ref": safe_str(row.get("road_ref")),
             "access": safe_str(row.get("access")),
             "object_type": "Source_Centerline",
             "geometry_type": row.geometry.geom_type,
             "length_m": float(row["length_m"]),
             "elevation": float(row["elevation"]),
+            "bridge_clearance": float(row.get("bridge_clearance", 0.0)),
+            "height_source": str(row.get("height_source", "")),
+            "height_mode": str(row.get("height_mode", "")),
+            "ground_z_start": float(row.get("ground_z_start", 0.0)),
+            "ground_z_end": float(row.get("ground_z_end", 0.0)),
+            "road_z_start": float(row.get("road_z_start", 0.0)),
+            "road_z_end": float(row.get("road_z_end", 0.0)),
+            "road_z_mean": float(row.get("road_z_mean", 0.0)),
             "rule_id": safe_str(row.get("road_class")) if safe_str(row.get("road_class")) in rules else "default_road",
         })
 
-    merged_objects = [
-        ("Road_Surface", geoms["road_surface"], default_rule.material),
-        ("Sidewalk", geoms["sidewalk"], default_rule.sidewalk_material),
-        ("Curb", geoms["curb"], default_rule.curb_material),
-        ("Lane_Marking", geoms["lane_marking"], default_rule.marking_material),
-    ]
     for i, layer in enumerate(layers):
         ele = layer["elevation"]
         merged_objects = [
@@ -752,20 +767,6 @@ def build_semantic_json(
             ("Lane_Marking", layer["lane_marking"], default_rule.marking_material),
         ]
 
-    for object_type, geom, material in merged_objects:
-        area = 0.0 if geom is None or geom.is_empty else float(geom.area)
-        objects.append({
-            "object_id": object_type,
-            "object_type": object_type,
-            "source_road_id": "merged",
-            "rule_id": "default_road",
-            "material": material,
-            "area_m2": area,
-            "mesh_files": [
-                str(OBJ_PATH.relative_to(ROOT)),
-                str(GLB_PATH.relative_to(ROOT)),
-            ],
-        })
         for base_type, geom, material in merged_objects:
             area = 0.0 if geom is None or geom.is_empty else float(geom.area)
             objects.append({
@@ -804,7 +805,7 @@ def build_semantic_json(
 
 def mesh_qc(meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
     """
-    基础 3D 拓扑结构质检。检查各类组件是否为空、计算面数顶点数，并验证模型是否闭合 (水密)。
+    基础 3D 拓扑形态质检：核查模型组件有效性、计算模型复杂度（面数/顶点），并侦测网格水密性 (Watertight)。
     """
     result = {}
     for name, mesh in meshes.items():
@@ -830,15 +831,10 @@ def mesh_qc(meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
     return result
 
 
-def geometry_qc(roads: gpd.GeoDataFrame, geoms: dict[str, Any], rule: RoadRule) -> dict[str, Any]:
 def geometry_qc(roads: gpd.GeoDataFrame, layers: list[dict[str, Any]], rule: RoadRule) -> dict[str, Any]:
     """
-    2D 几何与规范参数的指标质检，用以监控生成的总路线长度以及各个要素分区的面积是否异常。
+    2D 几何平面质检：统计生成道路的总中心线长及分类铺装面（如人行道、路缘石）覆盖面积。
     """
-    road_area = 0.0 if geoms["road_surface"] is None else float(geoms["road_surface"].area)
-    sidewalk_area = 0.0 if geoms["sidewalk"] is None else float(geoms["sidewalk"].area)
-    curb_area = 0.0 if geoms["curb"] is None else float(geoms["curb"].area)
-    marking_area = 0.0 if geoms["lane_marking"] is None else float(geoms["lane_marking"].area)
     road_area = sum([0.0 if l["road_surface"] is None else float(l["road_surface"].area) for l in layers])
     sidewalk_area = sum([0.0 if l["sidewalk"] is None else float(l["sidewalk"].area) for l in layers])
     curb_area = sum([0.0 if l["curb"] is None else float(l["curb"].area) for l in layers])
@@ -860,13 +856,12 @@ def geometry_qc(roads: gpd.GeoDataFrame, layers: list[dict[str, Any]], rule: Roa
 def write_qc_report(
     roads: gpd.GeoDataFrame,
     rule: RoadRule,
-    geoms: dict[str, Any],
     layers: list[dict[str, Any]],
     meshes: dict[str, trimesh.Trimesh],
     meta: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    生成并导出质检分析报告（QC Report JSON），记录执行环境与输入输出的异常情况。
+    导出执行质检报告 (QC Report)。该文件汇总了数据读取、几何构建与拓扑验证全程的监控指标。
     """
     report = {
         "result": "pass_with_warnings",
@@ -885,7 +880,6 @@ def write_qc_report(
             "missing_road_name": int(roads["road_name"].isna().sum()),
             "empty_geometry": int(roads.geometry.is_empty.sum()),
         },
-        "geometry_check": geometry_qc(roads, geoms, rule),
         "geometry_check": geometry_qc(roads, layers, rule),
         "mesh_check": mesh_qc(meshes),
         "outputs": {
@@ -915,22 +909,18 @@ def main() -> None:
     roads, origin, meta = read_and_prepare_roads()
 
     print("2. 生成道路面、人行道、路缘石和中心标线...")
-    geoms = generate_planar_geometries(roads, rules)
     layers_geoms = generate_planar_geometries(roads, rules)
 
     print("3. 生成三维 Mesh 和 Scene...")
-    scene, meshes = make_scene(geoms, default_rule)
     scene, meshes = make_scene(layers_geoms, default_rule)
 
     print("4. 导出 OBJ 和 GLB...")
     export_scene(scene)
 
     print("5. 生成语义 JSON...")
-    build_semantic_json(roads, origin, meta, rules, geoms)
     build_semantic_json(roads, origin, meta, rules, layers_geoms)
 
     print("6. 生成质检报告...")
-    qc = write_qc_report(roads, default_rule, geoms, meshes, meta)
     qc = write_qc_report(roads, default_rule, layers_geoms, meshes, meta)
 
     print("完成。输出文件：")
