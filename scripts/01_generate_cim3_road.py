@@ -607,7 +607,8 @@ def polygon_to_extruded_mesh(geom, z_bottom: float, z_top: float, name: str, vis
         # 1. 生成 顶面 与 底面 的网格 (采用约束多边形算法)
         try:
             verts, fcs = triangulate_polygon(poly)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Polygon 挤出三角剖分失败 ({name}): {e}")
             continue
 
         for f in fcs:
@@ -898,6 +899,7 @@ def write_qc_report(
 
 
 def main() -> None:
+
     """
     主函数入口。串联道路生成的全套流水线流程。
     """
