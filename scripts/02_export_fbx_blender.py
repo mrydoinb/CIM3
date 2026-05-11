@@ -16,6 +16,7 @@ blender --background --python scripts/02_export_fbx_blender.py
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 import bpy
 
@@ -23,6 +24,7 @@ import bpy
 ROOT = Path(__file__).resolve().parents[1]
 OBJ_PATH = ROOT / "output" / "obj" / "road_test.obj"
 FBX_PATH = ROOT / "output" / "fbx" / "road_test.fbx"
+MATERIAL_SCRIPT = ROOT / "scripts" / "03_apply_materials_blender.py"
 
 
 def clear_scene() -> None:
@@ -55,9 +57,21 @@ def export_fbx(path: Path) -> None:
     )
 
 
+def apply_materials() -> None:
+    spec = importlib.util.spec_from_file_location("road_materials", MATERIAL_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load material script: {MATERIAL_SCRIPT}")
+
+    material_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(material_module)
+    material_module.ensure_dirs()
+    material_module.apply_materials_to_scene()
+
+
 def main() -> None:
     clear_scene()
     import_obj(OBJ_PATH)
+    apply_materials()
 
     # 设置单位为米
     bpy.context.scene.unit_settings.system = "METRIC"
