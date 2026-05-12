@@ -42,6 +42,7 @@ import shapely
 from shapely.geometry import (
     LineString,
     MultiLineString,
+    Point,
     Polygon,
     MultiPolygon,
     GeometryCollection,
@@ -72,6 +73,9 @@ LOCAL_ROADS_PATH = PROCESSED_DIR / "road_centerline_local.geojson"
 
 # 安联球场位于德国慕尼黑，适合用 UTM Zone 32N
 TARGET_CRS = "EPSG:32632"
+ROAD_LINK_GAP_TOLERANCE_M = 2.5
+MIN_CONNECTOR_LENGTH_M = 0.05
+BRIDGE_ELEVATION_GROUP_M = 3.0
 
 
 @dataclass
@@ -440,23 +444,90 @@ def line_buffer(line: LineString, width: float):
     return line.buffer(width / 2.0, cap_style=2, join_style=2)
 
 
+def road_endpoint_points(line: LineString) -> list[Point]:
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return []
+    return [Point(coords[0]), Point(coords[-1])]
+
+
+def build_short_road_connectors(
+    lines: list[LineString],
+    tolerance: float = ROAD_LINK_GAP_TOLERANCE_M,
+) -> list[LineString]:
+    """Bridge small same-level centerline gaps before buffering road surfaces."""
+    connectors: list[LineString] = []
+    seen: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+
+    for i, line in enumerate(lines):
+        for endpoint in road_endpoint_points(line):
+            best_point = None
+            best_distance = tolerance
+
+            for j, other in enumerate(lines):
+                if i == j or other.is_empty:
+                    continue
+
+                projected = other.interpolate(other.project(endpoint))
+                distance = endpoint.distance(projected)
+                if MIN_CONNECTOR_LENGTH_M < distance <= best_distance:
+                    best_distance = distance
+                    best_point = projected
+
+            if best_point is None:
+                continue
+
+            a = (round(endpoint.x, 3), round(endpoint.y, 3))
+            b = (round(best_point.x, 3), round(best_point.y, 3))
+            key = tuple(sorted([a, b]))
+            if key in seen:
+                continue
+
+            connector = LineString([endpoint, best_point])
+            if connector.length > MIN_CONNECTOR_LENGTH_M:
+                connectors.append(connector)
+                seen.add(key)
+
+    if connectors:
+        print(f"补齐道路小断缝连接段: {len(connectors)} 条")
+    return connectors
+
+
+def road_topology_group(row: pd.Series) -> str:
+    """Group roads for planar merging without letting bridges fuse into ground roads."""
+    if bool(row.get("is_bridge", False)):
+        elevation = float(row.get("elevation", 0.0))
+        bucket = round(elevation / BRIDGE_ELEVATION_GROUP_M)
+        return f"bridge_{bucket}"
+    return "ground"
+
+
 def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule]) -> list[dict[str, Any]]:
     """
     按高程层级聚类并批量生成路面、人行道、路缘石及交通标线的 2D 几何面。
     分离特性：处于不同高程的路网（如高架路与底层道路）保持拓扑独立，互不相交穿模。
     """
     layers_geoms = []
+    grouped_roads = roads.copy()
+    grouped_roads["topology_group"] = grouped_roads.apply(road_topology_group, axis=1)
 
     # 依据高程对道路进行分组处理
-    for elevation, group in roads.groupby("elevation"):
+    for topology_group, group in grouped_roads.groupby("topology_group"):
+        elevation = float(group["elevation"].mean())
         road_surfaces = []
         total_surfaces = []
         lane_markings = []
+        road_entries = []
+        default_rule = rules.get("default_road")
 
         for _, row in group.iterrows():
             line: LineString = row.geometry
             rule = get_road_rule(row, rules)
+            if line is None or line.is_empty:
+                continue
+            road_entries.append((line, rule))
 
+        for line, rule in road_entries:
             road_surface = line_buffer(line, rule.road_width)
             total_surface = line_buffer(line, rule.road_width + 2 * rule.sidewalk_width)
 
@@ -470,6 +541,19 @@ def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRul
             if not marking.is_empty:
                 lane_markings.append(marking)
 
+        for connector in build_short_road_connectors([line for line, _ in road_entries]):
+            road_surface = line_buffer(connector, default_rule.road_width)
+            total_surface = line_buffer(connector, default_rule.road_width + 2 * default_rule.sidewalk_width)
+
+            if not road_surface.is_empty:
+                road_surfaces.append(road_surface)
+
+            if not total_surface.is_empty:
+                total_surfaces.append(total_surface)
+
+        if not road_surfaces or not total_surfaces:
+            continue
+
         # [核心] 仅对相同高程组内部的道路对象执行布尔并集 (初步路口与渠化融合)
         merged_road = clean_polygonal(unary_union(road_surfaces))
         merged_total = clean_polygonal(unary_union(total_surfaces))
@@ -479,7 +563,6 @@ def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRul
 
         sidewalk = clean_polygonal(merged_total.difference(merged_road))
 
-        default_rule = rules.get("default_road")
         curb = clean_polygonal(merged_road.buffer(default_rule.curb_width, join_style=2).difference(merged_road))
 
         lane_marking_union = clean_polygonal(unary_union(lane_markings).intersection(merged_road))
