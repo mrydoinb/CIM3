@@ -224,7 +224,7 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     roads["geometry_global"] = roads.geometry
     roads["geometry"] = roads.geometry.apply(lambda geom: translate_to_local(geom, origin))
 
-    # 提取核心所需的属性列，保存处理完毕的局部路网 GeoJSON
+    # 提取核心所需的属性列，保存处理完毕的局部路网 GeoJSON 
     keep_cols = [
         "road_id", "road_name", "road_class", "lane_count", "maxspeed", 
         "oneway", "is_bridge", "road_ref", "access", "elevation", "length_m", 
@@ -333,10 +333,12 @@ def get_elevations(row: pd.Series, dgm_srcs: list) -> pd.Series:
                 if bounds.left <= x <= bounds.right and bounds.bottom <= y <= bounds.top:
                     try:
                         val = next(src.sample([(x, y)]))[0]
+                        print(f"坐标点 ({x:.2f}, {y:.2f}) 被高程切片覆盖，采样高度: {float(val):.2f}m")
                         return float(val)
                     except Exception:
                         pass
         # 如果没有 DGM 或图幅均未覆盖该点，使用安联球场基准高度 (约 505m) 模拟
+        print(f"坐标点 ({pt[0]:.2f}, {pt[1]:.2f}) 未被覆盖，使用默认模拟高度: 505.0m")
         return 505.0
 
     ground_z_start = sample_z(start_pt)
