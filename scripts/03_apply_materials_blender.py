@@ -120,9 +120,9 @@ MATERIAL_LIBRARY = {
 # 贴图名称特征词（模糊匹配用）：
 # 用于在文件夹里自动猜测哪张图片是彩色图、哪张是粗糙度图、哪张是法线图。
 TEXTURE_HINTS = {
-    "asphalt": ["asphalt_track"],
-    "concrete": ["patterned_concrete_pavers"],
-    "curb": ["gravel_concrete_04"],
+    "asphalt": ["asphalt_track", "road012a"],
+    "concrete": ["patterned_concrete_pavers", "pavingstones006"],
+    "curb": ["gravel_concrete_04", "concrete048"],
     "marking": ["marking", "paint", "line", "white"],
 }
 
