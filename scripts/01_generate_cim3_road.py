@@ -124,9 +124,6 @@ def ensure_dirs() -> None:
     for path in [
         PROCESSED_DIR,
         OBJ_PATH.parent,
-        GLB_PATH.parent,
-        SEMANTIC_PATH.parent,
-        QC_PATH.parent,
     ]:
         path.mkdir(parents=True, exist_ok=True)
 
@@ -714,10 +711,9 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
 
 def export_scene(scene: trimesh.Scene) -> None:
     """
-    将整个 trimesh 场景批量导出为 OBJ 和 GLTF(GLB) 文件。
+    将整个 trimesh 场景导出为 OBJ。FBX 在 Blender 材质流程中导出。
     """
     scene.export(OBJ_PATH)
-    scene.export(GLB_PATH)
 
 
 def build_semantic_json(
@@ -919,21 +915,11 @@ def main() -> None:
     print("3. 生成三维 Mesh 和 Scene...")
     scene, meshes = make_scene(layers_geoms, default_rule)
 
-    print("4. 导出 OBJ 和 GLB...")
+    print("4. 导出 OBJ...")
     export_scene(scene)
-
-    print("5. 生成语义 JSON...")
-    build_semantic_json(roads, origin, meta, rules, layers_geoms)
-
-    print("6. 生成质检报告...")
-    qc = write_qc_report(roads, default_rule, layers_geoms, meshes, meta)
 
     print("完成。输出文件：")
     print(f"- {OBJ_PATH}")
-    print(f"- {GLB_PATH}")
-    print(f"- {SEMANTIC_PATH}")
-    print(f"- {QC_PATH}")
-    print(f"- {LOCAL_ROADS_PATH}")
 
 
 if __name__ == "__main__":

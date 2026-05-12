@@ -12,10 +12,12 @@ blender --background --python scripts/03_apply_materials_blender.py
 from __future__ import annotations
 
 import json
+import math
 import os
 
 # 导入 Blender 的 Python API 核心库。只有在 Blender 环境下运行才有效。
 import bpy
+from mathutils import Vector
 
 
 # ==========================================
@@ -25,6 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OBJ_PATH = os.path.join(ROOT, "output", "obj", "road_test.obj")
 GLB_OUT = os.path.join(ROOT, "output", "gltf", "road_test_realistic.glb")
 BLEND_OUT = os.path.join(ROOT, "output", "road_test_realistic.blend")
+RENDER_PREVIEW_OUT = os.path.join(ROOT, "output", "render", "road_test_material_preview.png")
 RULE_PATH = os.path.join(ROOT, "data", "rules", "road_rules.json")
 TEXTURE_ROOT = os.path.join(ROOT, "assets", "textures")
 
@@ -143,7 +146,6 @@ TEXTURE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".exr", ".tif", ".tiff"]
 # ==========================================
 def ensure_dirs() -> None:
     """确保贴图库的目录结构存在，方便用户后续往里面丢图片。"""
-    os.makedirs(os.path.dirname(GLB_OUT), exist_ok=True)
     for mat_dir in ["asphalt", "concrete", "curb_concrete", "road_marking"]:
         os.makedirs(os.path.join(TEXTURE_ROOT, mat_dir), exist_ok=True)
 
@@ -362,6 +364,77 @@ def create_cityengine_material(material_id: str, definition: dict):
     return mat
 
 
+def create_image_node(nodes, path: str, colorspace: str):
+    image = bpy.data.images.load(path, check_existing=True)
+    image.colorspace_settings.name = colorspace
+    node = nodes.new(type="ShaderNodeTexImage")
+    node.image = image
+    return node
+
+
+def simplify_material_for_fbx_export(mat, material_id: str, definition: dict) -> None:
+    """
+    FBX exporters/viewers only understand a small subset of Blender shader nodes.
+    Rebuild a simple exchange material so base color textures survive FBX export.
+    """
+    mat.diffuse_color = definition["viewport_color"]
+    mat.use_nodes = True
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    output = nodes.new(type="ShaderNodeOutputMaterial")
+    output.location = (500, 0)
+    bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+    bsdf.location = (250, 0)
+    links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+
+    fallback = definition["fallback"]
+    set_principled_input(bsdf, "Metallic", 0.0)
+    set_principled_input(bsdf, "Roughness", fallback["roughness"])
+    set_principled_input(bsdf, "Base Color", fallback["base"])
+
+    tex_dir = os.path.join(TEXTURE_ROOT, definition["texture_dir"])
+    mat_type = definition["texture_type"]
+    base_path = find_texture_file(tex_dir, mat_type, "basecolor")
+    rough_path = find_texture_file(tex_dir, mat_type, "roughness")
+    normal_path = find_texture_file(tex_dir, mat_type, "normal")
+
+    if base_path:
+        base = create_image_node(nodes, base_path, "sRGB")
+        base.location = (-350, 180)
+        links.new(base.outputs["Color"], bsdf.inputs["Base Color"])
+        print(f"{mat.name}: FBX base color texture -> {base_path}")
+
+    if rough_path:
+        rough = create_image_node(nodes, rough_path, "Non-Color")
+        rough.location = (-350, -40)
+        links.new(rough.outputs["Color"], bsdf.inputs["Roughness"])
+
+    if normal_path:
+        normal = create_image_node(nodes, normal_path, "Non-Color")
+        normal.location = (-350, -260)
+        normal_map = nodes.new(type="ShaderNodeNormalMap")
+        normal_map.location = (-70, -260)
+        links.new(normal.outputs["Color"], normal_map.inputs["Color"])
+        links.new(normal_map.outputs["Normal"], bsdf.inputs["Normal"])
+
+
+def prepare_materials_for_fbx_export() -> None:
+    """Convert generated materials to a compact FBX-friendly shader graph."""
+    for mat in bpy.data.materials:
+        material_id = mat.get("cityengine_material_id")
+        if not material_id:
+            continue
+
+        definition = MATERIAL_LIBRARY.get(material_id)
+        if definition is None:
+            continue
+
+        simplify_material_for_fbx_export(mat, material_id, definition)
+
+
 # ==========================================
 # 4. 几何 UV 处理与装配分配
 # ==========================================
@@ -444,20 +517,92 @@ def clear_imported_vertex_colors(obj) -> None:
         color_attributes.remove(color_attributes[0])
 
 
-def configure_scene_for_material_review() -> None:
-    """
-    设置保存出的 .blend 文件的预览环境。
-    切换到光线追踪引擎(Cycles)并打上一盏太阳光，确保你一打开文件就能看到非常棒的效果。
-    """
-    bpy.context.scene.render.engine = "CYCLES"
-    bpy.context.scene.world.color = (0.78, 0.82, 0.86)
+def scene_mesh_bounds() -> tuple[Vector, Vector] | None:
+    mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+    if not mesh_objects:
+        return None
 
-    if not any(obj.type == "LIGHT" for obj in bpy.data.objects):
-        bpy.ops.object.light_add(type="SUN", location=(0.0, 0.0, 900.0))
-        sun = bpy.context.object
-        sun.name = "Material_Review_Sun"
-        sun.data.energy = 2.5
-        sun.rotation_euler = (0.9, 0.0, -0.6)
+    min_corner = Vector((float("inf"), float("inf"), float("inf")))
+    max_corner = Vector((float("-inf"), float("-inf"), float("-inf")))
+    for obj in mesh_objects:
+        for corner in obj.bound_box:
+            world_corner = obj.matrix_world @ Vector(corner)
+            min_corner.x = min(min_corner.x, world_corner.x)
+            min_corner.y = min(min_corner.y, world_corner.y)
+            min_corner.z = min(min_corner.z, world_corner.z)
+            max_corner.x = max(max_corner.x, world_corner.x)
+            max_corner.y = max(max_corner.y, world_corner.y)
+            max_corner.z = max(max_corner.z, world_corner.z)
+    return min_corner, max_corner
+
+
+def point_camera_at(camera, target: Vector) -> None:
+    direction = target - camera.location
+    camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def configure_scene_for_material_review() -> None:
+    """Configure the saved .blend as a ready-to-open material review scene."""
+    scene = bpy.context.scene
+    scene.unit_settings.system = "METRIC"
+    scene.unit_settings.scale_length = 1.0
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = 64
+    scene.cycles.preview_samples = 32
+    scene.view_settings.view_transform = "Filmic"
+    scene.view_settings.look = "Medium High Contrast"
+    scene.view_settings.exposure = 0.0
+    scene.view_settings.gamma = 1.0
+    scene.render.resolution_x = 1920
+    scene.render.resolution_y = 1080
+    scene.render.filepath = RENDER_PREVIEW_OUT
+    scene.render.film_transparent = False
+    scene.world.color = (0.78, 0.82, 0.86)
+
+    bounds = scene_mesh_bounds()
+    if bounds is None:
+        return
+
+    min_corner, max_corner = bounds
+    center = (min_corner + max_corner) * 0.5
+    extent = max_corner - min_corner
+    diagonal = max(extent.length, 1.0)
+    max_xy = max(extent.x, extent.y, 1.0)
+
+    for obj in list(bpy.data.objects):
+        if obj.type == "LIGHT" and obj.name.startswith("Material_Review_"):
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    bpy.ops.object.light_add(type="SUN", location=(center.x, center.y, center.z + diagonal))
+    sun = bpy.context.object
+    sun.name = "Material_Review_Sun"
+    sun.data.energy = 2.2
+    sun.rotation_euler = (math.radians(55.0), 0.0, math.radians(-35.0))
+
+    bpy.ops.object.light_add(
+        type="AREA",
+        location=(center.x - max_xy * 0.35, center.y - max_xy * 0.45, center.z + diagonal * 0.55),
+    )
+    area = bpy.context.object
+    area.name = "Material_Review_Area"
+    area.data.energy = 450.0
+    area.data.size = max(max_xy * 0.4, 10.0)
+
+    camera = bpy.data.objects.get("Material_Review_Camera")
+    if camera is None:
+        bpy.ops.object.camera_add()
+        camera = bpy.context.object
+        camera.name = "Material_Review_Camera"
+    camera.location = center + Vector((-diagonal * 0.45, -diagonal * 0.62, diagonal * 0.38))
+    camera.data.lens = 35
+    camera.data.sensor_width = 32
+    camera.data.dof.use_dof = False
+    point_camera_at(camera, center)
+    scene.camera = camera
+
+    for obj in bpy.data.objects:
+        obj.select_set(obj.type == "MESH")
+    bpy.context.view_layer.objects.active = camera
 
 
 def apply_materials_to_scene() -> None:
@@ -498,6 +643,9 @@ def apply_materials_to_scene() -> None:
 def main() -> None:
     """主函数执行入口。"""
     ensure_dirs()
+    os.makedirs(os.path.dirname(GLB_OUT), exist_ok=True)
+    os.makedirs(os.path.dirname(BLEND_OUT), exist_ok=True)
+    os.makedirs(os.path.dirname(RENDER_PREVIEW_OUT), exist_ok=True)
     clear_scene()
     import_obj(OBJ_PATH)
     apply_materials_to_scene()

@@ -54,6 +54,8 @@ def export_fbx(path: Path) -> None:
         object_types={"MESH"},
         mesh_smooth_type="FACE",
         add_leaf_bones=False,
+        path_mode="COPY",
+        embed_textures=True,
     )
 
 
@@ -66,6 +68,7 @@ def apply_materials() -> None:
     spec.loader.exec_module(material_module)
     material_module.ensure_dirs()
     material_module.apply_materials_to_scene()
+    material_module.prepare_materials_for_fbx_export()
 
 
 def main() -> None:
