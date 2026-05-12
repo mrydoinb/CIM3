@@ -26,27 +26,27 @@ cim_road_poc/
 │   │   ├── road_centerline.geojson
 │   │   ├── building_footprint.geojson
 │   │   ├── transport_points.geojson
-│   │   └── road_centerline/*.tif
+│   │   └── road_centerline/*.tif   # DGM/DEM 切片
 │   ├── processed/
 │   │   └── road_centerline_local.geojson
 │   └── rules/
-│       └── road_rules.json
+│       └── road_rules.json   # 道路规则
 ├── scripts/
-│   ├── 00_download_allianz_arena_osm.py
-│   ├── 01_generate_cim3_road.py
-│   ├── 02_export_fbx_blender.py
-│   ├── 03_apply_materials_blender.py
-│   └── 04_inspect_blend_materials.py
+│   ├── 00_download_allianz_arena_osm.py # 下载 OSM 数据
+│   ├── 01_generate_cim3_road.py # 几何生成
+│   ├── 02_export_fbx_blender.py # FBX 导出
+│   ├── 03_apply_materials_blender.py # 材质贴合
+│   └── 04_inspect_blend_materials.py # 材质验证脚本
 ├── output/
-│   ├── obj/road_test.obj
-│   ├── gltf/road_test.glb
-│   ├── gltf/road_test_realistic.glb
-│   ├── fbx/road_test.fbx
-│   ├── road_test_realistic.blend
-│   ├── semantic/road_test_semantic.json
-│   └── qc_report/road_test_qc_report.json
-├── run_workflow.bat
-└── run_workflow.sh
+│   ├── obj/road_test.obj # 基础 OBJ
+│   ├── gltf/road_test.glb # 基础 GLB
+│   ├── gltf/road_test_realistic.glb # 真实材质 GLB
+│   ├── fbx/road_test.fbx # FBX
+│   ├── road_test_realistic.blend # 材质贴合预览
+│   ├── semantic/road_test_semantic.json # 语义
+│   └── qc_report/road_test_qc_report.json # 质检
+├── run_workflow.bat # Windows
+└── run_workflow.sh # Linux/macOS 或 Git Bash
 ```
 
 ## 3. 数据输入与规则配置
