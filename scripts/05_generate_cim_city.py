@@ -12,6 +12,12 @@ Inputs:
 
 Output:
 - output/obj/cim_city.obj
+- output/obj/modules/cim_city_roads.obj
+- output/obj/modules/cim_city_buildings.obj
+- output/obj/modules/cim_city_subway_tunnels.obj
+- output/obj/modules/cim_city_subway_stations.obj
+- output/obj/modules/cim_city_bus_stops.obj
+- output/obj/modules/cim_city_utility_pipes.obj
 """
 
 from __future__ import annotations
@@ -41,6 +47,15 @@ spec.loader.exec_module(road_gen)
 
 RAW_DIR = ROOT / "data" / "raw"
 OUT_PATH = ROOT / "output" / "obj" / "cim_city.obj"
+MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
+MODULE_OBJ_PATHS = {
+    "roads": MODULE_OBJ_DIR / "cim_city_roads.obj",
+    "buildings": MODULE_OBJ_DIR / "cim_city_buildings.obj",
+    "subway_tunnels": MODULE_OBJ_DIR / "cim_city_subway_tunnels.obj",
+    "subway_stations": MODULE_OBJ_DIR / "cim_city_subway_stations.obj",
+    "bus_stops": MODULE_OBJ_DIR / "cim_city_bus_stops.obj",
+    "utility_pipes": MODULE_OBJ_DIR / "cim_city_utility_pipes.obj",
+}
 TARGET_CRS = road_gen.TARGET_CRS
 
 BUILDING_DEFAULT_HEIGHT_M = 12.0
@@ -210,13 +225,13 @@ def prepare_roads_for_surfaces(roads: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return prepared
 
 
-def add_road_surfaces(scene: trimesh.Scene, roads: gpd.GeoDataFrame) -> int:
+def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
     if roads.empty:
-        return 0
+        return {}
 
     prepared_roads = prepare_roads_for_surfaces(roads)
     if prepared_roads.empty:
-        return 0
+        return {}
 
     rules = road_gen.load_rules()
     default_rule = rules.get("default_road")
@@ -224,30 +239,26 @@ def add_road_surfaces(scene: trimesh.Scene, roads: gpd.GeoDataFrame) -> int:
         raise ValueError("Missing default_road rule in road_rules.json")
 
     layers = road_gen.generate_planar_geometries(prepared_roads, rules)
-    road_scene, road_meshes = road_gen.make_scene(layers, default_rule)
-
-    for name, mesh in road_meshes.items():
-        scene.add_geometry(mesh.copy(), node_name=name, geom_name=name)
-
-    return len(road_meshes)
+    _, road_meshes = road_gen.make_scene(layers, default_rule)
+    return {name: mesh.copy() for name, mesh in road_meshes.items()}
 
 
-def add_buildings(scene: trimesh.Scene, buildings: gpd.GeoDataFrame) -> int:
-    count = 0
+def build_building_meshes(buildings: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
+    meshes = {}
     for idx, row in buildings.iterrows():
         height = building_height(row)
+        name = f"Building_{idx}"
         mesh = road_gen.polygon_to_extruded_mesh(
             row.geometry,
             z_bottom=0.0,
             z_top=height,
-            name=f"Building_{idx}",
+            name=name,
             visual_color=COLORS["building"],
         )
         if len(mesh.vertices) == 0:
             continue
-        scene.add_geometry(mesh, node_name=f"Building_{idx}", geom_name=f"Building_{idx}")
-        count += 1
-    return count
+        meshes[name] = mesh
+    return meshes
 
 
 def subway_like(row) -> bool:
@@ -257,8 +268,8 @@ def subway_like(row) -> bool:
     return railway == "subway" or tunnel in {"yes", "true"} or layer < 0
 
 
-def add_subway_tunnels(scene: trimesh.Scene, railways: gpd.GeoDataFrame) -> int:
-    count = 0
+def build_subway_tunnel_meshes(railways: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
+    meshes = {}
     for idx, row in railways.iterrows():
         if not subway_like(row):
             continue
@@ -275,9 +286,8 @@ def add_subway_tunnels(scene: trimesh.Scene, railways: gpd.GeoDataFrame) -> int:
                 )
                 if mesh is None:
                     continue
-                scene.add_geometry(mesh, node_name=mesh.metadata["name"], geom_name=mesh.metadata["name"])
-                count += 1
-    return count
+                meshes[mesh.metadata["name"]] = mesh
+    return meshes
 
 
 def is_subway_station(row) -> bool:
@@ -286,9 +296,11 @@ def is_subway_station(row) -> bool:
     return "subway" in values or "u-bahn" in values or "station" in values
 
 
-def add_transit_nodes(scene: trimesh.Scene, transport: gpd.GeoDataFrame) -> tuple[int, int]:
-    subway_count = 0
-    bus_count = 0
+def build_transit_node_meshes(
+    transport: gpd.GeoDataFrame,
+) -> tuple[dict[str, trimesh.Trimesh], dict[str, trimesh.Trimesh]]:
+    subway_station_meshes = {}
+    bus_stop_meshes = {}
     for idx, row in transport.iterrows():
         point = representative_point(row.geometry)
         if point is None:
@@ -301,14 +313,12 @@ def add_transit_nodes(scene: trimesh.Scene, transport: gpd.GeoDataFrame) -> tupl
                 SUBWAY_STATION_SIZE_M,
                 COLORS["subway_station"],
             )
-            scene.add_geometry(mesh, node_name=name, geom_name=name)
-            subway_count += 1
+            subway_station_meshes[name] = mesh
         elif str(row.get("highway", "")).lower() == "bus_stop" or str(row.get("bus", "")).lower() == "yes":
             name = f"Bus_Stop_{idx}"
             mesh = make_box(name, (point.x, point.y, 1.3), (3.0, 1.4, 2.6), COLORS["bus_stop"])
-            scene.add_geometry(mesh, node_name=name, geom_name=name)
-            bus_count += 1
-    return subway_count, bus_count
+            bus_stop_meshes[name] = mesh
+    return subway_station_meshes, bus_stop_meshes
 
 
 def offset_segment(a, b, offset: float) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -324,8 +334,8 @@ def offset_segment(a, b, offset: float) -> tuple[tuple[float, float], tuple[floa
     return (ax + nx * offset, ay + ny * offset), (bx + nx * offset, by + ny * offset)
 
 
-def add_utility_pipes(scene: trimesh.Scene, roads: gpd.GeoDataFrame) -> int:
-    count = 0
+def build_utility_pipe_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
+    meshes = {}
     for road_idx, row in roads.iterrows():
         for line in iter_lines(row.geometry):
             coords = list(line.coords)
@@ -343,9 +353,36 @@ def add_utility_pipes(scene: trimesh.Scene, roads: gpd.GeoDataFrame) -> int:
                     )
                     if mesh is None:
                         continue
-                    scene.add_geometry(mesh, node_name=name, geom_name=name)
-                    count += 1
-    return count
+                    meshes[name] = mesh
+    return meshes
+
+
+def scene_from_meshes(meshes: dict[str, trimesh.Trimesh]) -> trimesh.Scene:
+    scene = trimesh.Scene()
+    for name, mesh in meshes.items():
+        scene.add_geometry(mesh.copy(), node_name=name, geom_name=name)
+    return scene
+
+
+def compose_city_scene(modules: dict[str, dict[str, trimesh.Trimesh]]) -> trimesh.Scene:
+    scene = trimesh.Scene()
+    for meshes in modules.values():
+        for name, mesh in meshes.items():
+            scene.add_geometry(mesh.copy(), node_name=name, geom_name=name)
+    return scene
+
+
+def export_module_scenes(modules: dict[str, dict[str, trimesh.Trimesh]]) -> dict[str, Path | None]:
+    exported = {}
+    MODULE_OBJ_DIR.mkdir(parents=True, exist_ok=True)
+    for module_name, meshes in modules.items():
+        path = MODULE_OBJ_PATHS[module_name]
+        if not meshes:
+            exported[module_name] = None
+            continue
+        scene_from_meshes(meshes).export(path)
+        exported[module_name] = path
+    return exported
 
 
 def main() -> None:
@@ -360,22 +397,28 @@ def main() -> None:
     transport = localize(transport, origin)
     railways = localize(railways, origin)
 
-    scene = trimesh.Scene()
-    stats = {
-        "road_meshes": add_road_surfaces(scene, roads),
-        "buildings": add_buildings(scene, buildings),
-        "subway_tunnels": add_subway_tunnels(scene, railways),
-        "utility_pipes": add_utility_pipes(scene, roads),
+    subway_station_meshes, bus_stop_meshes = build_transit_node_meshes(transport)
+    modules = {
+        "roads": build_road_surface_meshes(roads),
+        "buildings": build_building_meshes(buildings),
+        "subway_tunnels": build_subway_tunnel_meshes(railways),
+        "subway_stations": subway_station_meshes,
+        "bus_stops": bus_stop_meshes,
+        "utility_pipes": build_utility_pipe_meshes(roads),
     }
-    subway_stations, bus_stops = add_transit_nodes(scene, transport)
-    stats["subway_stations"] = subway_stations
-    stats["bus_stops"] = bus_stops
+    stats = {module_name: len(meshes) for module_name, meshes in modules.items()}
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    scene = compose_city_scene(modules)
     scene.export(OUT_PATH)
+    module_outputs = export_module_scenes(modules)
 
     print("CIM city OBJ generated:")
     print(f"- {OUT_PATH}")
+    print("- module OBJ outputs:")
+    for module_name, path in module_outputs.items():
+        output_text = str(path) if path is not None else "skipped (no geometry)"
+        print(f"  - {module_name}: {output_text}")
     for key, value in stats.items():
         print(f"- {key}: {value}")
 

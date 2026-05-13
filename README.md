@@ -52,4 +52,3 @@ output/
 请阅读：
 
 - [docs/cim_city_technical_documentation.md](docs/cim_city_technical_documentation.md)
-- [scripts/README.md](scripts/README.md)

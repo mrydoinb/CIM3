@@ -88,39 +88,21 @@ output/fbx/cim_city.fbx
 blender --background --python scripts/07_inspect_fbx_materials_blender.py
 ```
 
-## 道路单体流程
+## Road-only OBJ generation
 
-道路单体流程仍然保留，主要用于道路材质和道路规则调试。
+The old road-only Blender FBX/material scripts were removed. The remaining road-only entry is:
 
 ```text
 01_generate_cim3_road.py
-  -> 02_export_fbx_blender.py
 ```
 
 ### `01_generate_cim3_road.py`
 
-职责：
+Responsibilities:
 
-- 从道路中心线生成 CIM3 道路三维几何。
-- 生成道路面、人行道、路缘和车道标线。
-- 优化道路端点连接。
-- 为城市级脚本提供道路生成算法复用。
-
-### `02_export_fbx_blender.py`
-
-职责：
-
-- 导入道路单体 OBJ。
-- 调用 `03_apply_materials_blender.py` 分配道路 PBR 材质。
-- 导出道路单体 FBX。
-
-### `03_apply_materials_blender.py`
-
-职责：
-
-- 构建道路 PBR 材质。
-- 匹配道路、侧步道、路缘、车道标线等对象。
-- 为 FBX 导出准备更稳定的材质节点。
+- Generates CIM3 road geometry from road centerlines.
+- Generates road surfaces, sidewalks, curbs, and lane markings.
+- Provides reusable road generation functions for the city workflow.
 
 ### `04_inspect_blend_materials.py`
 

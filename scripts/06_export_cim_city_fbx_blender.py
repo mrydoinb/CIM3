@@ -9,6 +9,12 @@ Input:
 
 Output:
 - output/fbx/cim_city.fbx
+- output/fbx/modules/cim_city_roads.fbx
+- output/fbx/modules/cim_city_buildings.fbx
+- output/fbx/modules/cim_city_subway_tunnels.fbx
+- output/fbx/modules/cim_city_subway_stations.fbx
+- output/fbx/modules/cim_city_bus_stops.fbx
+- output/fbx/modules/cim_city_utility_pipes.fbx
 """
 
 from __future__ import annotations
@@ -21,6 +27,34 @@ import bpy
 ROOT = Path(__file__).resolve().parents[1]
 OBJ_PATH = ROOT / "output" / "obj" / "cim_city.obj"
 FBX_PATH = ROOT / "output" / "fbx" / "cim_city.fbx"
+MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
+MODULE_FBX_DIR = ROOT / "output" / "fbx" / "modules"
+MODULE_EXPORTS = {
+    "roads": (
+        MODULE_OBJ_DIR / "cim_city_roads.obj",
+        MODULE_FBX_DIR / "cim_city_roads.fbx",
+    ),
+    "buildings": (
+        MODULE_OBJ_DIR / "cim_city_buildings.obj",
+        MODULE_FBX_DIR / "cim_city_buildings.fbx",
+    ),
+    "subway_tunnels": (
+        MODULE_OBJ_DIR / "cim_city_subway_tunnels.obj",
+        MODULE_FBX_DIR / "cim_city_subway_tunnels.fbx",
+    ),
+    "subway_stations": (
+        MODULE_OBJ_DIR / "cim_city_subway_stations.obj",
+        MODULE_FBX_DIR / "cim_city_subway_stations.fbx",
+    ),
+    "bus_stops": (
+        MODULE_OBJ_DIR / "cim_city_bus_stops.obj",
+        MODULE_FBX_DIR / "cim_city_bus_stops.fbx",
+    ),
+    "utility_pipes": (
+        MODULE_OBJ_DIR / "cim_city_utility_pipes.obj",
+        MODULE_FBX_DIR / "cim_city_utility_pipes.fbx",
+    ),
+}
 
 MATERIALS = {
     "Road_Surface": ("CIM_Road_Asphalt", (0.03, 0.03, 0.03, 1.0), 0.78),
@@ -103,16 +137,27 @@ def export_fbx(path: Path) -> None:
     )
 
 
-def main() -> None:
+def export_obj_to_fbx(obj_path: Path, fbx_path: Path) -> bool:
+    if not obj_path.exists():
+        print(f"[SKIP] Missing OBJ input: {obj_path}")
+        return False
+
     clear_scene()
-    import_obj(OBJ_PATH)
+    import_obj(obj_path)
     apply_city_materials()
 
     bpy.context.scene.unit_settings.system = "METRIC"
     bpy.context.scene.unit_settings.scale_length = 1.0
 
-    export_fbx(FBX_PATH)
-    print(f"CIM city FBX exported: {FBX_PATH}")
+    export_fbx(fbx_path)
+    print(f"FBX exported: {fbx_path}")
+    return True
+
+
+def main() -> None:
+    export_obj_to_fbx(OBJ_PATH, FBX_PATH)
+    for _, (obj_path, fbx_path) in MODULE_EXPORTS.items():
+        export_obj_to_fbx(obj_path, fbx_path)
 
 
 if __name__ == "__main__":

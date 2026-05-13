@@ -489,8 +489,6 @@ OSM 通常不提供真实地下管线数据，因此当前管线采用规则生�
 
 ```text
 scripts/01_generate_cim3_road.py
-scripts/02_export_fbx_blender.py
-scripts/03_apply_materials_blender.py
 ```
 
 该流程用于更真实的道路材质验证，包括柏油、人行道铺装、路缘混凝土等贴图材质。但当前 CIM 城市总装输出以 `cim_city.obj/fbx` 为准。
@@ -619,8 +617,6 @@ CIM_Utility_Telecom_Magenta
 |---|---|
 | `scripts/00_download_allianz_arena_osm.py` | 下载慕尼黑中央火车站周边 OSM 原始数据 |
 | `scripts/01_generate_cim3_road.py` | 道路单体 CIM3 生成，城市流程复用其道路几何算法 |
-| `scripts/02_export_fbx_blender.py` | 道路单体 OBJ 转 FBX 并应用道路 PBR 材质 |
-| `scripts/03_apply_materials_blender.py` | 道路 PBR 材质节点构建与 FBX 简化 |
 | `scripts/04_inspect_blend_materials.py` | 检查 Blender 文件材质 |
 | `scripts/05_generate_cim_city.py` | 生成 CIM 城市 OBJ |
 | `scripts/06_export_cim_city_fbx_blender.py` | 导出带材质的 CIM 城市 FBX |
