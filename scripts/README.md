@@ -1,23 +1,153 @@
-# CIM3 道路自动化建模 POC
+# Scripts 技术索引
 
-该项目提供基于 Python/Trimesh 的道路几何网格自动生成以及基于 Blender 的程序化/PBR 材质增强流程。
+本目录包含 CIM 道路与 CIM 城市模型生成脚本。当前主流程是城市级流程，入口为项目根目录的 `run_city_workflow.bat` 或 `run_city_workflow.sh`。
 
-## 运行步骤
+## 城市级主流程
 
-### 1. 基础模型网格生成
-基于 Python/GeoPandas，读取道路网并将拓扑输出为附带高程的基础 3D OBJ / GLTF 模型。
-```bash
-python scripts/01_generate_cim3_road.py
+```text
+00_download_allianz_arena_osm.py
+  -> 05_generate_cim_city.py
+  -> 06_export_cim_city_fbx_blender.py
 ```
-> **输出**：`output/gltf/road_test.glb` (测试级纯色材质)、`output/obj/road_test.obj` 以及相关的语义和质检 Json 报告。
 
-### 2. PBR / 程序化材质增强
-借助 Blender 节点系统对 `road_test.obj` 模型进行自动展 UV 以及材质增强渲染工作（在后台服务模式运行）。
-```bash
-blender --background --python scripts/03_apply_materials_blender.py
+### `00_download_allianz_arena_osm.py`
+
+职责：下载慕尼黑中央火车站周边 OSM 数据。
+
+输出：
+
+```text
+data/raw/road_centerline.geojson
+data/raw/building_footprint.geojson
+data/raw/transport_points.geojson
+data/raw/railway_centerline.geojson
 ```
-> **工作逻辑**：若检测到 `assets/textures/<材质类型>/` 目录下含有 `basecolor.jpg`、`normal.jpg` 等 PBR 贴图，则采用贴图流；若不存在（或不存在完整贴图），脚本不会报错而是自动生成程序化噪波法线材质用于表现颗粒和磨损。
-> **输出**：`output/gltf/road_test_realistic.glb` (支持真实光照折射的高质量模型)
 
-### 说明
-此分离架构设计中，Blender 被单纯作为 **无 UI 的后台渲染转换服务** 处理，核心的语义生成与数据流均封闭在 Python 工程体系中，以此规避和 Blender 生态之间的耦合问题。
+说明：脚本名称保留了历史上的 `allianz_arena`，但实际中心点已经改为 München Hauptbahnhof。
+
+### `05_generate_cim_city.py`
+
+职责：生成 CIM 城市 OBJ。
+
+输入：
+
+```text
+data/raw/road_centerline.geojson
+data/raw/building_footprint.geojson
+data/raw/transport_points.geojson
+data/raw/railway_centerline.geojson
+```
+
+输出：
+
+```text
+output/obj/cim_city.obj
+```
+
+生成对象：
+
+- 道路面、人行道、路缘、车道标线。
+- 建筑体块。
+- 公交站。
+- 地铁站体块。
+- 地铁区间隧道。
+- 给水、污水、电力、通信管线。
+
+### `06_export_cim_city_fbx_blender.py`
+
+职责：将 `cim_city.obj` 导入 Blender，按对象类型分配材质，并导出 `cim_city.fbx`。
+
+输出：
+
+```text
+output/fbx/cim_city.fbx
+```
+
+材质包括：
+
+- `CIM_Road_Asphalt`
+- `CIM_Sidewalk_Concrete`
+- `CIM_Curb_Light_Concrete`
+- `CIM_Lane_Marking_White`
+- `CIM_Building_Concrete`
+- `CIM_Subway_Tunnel_Dark_Concrete`
+- `CIM_Subway_Station_Blue`
+- `CIM_Bus_Stop_Green`
+- `CIM_Utility_Water_Blue`
+- `CIM_Utility_Sewer_Brown`
+- `CIM_Utility_Power_Yellow`
+- `CIM_Utility_Telecom_Magenta`
+
+### `07_inspect_fbx_materials_blender.py`
+
+职责：反向导入 `output/fbx/cim_city.fbx`，统计 Mesh 数量与材质名称，用于确认材质已经写入 FBX。
+
+运行：
+
+```bash
+blender --background --python scripts/07_inspect_fbx_materials_blender.py
+```
+
+## 道路单体流程
+
+道路单体流程仍然保留，主要用于道路材质和道路规则调试。
+
+```text
+01_generate_cim3_road.py
+  -> 02_export_fbx_blender.py
+```
+
+### `01_generate_cim3_road.py`
+
+职责：
+
+- 从道路中心线生成 CIM3 道路三维几何。
+- 生成道路面、人行道、路缘和车道标线。
+- 优化道路端点连接。
+- 为城市级脚本提供道路生成算法复用。
+
+### `02_export_fbx_blender.py`
+
+职责：
+
+- 导入道路单体 OBJ。
+- 调用 `03_apply_materials_blender.py` 分配道路 PBR 材质。
+- 导出道路单体 FBX。
+
+### `03_apply_materials_blender.py`
+
+职责：
+
+- 构建道路 PBR 材质。
+- 匹配道路、侧步道、路缘、车道标线等对象。
+- 为 FBX 导出准备更稳定的材质节点。
+
+### `04_inspect_blend_materials.py`
+
+职责：检查 Blender 文件中的材质状态，主要用于道路 PBR 调试。
+
+## 推荐命令
+
+生成完整 CIM 城市：
+
+```bat
+run_city_workflow.bat
+```
+
+仅重新生成城市 OBJ：
+
+```bash
+python scripts/05_generate_cim_city.py
+```
+
+仅重新导出城市 FBX：
+
+```bash
+blender --background --python scripts/06_export_cim_city_fbx_blender.py
+```
+
+检查城市 FBX 材质：
+
+```bash
+blender --background --python scripts/07_inspect_fbx_materials_blender.py
+```
