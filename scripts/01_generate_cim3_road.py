@@ -29,10 +29,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
-import logging
+import logging 
 import math
 import copy
+import os
 import re
+from urllib.parse import urlencode
 from typing import Iterable, Any
 
 import geopandas as gpd
@@ -48,8 +50,9 @@ from shapely.geometry import (
     GeometryCollection,
     mapping,
 )
-from shapely.ops import unary_union, triangulate
+from shapely.ops import substring, unary_union, triangulate
 import trimesh
+from trimesh.visual.texture import TextureVisuals
 from trimesh.creation import triangulate_polygon
 
 try:
@@ -67,6 +70,8 @@ OBJ_PATH = ROOT / "output" / "obj" / "road_test.obj"
 GLB_PATH = ROOT / "output" / "gltf" / "road_test.glb"
 SEMANTIC_PATH = ROOT / "output" / "semantic" / "road_test_semantic.json"
 QC_PATH = ROOT / "output" / "qc_report" / "road_test_qc_report.json"
+TEXTURE_DIR = ROOT / "output" / "textures"
+GOOGLE_MAP_TEXTURE_PATH = TEXTURE_DIR / "google_static_map.png"
 DGM_DIR = ROOT / "data" / "raw" / "road_centerline"  # 高程切片所在的文件夹
 
 LOCAL_ROADS_PATH = PROCESSED_DIR / "road_centerline_local.geojson"
@@ -76,6 +81,75 @@ TARGET_CRS = "EPSG:32632"
 ROAD_LINK_GAP_TOLERANCE_M = 2.5
 MIN_CONNECTOR_LENGTH_M = 0.05
 BRIDGE_ELEVATION_GROUP_M = 3.0
+CIM3_PLAN_ACCURACY_M = 0.8
+CIM3_HEIGHT_ACCURACY_M = 1.0
+CIM3_MIN_GEOMETRIC_DETAIL_M = 0.5
+ELEVATION_SAMPLE_INTERVAL_M = 5.0
+SWEEP_SAMPLE_INTERVAL_M = 4.0
+CROWN_SLOPE = 0.02
+LANE_CROWN_SLOPE = 0.015
+JUNCTION_NODE_TOLERANCE_M = 3.0
+JUNCTION_RADIUS_M = 8.0
+JUNCTION_CLIP_EXTRA_M = 1.5
+MIN_JUNCTION_CLIP_DISTANCE_M = 8.0
+MAX_JUNCTION_CLIP_DISTANCE_M = 40.0
+JUNCTION_ENDPOINT_SNAP_TOLERANCE_M = 3.5
+JUNCTION_LINE_INTERSECTION_TOLERANCE_M = 0.35
+JUNCTION_EDGE_MAX_INTERSECTION_FACTOR = 2.6
+JUNCTION_MIN_SURFACE_AREA_M2 = 4.0
+JUNCTION_CLEAN_FILLET_M = 0.8
+LANE_CONNECTOR_SAMPLE_COUNT = 16
+LANE_CONNECTOR_HANDLE_RATIO = 0.45
+MIN_CHANNEL_ISLAND_AREA_M2 = 5.0
+TRANSITION_MIN_ANGLE_DEG = 8.0
+TRANSITION_MIN_LENGTH_M = 4.0
+TRANSITION_MAX_LENGTH_M = 24.0
+TRANSITION_SAMPLES = 10
+LANE_GUIDE_MARKING_WIDTH_M = 0.12
+DOUBLE_YELLOW_LINE_WIDTH_M = 0.10
+DOUBLE_YELLOW_LINE_OFFSET_M = 0.12
+TURN_ARROW_LENGTH_M = 4.0
+GENERATE_TURN_ARROWS = True
+APPROACH_ARROW_NEAR_M = 14.0
+APPROACH_ARROW_FAR_M = 27.0
+APPROACH_ARROW_MIN_GAP_M = 6.0
+CHANNELIZATION_MIN_ANGLE_DEG = 35.0
+CHANNELIZATION_MAX_ANGLE_DEG = 125.0
+CROSSWALK_DISTANCE_FROM_JUNCTION_M = 7.0
+CROSSWALK_STRIPE_WIDTH_M = 0.32
+CROSSWALK_STRIPE_GAP_M = 0.42
+CROSSWALK_BAND_LENGTH_M = 3.0
+GENERATE_CROSSWALKS = True
+STOP_LINE_DISTANCE_FROM_JUNCTION_M = 4.0
+STREET_LIGHT_SPACING_M = 38.0
+TREE_SPACING_M = 26.0
+TREE_JUNCTION_CLEARANCE_M = 24.0
+BRIDGE_PIER_SPACING_M = 28.0
+
+CIM3_COLORS = {
+    "median": [120, 126, 112, 255],
+    "guardrail": [185, 190, 188, 255],
+    "street_light": [88, 86, 78, 255],
+    "street_light_lamp": [248, 226, 138, 255],
+    "tree_trunk": [94, 68, 42, 255],
+    "tree_crown": [58, 116, 68, 255],
+    "bridge_deck": [118, 118, 112, 255],
+    "bridge_pier": [148, 148, 142, 255],
+    "gis_basemap": [88, 118, 94, 255],
+    "gis_grid": [132, 150, 132, 255],
+    "crosswalk": [245, 245, 235, 255],
+    "stop_line": [245, 245, 235, 255],
+    "lane_guide": [245, 245, 235, 255],
+    "turn_arrow": [245, 245, 235, 255],
+    "double_yellow": [245, 196, 48, 255],
+    "junction": [42, 42, 40, 255],
+    "channelization": [218, 214, 196, 255],
+    "junction_label_major": [220, 70, 52, 255],
+    "junction_label_secondary": [235, 166, 45, 255],
+    "junction_label_local": [58, 142, 86, 255],
+    "junction_label_ramp": [82, 122, 210, 255],
+    "junction_label_complex": [156, 88, 190, 255],
+}
 
 
 @dataclass
@@ -123,11 +197,99 @@ class LocalOrigin:
     z: float = 0.0
 
 
+@dataclass
+class LaneSocket:
+    lane_socket_id: str
+    parent_socket_id: str
+    road_id: str
+    lane_index: int
+    lane_role: str
+    center: tuple[float, float]
+    tangent: tuple[float, float]
+    normal: tuple[float, float]
+    lane_width: float
+    allowed_movements: list[str]
+    lane_id: str = ""
+    movement: str = "through"
+    allowed_turns: list[str] | None = None
+    traffic_direction: str = "unknown"
+    signal_group: str = "unsignalized"
+    stop_control: str = "yield_or_stop_line"
+
+
+@dataclass
+class RoadSocket:
+    socket_id: str
+    road_id: str
+    junction_id: str
+    distance_m: float
+    center: tuple[float, float]
+    tangent: tuple[float, float]
+    normal: tuple[float, float]
+    road_width: float
+    lane_count: int
+    lane_width: float
+    forward_lane_count: int
+    backward_lane_count: int
+    sidewalk_width: float
+    curb_width: float
+    clip_radius: float
+    clip_distance: float
+    line_direction_sign: float
+    elevation: float
+    approach_type: str
+    left_edge: tuple[float, float]
+    right_edge: tuple[float, float]
+    lane_sockets: list[LaneSocket]
+    road_class: str = "unknown"
+    node_distance_m: float = 0.0
+    generation_method: str = "socket"
+    road_name: str = "unknown"
+
+
+@dataclass
+class JunctionNode:
+    junction_id: str
+    center: Point
+    radius: float
+    sockets: list[RoadSocket]
+    junction_type: str = "UNKNOWN"
+    hierarchy: str = "LOCAL_JUNCTION"
+    surface_strategy: str = "edge_intersection"
+    detection_method: str = "endpoint_cluster"
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass
+class LaneConnector:
+    connector_id: str
+    junction_id: str
+    from_lane: LaneSocket
+    to_lane: LaneSocket
+    movement_type: str
+    centerline: LineString
+    width: float
+    surface_polygon: Polygon
+    marking_guides: list[LineString]
+
+
+@dataclass(frozen=True)
+class LaneLayout:
+    lane_count: int
+    forward_count: int
+    backward_count: int
+    center_turn_count: int = 0
+
+
 def ensure_dirs() -> None:
     """确保所有需要用到的输出目录都已存在，若不存在则自动创建。"""
     for path in [
         PROCESSED_DIR,
         OBJ_PATH.parent,
+        GLB_PATH.parent,
+        SEMANTIC_PATH.parent,
+        QC_PATH.parent,
+        TEXTURE_DIR,
     ]:
         path.mkdir(parents=True, exist_ok=True)
 
@@ -168,6 +330,7 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     # 将 MultiLineString 拆分（Explode）为单条的 LineString
     roads = roads.explode(index_parts=False).reset_index(drop=True)
     roads = roads[roads.geometry.geom_type == "LineString"].copy()
+    roads = deduplicate_bidirectional_osm_edges(roads)
 
     # 标准化处理道路 ID
     if "osmid" in roads.columns:
@@ -187,11 +350,16 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     # 映射与提取 OSM 原生道路属性
     roads["road_class"] = roads["highway"] if "highway" in roads.columns else "unclassified"
     roads["lane_count"] = roads["lanes"] if "lanes" in roads.columns else None
+    roads["lanes_forward"] = roads["lanes:forward"] if "lanes:forward" in roads.columns else None
+    roads["lanes_backward"] = roads["lanes:backward"] if "lanes:backward" in roads.columns else None
+    roads["osm_width"] = roads["width"] if "width" in roads.columns else None
     roads["maxspeed"] = roads["maxspeed"] if "maxspeed" in roads.columns else None
     roads["oneway"] = roads["oneway"] if "oneway" in roads.columns else None
+    roads["junction_type"] = roads["junction"] if "junction" in roads.columns else None
     roads["is_bridge"] = roads["bridge"] if "bridge" in roads.columns else None
     roads["road_ref"] = roads["ref"] if "ref" in roads.columns else None
     roads["access"] = roads["access"] if "access" in roads.columns else None
+    roads["lane_count"] = normalize_corridor_lane_counts(roads)
     roads["length_m"] = roads.geometry.length
 
     # 尝试加载指定目录下的所有 DGM 高程切片，支持多图幅 tif 自动拼接与读取
@@ -224,13 +392,19 @@ def read_and_prepare_roads() -> tuple[gpd.GeoDataFrame, LocalOrigin, dict[str, A
     # 备份全局坐标，利用仿射变换把当前几何体平移到局部坐标系中
     roads["geometry_global"] = roads.geometry
     roads["geometry"] = roads.geometry.apply(lambda geom: translate_to_local(geom, origin))
+    roads["transition_curve_count"] = roads.geometry.apply(count_transition_curve_candidates)
+    roads["geometry"] = roads.geometry.apply(smooth_line_with_clothoid_transitions)
+    attach_junction_distances(roads)
 
     # 提取核心所需的属性列，保存处理完毕的局部路网 GeoJSON 
     keep_cols = [
-        "road_id", "road_name", "road_class", "lane_count", "maxspeed", 
-        "oneway", "is_bridge", "road_ref", "access", "elevation", "length_m", 
+        "road_id", "road_name", "road_class", "lane_count", "lanes_forward", "lanes_backward", "osm_width", "maxspeed", 
+        "oneway", "junction_type", "is_bridge", "road_ref", "access", "elevation", "length_m", 
         "bridge_clearance", "height_source", "height_mode", "ground_z_start", 
-        "ground_z_end", "road_z_start", "road_z_end", "road_z_mean", "geometry"
+        "ground_z_end", "road_z_start", "road_z_end", "road_z_mean",
+        "elevation_profile_json", "max_grade_percent", "junction_distances_json",
+        "transition_curve_count",
+        "geometry"
     ]
     local_roads = roads[keep_cols].copy()
     local_roads = gpd.GeoDataFrame(local_roads, geometry="geometry", crs=TARGET_CRS)
@@ -256,6 +430,49 @@ def normalize_osmid(value: Any) -> str:
     return str(value)
 
 
+def normalized_key_value(value: Any) -> str:
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple, set)):
+        return "|".join(sorted(str(v) for v in value))
+    return safe_str(value) or ""
+
+
+def deduplicate_bidirectional_osm_edges(roads: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if roads.empty or not {"u", "v", "osmid"}.issubset(roads.columns):
+        return roads
+
+    keyed = roads.copy()
+    keyed["_oneway_dir"] = keyed.apply(oneway_direction, axis=1)
+    keyed["_dedupe_key"] = keyed.apply(
+        lambda row: (
+            tuple(sorted((safe_str(row.get("u")) or "", safe_str(row.get("v")) or ""))),
+            normalized_key_value(row.get("osmid")),
+            normalized_key_value(row.get("key")),
+        ),
+        axis=1,
+    )
+    keyed["_reversed_rank"] = keyed.get("reversed", pd.Series([None] * len(keyed), index=keyed.index)).apply(
+        lambda value: 1 if (safe_str(value) or "").lower() == "true" else 0
+    )
+
+    keep_indexes: list[Any] = []
+    for _, group in keyed.groupby("_dedupe_key", sort=False):
+        if len(group) <= 1 or not (group["_oneway_dir"] == 0).all():
+            keep_indexes.extend(group.index.tolist())
+            continue
+
+        endpoint_pairs = {(safe_str(row.get("u")), safe_str(row.get("v"))) for _, row in group.iterrows()}
+        has_reciprocal = any((v, u) in endpoint_pairs for u, v in endpoint_pairs)
+        if not has_reciprocal:
+            keep_indexes.extend(group.index.tolist())
+            continue
+
+        keep_indexes.append(group.sort_values(["_reversed_rank", "length"], ascending=[True, False]).index[0])
+
+    return keyed.loc[keep_indexes].drop(columns=["_oneway_dir", "_dedupe_key", "_reversed_rank"]).reset_index(drop=True)
+
+
 def translate_to_local(geom, origin: LocalOrigin):
     """
     利用 Shapely 的仿射变换 (translate)，将全局投影坐标转换为以 origin 为原点的局部相对坐标。
@@ -278,21 +495,261 @@ def parse_lane_count(val: Any, default: int = 2) -> int:
     val_str = safe_str(val)
     if not val_str:
         return default
-    m = re.search(r'\d+', val_str)
-    return int(m.group()) if m else default
+    matches = [int(match) for match in re.findall(r"\d+", val_str)]
+    if not matches:
+        return default
+    return max(1, min(max(matches), 8))
+
+
+def parsed_lane_count_or_none(val: Any) -> int | None:
+    val_str = safe_str(val)
+    if not val_str:
+        return None
+    matches = [int(match) for match in re.findall(r"\d+", val_str)]
+    if not matches:
+        return None
+    return max(1, min(max(matches), 8))
+
+
+def modal_lane_count(values: Iterable[Any]) -> int | None:
+    counts: dict[int, int] = {}
+    for value in values:
+        lane_count = parsed_lane_count_or_none(value)
+        if lane_count is None:
+            continue
+        counts[lane_count] = counts.get(lane_count, 0) + 1
+    if not counts:
+        return None
+    return sorted(counts.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
+
+
+def normalize_corridor_lane_counts(roads: gpd.GeoDataFrame) -> pd.Series:
+    if roads.empty or "lane_count" not in roads.columns:
+        return roads.get("lane_count", pd.Series(dtype=object))
+
+    normalized = roads["lane_count"].copy()
+    key_series = roads.apply(
+        lambda row: normalized_key_value(row.get("road_name")),
+        axis=1,
+    )
+    for key in sorted(set(key_series)):
+        if not key or key == "unknown":
+            continue
+        mask = key_series == key
+        if int(mask.sum()) < 3:
+            continue
+        baseline_mask = mask & ~roads.apply(is_single_lane_junction_pocket, axis=1) & ~roads.apply(is_circular_junction_row, axis=1)
+        corridor_lane_count = modal_lane_count(roads.loc[baseline_mask, "lane_count"])
+        if corridor_lane_count is None:
+            corridor_lane_count = modal_lane_count(roads.loc[mask, "lane_count"])
+        if corridor_lane_count is None:
+            continue
+        apply_mask = mask & ~roads.apply(is_single_lane_junction_pocket, axis=1) & ~roads.apply(is_circular_junction_row, axis=1)
+        normalized.loc[apply_mask] = max(2, corridor_lane_count)
+
+    circular_mask = roads.apply(is_circular_junction_row, axis=1)
+    normalized.loc[circular_mask] = 2
+    return normalized
+
+
+def is_circular_junction_row(row: pd.Series) -> bool:
+    junction = (normalized_key_value(row.get("junction_type")) or normalized_key_value(row.get("junction"))).lower()
+    return "circular" in junction or "roundabout" in junction
+
+
+def is_single_lane_junction_pocket(row: pd.Series) -> bool:
+    return oneway_direction(row) != 0 and parsed_lane_count_or_none(row.get("lane_count")) == 1
+
+
+def parse_optional_lane_count(val: Any) -> int | None:
+    val_str = safe_str(val)
+    if not val_str:
+        return None
+    matches = [int(match) for match in re.findall(r"\d+", val_str)]
+    if not matches:
+        return None
+    return max(0, min(max(matches), 8))
+
+
+def normalize_directional_lanes(total_lanes: int, forward: int | None, backward: int | None, oneway: int) -> LaneLayout:
+    total_lanes = max(1, min(int(total_lanes), 8))
+    if oneway == 1:
+        return LaneLayout(total_lanes, total_lanes, 0)
+    if oneway == -1:
+        return LaneLayout(total_lanes, 0, total_lanes)
+
+    if forward is not None or backward is not None:
+        forward_count = max(0, int(forward or 0))
+        backward_count = max(0, int(backward or 0))
+        known_total = forward_count + backward_count
+        if known_total <= 0:
+            forward_count = total_lanes // 2
+            backward_count = total_lanes - forward_count
+        elif known_total < total_lanes:
+            missing = total_lanes - known_total
+            if forward is None:
+                forward_count += missing
+            elif backward is None:
+                backward_count += missing
+            else:
+                forward_count += missing // 2
+                backward_count += missing - missing // 2
+        elif known_total > total_lanes:
+            total_lanes = min(known_total, 8)
+        return LaneLayout(total_lanes, forward_count, backward_count)
+
+    backward_count = total_lanes // 2
+    forward_count = total_lanes - backward_count
+    return LaneLayout(total_lanes, forward_count, backward_count)
+
+
+def lane_layout_for_row(row: pd.Series, rule: RoadRule) -> LaneLayout:
+    return normalize_directional_lanes(
+        rule.lane_count,
+        parse_optional_lane_count(row.get("lanes_forward")),
+        parse_optional_lane_count(row.get("lanes_backward")),
+        oneway_direction(row),
+    )
+
+
+def parse_road_width_m(val: Any) -> float | None:
+    """Parse OSM width values and return a plausible full carriageway width."""
+    val_str = safe_str(val)
+    if not val_str:
+        return None
+    matches = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", val_str)]
+    plausible = [width for width in matches if 2.0 <= width <= 40.0]
+    if not plausible:
+        return None
+    return max(plausible)
+
+
+def canonical_road_class(value: Any, rules: dict[str, RoadRule]) -> str:
+    text = (safe_str(value) or "").lower()
+    if text in rules:
+        return text
+
+    priority = [
+        "motorway",
+        "primary",
+        "secondary",
+        "tertiary",
+        "residential",
+        "service",
+        "living_street",
+        "unclassified",
+    ]
+    for road_class in priority:
+        if road_class not in text:
+            continue
+        if road_class in rules:
+            return road_class
+        if road_class == "living_street" and "residential" in rules:
+            return "residential"
+        if road_class == "unclassified" and "tertiary" in rules:
+            return "tertiary"
+    return "default_road"
 
 
 def get_road_rule(row: pd.Series, rules: dict[str, RoadRule]) -> RoadRule:
     """依据原始道路属性（如车道数）动态计算并返回适用于该道路的规则与宽度配置。"""
-    road_class = safe_str(row.get("road_class")) or "default_road"
+    road_class = canonical_road_class(row.get("road_class"), rules)
     base_rule = rules.get(road_class, rules.get("default_road"))
     rule = copy.copy(base_rule)
     
     # 覆盖车道数并重新计算道路总宽度
-    lanes = parse_lane_count(row.get("lane_count"), default=rule.lane_count)
+    forward_lanes = parse_optional_lane_count(row.get("lanes_forward"))
+    backward_lanes = parse_optional_lane_count(row.get("lanes_backward"))
+    directional_lanes = None
+    if forward_lanes is not None or backward_lanes is not None:
+        directional_lanes = max(1, (forward_lanes or 0) + (backward_lanes or 0))
+    lanes = parse_lane_count(row.get("lane_count"), default=directional_lanes or rule.lane_count)
+    if directional_lanes is not None and not safe_str(row.get("lane_count")):
+        lanes = directional_lanes
     rule.lane_count = lanes
     rule.road_width = lanes * rule.lane_width
+    osm_width = parse_road_width_m(row.get("osm_width", row.get("width")))
+    if osm_width is not None:
+        lane_width = osm_width / max(lanes, 1)
+        if 2.4 <= lane_width <= 4.5:
+            rule.road_width = osm_width
+            rule.lane_width = lane_width
     return rule
+
+
+def cim3_road_grade(highway: Any) -> str:
+    text = (safe_str(highway) or "").lower()
+    if text in {"motorway", "trunk"}:
+        return "expressway"
+    if text in {"primary", "primary_link"}:
+        return "arterial"
+    if text in {"secondary", "secondary_link"}:
+        return "secondary"
+    return "branch"
+
+
+def design_speed_kmh(highway: Any, maxspeed: Any = None) -> int:
+    speed_text = safe_str(maxspeed)
+    if speed_text:
+        match = re.search(r"\d+", speed_text)
+        if match:
+            return int(match.group(0))
+
+    return {
+        "expressway": 80,
+        "arterial": 50,
+        "secondary": 40,
+        "branch": 30,
+    }[cim3_road_grade(highway)]
+
+
+def line_sample_distances(line: LineString, interval: float) -> list[float]:
+    if line.length <= 0.0:
+        return [0.0]
+    count = max(int(math.ceil(line.length / interval)), 1)
+    distances = [min(line.length, i * interval) for i in range(count + 1)]
+    if distances[-1] < line.length:
+        distances.append(float(line.length))
+    return sorted(set(round(float(d), 3) for d in distances))
+
+
+def smooth_values(values: list[float]) -> list[float]:
+    if len(values) < 3:
+        return values
+    smoothed = []
+    for idx, value in enumerate(values):
+        if idx == 0 or idx == len(values) - 1:
+            smoothed.append(float(value))
+            continue
+        smoothed.append(float(values[idx - 1] * 0.25 + value * 0.5 + values[idx + 1] * 0.25))
+    return smoothed
+
+
+def elevation_at_distance(row: pd.Series, distance: float, default_z: float | None = None) -> float:
+    profile_text = safe_str(row.get("elevation_profile_json"))
+    if not profile_text:
+        return float(default_z if default_z is not None else row.get("road_z_mean", row.get("elevation", 0.0)))
+    try:
+        profile = json.loads(profile_text)
+    except Exception:
+        return float(default_z if default_z is not None else row.get("road_z_mean", row.get("elevation", 0.0)))
+    samples = profile.get("samples", [])
+    if not samples:
+        return float(default_z if default_z is not None else row.get("road_z_mean", row.get("elevation", 0.0)))
+
+    distance = float(distance)
+    if distance <= float(samples[0]["distance_m"]):
+        return float(samples[0]["road_z"])
+    if distance >= float(samples[-1]["distance_m"]):
+        return float(samples[-1]["road_z"])
+
+    for left, right in zip(samples, samples[1:]):
+        d0 = float(left["distance_m"])
+        d1 = float(right["distance_m"])
+        if d0 <= distance <= d1:
+            ratio = (distance - d0) / max(d1 - d0, 1e-6)
+            return float(left["road_z"]) + (float(right["road_z"]) - float(left["road_z"])) * ratio
+    return float(samples[-1]["road_z"])
 
 
 def check_is_bridge(value: Any) -> bool:
@@ -319,7 +776,9 @@ def get_elevations(row: pd.Series, dgm_srcs: list) -> pd.Series:
         return pd.Series({
             "ground_z_start": 0.0, "ground_z_end": 0.0,
             "road_z_start": 0.0, "road_z_end": 0.0,
-            "road_z_mean": 0.0, "height_mode": "unknown", "height_source": "default"
+            "road_z_mean": 0.0, "height_mode": "unknown", "height_source": "default",
+            "elevation_profile_json": json.dumps({"samples": []}, ensure_ascii=False),
+            "max_grade_percent": 0.0,
         })
 
     start_pt = line.coords[0]
@@ -334,16 +793,18 @@ def get_elevations(row: pd.Series, dgm_srcs: list) -> pd.Series:
                 if bounds.left <= x <= bounds.right and bounds.bottom <= y <= bounds.top:
                     try:
                         val = next(src.sample([(x, y)]))[0]
-                        print(f"坐标点 ({x:.2f}, {y:.2f}) 被高程切片覆盖，采样高度: {float(val):.2f}m")
                         return float(val)
                     except Exception:
                         pass
         # 如果没有 DGM 或图幅均未覆盖该点，使用安联球场基准高度 (约 505m) 模拟
-        print(f"坐标点 ({pt[0]:.2f}, {pt[1]:.2f}) 未被覆盖，使用默认模拟高度: 505.0m")
+        # Default mock terrain when no DGM tile covers the point.
         return 505.0
 
-    ground_z_start = sample_z(start_pt)
-    ground_z_end = sample_z(end_pt)
+    sample_distances = line_sample_distances(line, ELEVATION_SAMPLE_INTERVAL_M)
+    ground_samples = [sample_z(line.interpolate(distance).coords[0]) for distance in sample_distances]
+    smoothed_ground_samples = smooth_values(ground_samples)
+    ground_z_start = smoothed_ground_samples[0]
+    ground_z_end = smoothed_ground_samples[-1]
 
     is_bridge = row.get("is_bridge", False)
     clearance = row.get("bridge_clearance", 0.0)
@@ -375,7 +836,33 @@ def get_elevations(row: pd.Series, dgm_srcs: list) -> pd.Series:
         road_z_end += layer_offset
         height_mode = "dem_sampled_layer_adjusted"
 
-    road_z_mean = (road_z_start + road_z_end) / 2.0
+    offset_start = road_z_start - ground_z_start
+    offset_end = road_z_end - ground_z_end
+    road_samples = []
+    grades = []
+    for idx, distance in enumerate(sample_distances):
+        ratio = 0.0 if line.length <= 0.0 else float(distance) / float(line.length)
+        offset = offset_start + (offset_end - offset_start) * ratio
+        road_samples.append(smoothed_ground_samples[idx] + offset)
+
+    for left_idx, right_idx in zip(range(len(sample_distances) - 1), range(1, len(sample_distances))):
+        run = sample_distances[right_idx] - sample_distances[left_idx]
+        if run > 0.05:
+            grades.append(abs((road_samples[right_idx] - road_samples[left_idx]) / run) * 100.0)
+
+    road_z_mean = float(np.mean(road_samples)) if road_samples else (road_z_start + road_z_end) / 2.0
+    elevation_profile = {
+        "sample_interval_m": ELEVATION_SAMPLE_INTERVAL_M,
+        "smoothing": "three_point_weighted_vertical_profile",
+        "samples": [
+            {
+                "distance_m": round(float(distance), 3),
+                "ground_z": round(float(ground_z), 3),
+                "road_z": round(float(road_z), 3),
+            }
+            for distance, ground_z, road_z in zip(sample_distances, smoothed_ground_samples, road_samples)
+        ],
+    }
 
     return pd.Series({
         "ground_z_start": round(ground_z_start, 3),
@@ -384,7 +871,9 @@ def get_elevations(row: pd.Series, dgm_srcs: list) -> pd.Series:
         "road_z_end": round(road_z_end, 3),
         "road_z_mean": round(road_z_mean, 3),
         "height_mode": height_mode,
-        "height_source": height_source
+        "height_source": height_source,
+        "elevation_profile_json": json.dumps(elevation_profile, ensure_ascii=False),
+        "max_grade_percent": round(max(grades) if grades else 0.0, 3),
     })
 
 
@@ -444,11 +933,335 @@ def line_buffer(line: LineString, width: float):
     return line.buffer(width / 2.0, cap_style=2, join_style=2)
 
 
+def roundabout_ring_geometries(entries: list[tuple[pd.Series, LineString, RoadRule]]) -> tuple[list[Polygon], list[Polygon], list[Polygon]]:
+    circular_entries = [(row, line, rule) for row, line, rule in entries if is_circular_junction_row(row)]
+    if not circular_entries:
+        return [], [], []
+
+    grouped: dict[str, list[tuple[pd.Series, LineString, RoadRule]]] = {}
+    for row, line, rule in circular_entries:
+        key = normalized_key_value(row.get("road_name")) or str(row.get("road_id"))
+        grouped.setdefault(key, []).append((row, line, rule))
+
+    rings: list[Polygon] = []
+    totals: list[Polygon] = []
+    islands: list[Polygon] = []
+    for _, group_entries in grouped.items():
+        coords: list[tuple[float, float]] = []
+        widths: list[float] = []
+        sidewalks: list[float] = []
+        for _, line, rule in group_entries:
+            coords.extend((float(x), float(y)) for x, y in line.coords)
+            widths.append(float(rule.road_width))
+            sidewalks.append(float(rule.sidewalk_width))
+        if len(coords) < 6:
+            continue
+
+        cx = float(np.mean([pt[0] for pt in coords]))
+        cy = float(np.mean([pt[1] for pt in coords]))
+        center = Point(cx, cy)
+        center_radius = float(np.median([math.hypot(pt[0] - cx, pt[1] - cy) for pt in coords]))
+        road_width = max(widths) if widths else 7.0
+        sidewalk_width = max(sidewalks) if sidewalks else 2.0
+        outer_radius = center_radius + road_width / 2.0
+        inner_radius = max(2.0, center_radius - road_width / 2.0)
+
+        inner = center.buffer(inner_radius, resolution=96)
+        ring = clean_polygonal(center.buffer(outer_radius, resolution=96).difference(inner))
+        total = clean_polygonal(center.buffer(outer_radius + sidewalk_width, resolution=96).difference(inner))
+        if ring is not None and not ring.is_empty:
+            rings.append(ring)
+            totals.append(total)
+            islands.append(inner)
+
+    return rings, totals, islands
+
+
 def road_endpoint_points(line: LineString) -> list[Point]:
     coords = list(line.coords)
     if len(coords) < 2:
         return []
     return [Point(coords[0]), Point(coords[-1])]
+
+
+def vector_length(vec: tuple[float, float]) -> float:
+    return math.hypot(vec[0], vec[1])
+
+
+def unit_vector(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-9:
+        return (0.0, 0.0)
+    return (dx / length, dy / length)
+
+
+def interior_turn_angle(prev_pt: tuple[float, float], curr_pt: tuple[float, float], next_pt: tuple[float, float]) -> float:
+    incoming = unit_vector(prev_pt, curr_pt)
+    outgoing = unit_vector(curr_pt, next_pt)
+    dot = max(-1.0, min(1.0, incoming[0] * outgoing[0] + incoming[1] * outgoing[1]))
+    return math.acos(dot)
+
+
+def clothoid_transition_points(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    incoming_dir: tuple[float, float],
+    outgoing_dir: tuple[float, float],
+    samples: int = TRANSITION_SAMPLES,
+) -> list[tuple[float, float]]:
+    """Approximate a transition curve by integrating linearly changing curvature."""
+    theta0 = math.atan2(incoming_dir[1], incoming_dir[0])
+    theta1 = math.atan2(outgoing_dir[1], outgoing_dir[0])
+    delta = math.atan2(math.sin(theta1 - theta0), math.cos(theta1 - theta0))
+    chord = math.dist(start, end)
+    if chord <= 0.01:
+        return []
+
+    local = [(0.0, 0.0)]
+    length = max(chord, TRANSITION_MIN_LENGTH_M)
+    for idx in range(1, samples):
+        t = idx / samples
+        theta = delta * t * t
+        prev_t = (idx - 1) / samples
+        prev_theta = delta * prev_t * prev_t
+        avg_theta = (theta + prev_theta) * 0.5
+        ds = length / samples
+        last_x, last_y = local[-1]
+        local.append((last_x + math.cos(avg_theta) * ds, last_y + math.sin(avg_theta) * ds))
+
+    raw_end_x = local[-1][0] + math.cos(delta) * (length / samples)
+    raw_end_y = local[-1][1] + math.sin(delta) * (length / samples)
+    raw_angle = math.atan2(raw_end_y, raw_end_x)
+    target_angle = math.atan2(end[1] - start[1], end[0] - start[0])
+    rotate = target_angle - raw_angle
+    raw_len = max(math.hypot(raw_end_x, raw_end_y), 1e-6)
+    scale = chord / raw_len
+
+    points = []
+    cos_r = math.cos(rotate)
+    sin_r = math.sin(rotate)
+    for x, y in local[1:]:
+        rx = (x * cos_r - y * sin_r) * scale
+        ry = (x * sin_r + y * cos_r) * scale
+        points.append(
+            (
+                start[0] + rx,
+                start[1] + ry,
+            )
+        )
+    return points
+
+
+def count_transition_curve_candidates(line: LineString) -> int:
+    if line is None or line.is_empty or not isinstance(line, LineString):
+        return 0
+    coords = [(float(coord[0]), float(coord[1])) for coord in line.coords]
+    count = 0
+    min_angle = math.radians(TRANSITION_MIN_ANGLE_DEG)
+    for prev_pt, curr_pt, next_pt in zip(coords, coords[1:], coords[2:]):
+        angle = interior_turn_angle(prev_pt, curr_pt, next_pt)
+        if angle >= min_angle:
+            count += 1
+    return count
+
+
+def smooth_line_with_clothoid_transitions(line: LineString) -> LineString:
+    """Replace sharp polyline corners with clothoid-style transition arcs."""
+    if line is None or line.is_empty or not isinstance(line, LineString):
+        return line
+    coords = [(float(coord[0]), float(coord[1])) for coord in line.coords]
+    if len(coords) < 3:
+        return line
+
+    min_angle = math.radians(TRANSITION_MIN_ANGLE_DEG)
+    smoothed: list[tuple[float, float]] = [coords[0]]
+
+    for prev_pt, curr_pt, next_pt in zip(coords, coords[1:], coords[2:]):
+        len_in = math.dist(prev_pt, curr_pt)
+        len_out = math.dist(curr_pt, next_pt)
+        angle = interior_turn_angle(prev_pt, curr_pt, next_pt)
+        if angle < min_angle or min(len_in, len_out) < TRANSITION_MIN_LENGTH_M * 1.8:
+            smoothed.append(curr_pt)
+            continue
+
+        transition_len = min(
+            TRANSITION_MAX_LENGTH_M,
+            max(TRANSITION_MIN_LENGTH_M, min(len_in, len_out) * 0.35, angle / math.pi * TRANSITION_MAX_LENGTH_M),
+        )
+        incoming = unit_vector(prev_pt, curr_pt)
+        outgoing = unit_vector(curr_pt, next_pt)
+        start = (curr_pt[0] - incoming[0] * transition_len, curr_pt[1] - incoming[1] * transition_len)
+        end = (curr_pt[0] + outgoing[0] * transition_len, curr_pt[1] + outgoing[1] * transition_len)
+
+        if math.dist(smoothed[-1], start) > 0.01:
+            smoothed.append(start)
+        smoothed.extend(clothoid_transition_points(start, end, incoming, outgoing))
+        smoothed.append(end)
+
+    if math.dist(smoothed[-1], coords[-1]) > 0.01:
+        smoothed.append(coords[-1])
+
+    if len(smoothed) < 2:
+        return line
+    return LineString(smoothed)
+
+
+def rounded_node_key(point: Point, tolerance: float = JUNCTION_NODE_TOLERANCE_M) -> tuple[int, int]:
+    return (round(point.x / tolerance), round(point.y / tolerance))
+
+
+def add_junction_candidate(
+    buckets: dict[tuple[int, int], dict[str, Any]],
+    point: Point,
+    road_ids: Iterable[Any],
+    method: str,
+    tolerance: float = JUNCTION_NODE_TOLERANCE_M,
+) -> None:
+    if point is None or point.is_empty:
+        return
+    key = rounded_node_key(point, tolerance)
+    bucket = buckets.setdefault(key, {"points": [], "road_ids": set(), "methods": set()})
+    bucket["points"].append(point)
+    bucket["road_ids"].update(str(road_id) for road_id in road_ids if safe_str(road_id))
+    bucket["methods"].add(method)
+
+
+def representative_point_from_intersection(geom) -> Point | None:
+    if geom is None or geom.is_empty:
+        return None
+    if isinstance(geom, Point):
+        return geom
+    if geom.geom_type == "MultiPoint":
+        points = list(geom.geoms)
+        return points[0] if points else None
+    if isinstance(geom, LineString):
+        return geom.interpolate(geom.length * 0.5)
+    if isinstance(geom, MultiLineString):
+        parts = list(geom.geoms)
+        return parts[0].interpolate(parts[0].length * 0.5) if parts else None
+    if isinstance(geom, GeometryCollection):
+        for part in geom.geoms:
+            point = representative_point_from_intersection(part)
+            if point is not None:
+                return point
+    return None
+
+
+def row_layer_value(row: pd.Series) -> int:
+    text = safe_str(row.get("layer"))
+    if not text:
+        return 0
+    match = re.search(r"-?\d+", text)
+    return int(match.group(0)) if match else 0
+
+
+def rows_same_spatial_level(row_a: pd.Series, row_b: pd.Series) -> bool:
+    if bool(row_a.get("is_bridge", False)) != bool(row_b.get("is_bridge", False)):
+        return False
+    if row_layer_value(row_a) != row_layer_value(row_b):
+        return False
+    za = float(row_a.get("elevation", row_a.get("road_z_mean", 0.0)) or 0.0)
+    zb = float(row_b.get("elevation", row_b.get("road_z_mean", 0.0)) or 0.0)
+    return abs(za - zb) <= BRIDGE_ELEVATION_GROUP_M
+
+
+def detect_junction_points(roads: gpd.GeoDataFrame) -> list[Point]:
+    buckets: dict[tuple[int, int], dict[str, Any]] = {}
+    entries: list[tuple[Any, pd.Series, LineString]] = []
+    for idx, row in roads.iterrows():
+        line = row.geometry
+        if line is None or line.is_empty or not isinstance(line, LineString):
+            continue
+        entries.append((idx, row, line))
+        for point in road_endpoint_points(line):
+            add_junction_candidate(buckets, point, [row.get("road_id", idx)], "endpoint_cluster")
+
+    for i, (idx_a, row_a, line_a) in enumerate(entries):
+        for endpoint in road_endpoint_points(line_a):
+            for idx_b, row_b, line_b in entries:
+                if idx_a == idx_b or not rows_same_spatial_level(row_a, row_b):
+                    continue
+                projected_distance = float(line_b.project(endpoint))
+                if projected_distance <= JUNCTION_NODE_TOLERANCE_M or projected_distance >= line_b.length - JUNCTION_NODE_TOLERANCE_M:
+                    continue
+                projected = line_b.interpolate(projected_distance)
+                if endpoint.distance(projected) <= JUNCTION_ENDPOINT_SNAP_TOLERANCE_M:
+                    add_junction_candidate(
+                        buckets,
+                        projected,
+                        [row_a.get("road_id", idx_a), row_b.get("road_id", idx_b)],
+                        "endpoint_snap",
+                    )
+
+        for idx_b, row_b, line_b in entries[i + 1 :]:
+            if not rows_same_spatial_level(row_a, row_b):
+                continue
+            if not line_a.bounds or not line_b.bounds:
+                continue
+            if line_a.distance(line_b) > JUNCTION_LINE_INTERSECTION_TOLERANCE_M:
+                continue
+            try:
+                intersection = line_a.intersection(line_b)
+            except Exception:
+                continue
+            point = representative_point_from_intersection(intersection)
+            if point is None:
+                continue
+            da = float(line_a.project(point))
+            db = float(line_b.project(point))
+            # Shared endpoints are already handled by endpoint clustering; this
+            # branch is for true mid-line crossings or unsplit T junctions.
+            interior_a = JUNCTION_NODE_TOLERANCE_M < da < line_a.length - JUNCTION_NODE_TOLERANCE_M
+            interior_b = JUNCTION_NODE_TOLERANCE_M < db < line_b.length - JUNCTION_NODE_TOLERANCE_M
+            if not (interior_a or interior_b):
+                continue
+            add_junction_candidate(
+                buckets,
+                point,
+                [row_a.get("road_id", idx_a), row_b.get("road_id", idx_b)],
+                "line_intersection",
+            )
+
+    junctions = []
+    for bucket in buckets.values():
+        points = bucket["points"]
+        road_count = len(bucket["road_ids"])
+        methods = bucket["methods"]
+        is_topology_candidate = "line_intersection" in methods or "endpoint_snap" in methods
+        if road_count < 3 and not (is_topology_candidate and road_count >= 2):
+            continue
+        x = sum(point.x for point in points) / len(points)
+        y = sum(point.y for point in points) / len(points)
+        junctions.append(Point(x, y))
+    return junctions
+
+
+def attach_junction_distances(roads: gpd.GeoDataFrame) -> None:
+    junctions = detect_junction_points(roads)
+    for idx, row in roads.iterrows():
+        line = row.geometry
+        distances: list[float] = []
+        if line is not None and not line.is_empty and isinstance(line, LineString):
+            for point in junctions:
+                if line.distance(point) <= JUNCTION_NODE_TOLERANCE_M * 1.5:
+                    distances.append(round(float(line.project(point)), 3))
+        roads.at[idx, "junction_distances_json"] = json.dumps(sorted(set(distances)))
+
+
+def row_junction_distances(row: pd.Series) -> list[float]:
+    text = safe_str(row.get("junction_distances_json"))
+    if not text:
+        return []
+    try:
+        return [float(v) for v in json.loads(text)]
+    except Exception:
+        return []
+
+
+def is_near_any_distance(distance: float, blocked: list[float], radius: float) -> bool:
+    return any(abs(float(distance) - d) <= radius for d in blocked)
 
 
 def build_short_road_connectors(
@@ -495,11 +1308,1302 @@ def build_short_road_connectors(
 
 def road_topology_group(row: pd.Series) -> str:
     """Group roads for planar merging without letting bridges fuse into ground roads."""
+    elevation = float(row.get("elevation", 0.0))
+    elevation_group = round(elevation / 1.0)
     if bool(row.get("is_bridge", False)):
-        elevation = float(row.get("elevation", 0.0))
         bucket = round(elevation / BRIDGE_ELEVATION_GROUP_M)
         return f"bridge_{bucket}"
-    return "ground"
+    return f"ground_{elevation_group}"
+
+
+def line_frame_at_distance(line: LineString, distance: float) -> tuple[Point, tuple[float, float], tuple[float, float]]:
+    distance = max(0.0, min(float(distance), float(line.length)))
+    point = line.interpolate(distance)
+    ahead = line.interpolate(min(line.length, distance + 0.6))
+    behind = line.interpolate(max(0.0, distance - 0.6))
+    dx = ahead.x - behind.x
+    dy = ahead.y - behind.y
+    length = math.hypot(dx, dy)
+    if length <= 0.05:
+        return point, (1.0, 0.0), (0.0, 1.0)
+    tx, ty = dx / length, dy / length
+    return point, (tx, ty), (-ty, tx)
+
+
+def oriented_rect_at_line(
+    line: LineString,
+    distance: float,
+    along_length: float,
+    across_width: float,
+) -> Polygon:
+    center, tangent, normal = line_frame_at_distance(line, distance)
+    hx = max(along_length, 0.05) / 2.0
+    hy = max(across_width, 0.05) / 2.0
+    tx, ty = tangent
+    nx, ny = normal
+    return Polygon(
+        [
+            (center.x - tx * hx - nx * hy, center.y - ty * hx - ny * hy),
+            (center.x + tx * hx - nx * hy, center.y + ty * hx - ny * hy),
+            (center.x + tx * hx + nx * hy, center.y + ty * hx + ny * hy),
+            (center.x - tx * hx + nx * hy, center.y - ty * hx + ny * hy),
+        ]
+    )
+
+
+def sample_line_for_sweep(line: LineString, interval: float = SWEEP_SAMPLE_INTERVAL_M) -> list[float]:
+    distances = line_sample_distances(line, interval)
+    vertex_distances = []
+    accumulated = 0.0
+    coords = list(line.coords)
+    for a, b in zip(coords, coords[1:]):
+        vertex_distances.append(accumulated)
+        accumulated += math.dist((a[0], a[1]), (b[0], b[1]))
+    vertex_distances.append(float(line.length))
+    return sorted(set(round(float(d), 3) for d in distances + vertex_distances if 0.0 <= d <= line.length))
+
+
+def cross_section_offsets(rule: RoadRule) -> list[float]:
+    half_width = rule.road_width / 2.0
+    offsets = [-half_width, 0.0, half_width]
+    for lane_idx in range(1, rule.lane_count):
+        offsets.append(-half_width + lane_idx * rule.lane_width)
+    return sorted(set(round(offset, 4) for offset in offsets))
+
+
+def lane_center_offsets(rule: RoadRule) -> list[float]:
+    half_width = rule.road_width / 2.0
+    return [
+        -half_width + lane_idx * rule.lane_width + rule.lane_width / 2.0
+        for lane_idx in range(rule.lane_count)
+    ]
+
+
+def lane_direction_offsets(row: pd.Series, rule: RoadRule, direction: str) -> list[float]:
+    offsets = lane_center_offsets(rule)
+    layout = lane_layout_for_row(row, rule)
+    if direction == "forward":
+        return offsets[: layout.forward_count]
+    if direction == "backward":
+        start = max(0, len(offsets) - layout.backward_count)
+        return offsets[start:]
+    return offsets
+
+
+def oneway_direction(row: pd.Series) -> int:
+    value = (safe_str(row.get("oneway")) or "").strip().lower()
+    if value in {"yes", "true", "1"}:
+        return 1
+    if value in {"-1", "reverse"}:
+        return -1
+    return 0
+
+
+def incoming_lane_offsets(row: pd.Series, rule: RoadRule, sign: float) -> list[float]:
+    direction = oneway_direction(row)
+    if direction == 1:
+        return lane_center_offsets(rule) if sign < 0.0 else []
+    if direction == -1:
+        return lane_center_offsets(rule) if sign > 0.0 else []
+    if rule.lane_count <= 1:
+        return lane_center_offsets(rule)
+
+    # Right-hand traffic assumption: negative offsets travel with the line,
+    # positive offsets travel opposite the line.
+    if sign < 0.0:
+        selected = lane_direction_offsets(row, rule, "forward")
+    else:
+        selected = lane_direction_offsets(row, rule, "backward")
+    return selected or lane_center_offsets(rule)
+
+
+def crossfall_z(center_z: float, offset: float, rule: RoadRule) -> float:
+    half_width = max(rule.road_width / 2.0, 0.1)
+    slope = LANE_CROWN_SLOPE if abs(offset) < half_width * 0.55 else CROWN_SLOPE
+    return center_z - abs(offset) * slope
+
+
+def swept_road_mesh(
+    row: pd.Series,
+    line: LineString,
+    rule: RoadRule,
+    name: str,
+    visual_color=None,
+    distance_offset: float = 0.0,
+) -> trimesh.Trimesh:
+    distances = sample_line_for_sweep(line)
+    offsets = cross_section_offsets(rule)
+    if len(distances) < 2 or len(offsets) < 2:
+        return empty_mesh(name)
+
+    vertices = []
+    for distance in distances:
+        point, _, normal = line_frame_at_distance(line, distance)
+        center_z = elevation_at_distance(
+            row,
+            distance + distance_offset,
+            default_z=float(row.get("road_z_mean", row.get("elevation", 0.0))),
+        )
+        nx, ny = normal
+        for offset in offsets:
+            vertices.append((point.x + nx * offset, point.y + ny * offset, crossfall_z(center_z, offset, rule)))
+
+    faces = []
+    cols = len(offsets)
+    for row_idx in range(len(distances) - 1):
+        for col_idx in range(cols - 1):
+            a = row_idx * cols + col_idx
+            b = a + 1
+            c = (row_idx + 1) * cols + col_idx + 1
+            d = (row_idx + 1) * cols + col_idx
+            faces.append((a, b, c))
+            faces.append((a, c, d))
+
+    mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+    mesh.metadata["name"] = name
+    if visual_color is not None:
+        mesh.visual.face_colors = visual_color
+    return mesh
+
+
+def swept_lane_mesh(
+    row: pd.Series,
+    line: LineString,
+    rule: RoadRule,
+    lane_idx: int,
+    name: str,
+    visual_color=None,
+    distance_offset: float = 0.0,
+) -> trimesh.Trimesh:
+    distances = sample_line_for_sweep(line)
+    half_width = rule.road_width / 2.0
+    left = -half_width + lane_idx * rule.lane_width
+    right = min(left + rule.lane_width, half_width)
+    offsets = [left, right]
+    if len(distances) < 2 or right <= left:
+        return empty_mesh(name)
+
+    vertices = []
+    for distance in distances:
+        point, _, normal = line_frame_at_distance(line, distance)
+        center_z = elevation_at_distance(
+            row,
+            distance + distance_offset,
+            default_z=float(row.get("road_z_mean", row.get("elevation", 0.0))),
+        )
+        nx, ny = normal
+        for offset in offsets:
+            vertices.append((point.x + nx * offset, point.y + ny * offset, crossfall_z(center_z, offset, rule) + 0.003))
+
+    faces = []
+    for row_idx in range(len(distances) - 1):
+        a = row_idx * 2
+        b = a + 1
+        c = a + 3
+        d = a + 2
+        faces.append((a, b, c))
+        faces.append((a, c, d))
+
+    mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+    mesh.metadata["name"] = name
+    if visual_color is not None:
+        mesh.visual.face_colors = visual_color
+    return mesh
+
+
+def bezier_points(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    samples: int = 12,
+) -> list[tuple[float, float]]:
+    points = []
+    for idx in range(samples + 1):
+        t = idx / samples
+        u = 1.0 - t
+        points.append(
+            (
+                u**3 * p0[0] + 3 * u**2 * t * p1[0] + 3 * u * t**2 * p2[0] + t**3 * p3[0],
+                u**3 * p0[1] + 3 * u**2 * t * p1[1] + 3 * u * t**2 * p2[1] + t**3 * p3[1],
+            )
+        )
+    return points
+
+
+def movement_type(from_lane: LaneSocket, to_lane: LaneSocket) -> str:
+    exit_direction = (-to_lane.tangent[0], -to_lane.tangent[1])
+    fx, fy = from_lane.tangent
+    ex, ey = exit_direction
+    cross = fx * ey - fy * ex
+    dot = fx * ex + fy * ey
+    angle = math.degrees(math.atan2(cross, dot))
+    if abs(angle) <= 35.0:
+        return "straight"
+    return "left" if angle > 0.0 else "right"
+
+
+def lane_connector_curve(from_lane: LaneSocket, to_lane: LaneSocket) -> LineString:
+    p0 = from_lane.center
+    p3 = to_lane.center
+    distance = math.dist(p0, p3)
+    handle_len = max(2.0, min(distance * LANE_CONNECTOR_HANDLE_RATIO, 28.0))
+    p1 = (
+        p0[0] + from_lane.tangent[0] * handle_len,
+        p0[1] + from_lane.tangent[1] * handle_len,
+    )
+    p2 = (
+        p3[0] + to_lane.tangent[0] * handle_len,
+        p3[1] + to_lane.tangent[1] * handle_len,
+    )
+    return LineString(bezier_points(p0, p1, p2, p3, samples=LANE_CONNECTOR_SAMPLE_COUNT))
+
+
+def build_lane_connectors(node: JunctionNode) -> list[LaneConnector]:
+    ingress_lanes = [
+        lane
+        for socket in node.sockets
+        for lane in socket.lane_sockets
+        if lane.lane_role == "ingress"
+    ]
+    egress_lanes = [
+        lane
+        for socket in node.sockets
+        for lane in socket.lane_sockets
+        if lane.lane_role == "egress"
+    ]
+    connectors: list[LaneConnector] = []
+    seen: set[tuple[str, str]] = set()
+
+    for from_lane in ingress_lanes:
+        by_socket: dict[str, LaneSocket] = {}
+        for to_lane in egress_lanes:
+            if to_lane.parent_socket_id == from_lane.parent_socket_id:
+                continue
+            current = by_socket.get(to_lane.parent_socket_id)
+            if current is None or math.dist(from_lane.center, to_lane.center) < math.dist(from_lane.center, current.center):
+                by_socket[to_lane.parent_socket_id] = to_lane
+
+        candidates = []
+        for to_lane in by_socket.values():
+            move = movement_type(from_lane, to_lane)
+            if move not in from_lane.allowed_movements:
+                continue
+            exit_direction = (-to_lane.tangent[0], -to_lane.tangent[1])
+            dot = from_lane.tangent[0] * exit_direction[0] + from_lane.tangent[1] * exit_direction[1]
+            candidates.append((move, -dot, math.dist(from_lane.center, to_lane.center), to_lane))
+
+        selected: dict[str, tuple[str, float, float, LaneSocket]] = {}
+        for candidate in sorted(candidates, key=lambda item: (item[0] != "straight", item[1], item[2])):
+            move = candidate[0]
+            if move not in selected:
+                selected[move] = candidate
+        for move, _, _, to_lane in selected.values():
+            key = (from_lane.lane_socket_id, to_lane.lane_socket_id)
+            if key in seen:
+                continue
+            centerline = lane_connector_curve(from_lane, to_lane)
+            if centerline.length <= 0.5:
+                continue
+            width = min(from_lane.lane_width, to_lane.lane_width)
+            surface = centerline.buffer(width / 2.0, cap_style=2, join_style=2)
+            if surface.is_empty:
+                continue
+            connectors.append(
+                LaneConnector(
+                    connector_id=f"{node.junction_id}_{from_lane.lane_socket_id}_to_{to_lane.lane_socket_id}",
+                    junction_id=node.junction_id,
+                    from_lane=from_lane,
+                    to_lane=to_lane,
+                    movement_type=move,
+                    centerline=centerline,
+                    width=width,
+                    surface_polygon=surface,
+                    marking_guides=[centerline],
+                )
+            )
+            seen.add(key)
+
+    return connectors
+
+
+def oriented_rect_from_frame(
+    center: tuple[float, float],
+    tangent: tuple[float, float],
+    normal: tuple[float, float],
+    along_length: float,
+    across_width: float,
+) -> Polygon:
+    hx = max(along_length, 0.05) / 2.0
+    hy = max(across_width, 0.05) / 2.0
+    tx, ty = tangent
+    nx, ny = normal
+    return Polygon(
+        [
+            (center[0] - tx * hx - nx * hy, center[1] - ty * hx - ny * hy),
+            (center[0] + tx * hx - nx * hy, center[1] + ty * hx - ny * hy),
+            (center[0] + tx * hx + nx * hy, center[1] + ty * hx + ny * hy),
+            (center[0] - tx * hx + nx * hy, center[1] - ty * hx + ny * hy),
+        ]
+    )
+
+
+def socket_bound_stop_line(socket: RoadSocket) -> Polygon:
+    offset = 3.0 if socket.road_width >= 12.0 else 2.0
+    center = (
+        socket.center[0] - socket.tangent[0] * offset,
+        socket.center[1] - socket.tangent[1] * offset,
+    )
+    return oriented_rect_from_frame(center, socket.tangent, socket.normal, 0.45, socket.road_width + 0.8)
+
+
+def socket_bound_crosswalks(socket: RoadSocket, stripe_width: float = CROSSWALK_STRIPE_WIDTH_M) -> list[Polygon]:
+    if not GENERATE_CROSSWALKS:
+        return []
+    if socket.approach_type == "egress":
+        return []
+    offset = 6.0 if socket.road_width >= 12.0 else 5.0
+    stripe_step = CROSSWALK_STRIPE_WIDTH_M + CROSSWALK_STRIPE_GAP_M
+    stripe_count = max(3, int((socket.road_width + 1.2) / stripe_step))
+    start_lateral = -((stripe_count - 1) * stripe_step) / 2.0
+    base_center = (
+        socket.center[0] - socket.tangent[0] * offset,
+        socket.center[1] - socket.tangent[1] * offset,
+    )
+    stripes: list[Polygon] = []
+    for stripe_idx in range(stripe_count):
+        center = (
+            base_center[0] + socket.normal[0] * (start_lateral + stripe_idx * stripe_step),
+            base_center[1] + socket.normal[1] * (start_lateral + stripe_idx * stripe_step),
+        )
+        stripes.append(oriented_rect_from_frame(center, socket.tangent, socket.normal, CROSSWALK_BAND_LENGTH_M, stripe_width))
+    return stripes
+
+
+def socket_bound_turn_arrows(socket: RoadSocket) -> list[Polygon]:
+    arrows: list[Polygon] = []
+    return arrows
+
+
+def lane_offset_markings(line: LineString, row: pd.Series, rule: RoadRule) -> list[Polygon]:
+    markings = []
+    if rule.lane_count <= 1:
+        return markings
+    layout = lane_layout_for_row(row, rule)
+    direction_boundary_idx = layout.forward_count if layout.forward_count and layout.backward_count else None
+    for lane_idx in range(1, rule.lane_count):
+        if direction_boundary_idx == lane_idx:
+            continue
+        offset = -rule.road_width / 2.0 + lane_idx * rule.lane_width
+        if abs(offset) < 0.05:
+            markings.append(line.buffer(LANE_GUIDE_MARKING_WIDTH_M / 2.0, cap_style=2, join_style=2))
+            continue
+        side = "left" if offset >= 0 else "right"
+        try:
+            lane_line = line.parallel_offset(abs(offset), side=side, join_style=2)
+        except Exception:
+            continue
+        if lane_line.is_empty:
+            continue
+        if isinstance(lane_line, MultiLineString):
+            parts = list(lane_line.geoms)
+        else:
+            parts = [lane_line]
+        for part in parts:
+            markings.append(part.buffer(LANE_GUIDE_MARKING_WIDTH_M / 2.0, cap_style=2, join_style=2))
+    return markings
+
+
+def lane_direction_boundary_marking(line: LineString, row: pd.Series, rule: RoadRule) -> Polygon | None:
+    layout = lane_layout_for_row(row, rule)
+    if layout.forward_count <= 0 or layout.backward_count <= 0:
+        return None
+    boundary_offset = -rule.road_width / 2.0 + layout.forward_count * rule.lane_width
+    width = max(rule.lane_marking_width, DOUBLE_YELLOW_LINE_WIDTH_M)
+    if abs(boundary_offset) < 0.05:
+        return line.buffer(width / 2.0, cap_style=2, join_style=2)
+    side = "left" if boundary_offset >= 0.0 else "right"
+    try:
+        divider = line.parallel_offset(abs(boundary_offset), side=side, join_style=2)
+    except Exception:
+        return None
+    if divider.is_empty:
+        return None
+    return divider.buffer(width / 2.0, cap_style=2, join_style=2)
+
+
+def arm_direction_from_junction(line: LineString, node_distance: float, radius: float) -> tuple[tuple[float, float], tuple[float, float], float]:
+    if node_distance <= line.length * 0.5:
+        outside_distance = min(line.length, node_distance + radius)
+        sign = 1.0
+    else:
+        outside_distance = max(0.0, node_distance - radius)
+        sign = -1.0
+    outside = line.interpolate(outside_distance)
+    node = line.interpolate(node_distance)
+    direction = unit_vector((node.x, node.y), (outside.x, outside.y))
+    return (node.x, node.y), direction, sign
+
+
+def junction_clip_radius(rule: RoadRule, connected_count: int = 3) -> float:
+    width_radius = (rule.road_width + 2.0 * rule.sidewalk_width) * 0.55
+    complexity_radius = max(0.0, connected_count - 3) * 1.2
+    return max(JUNCTION_RADIUS_M, width_radius) + JUNCTION_CLIP_EXTRA_M + complexity_radius
+
+
+def road_priority(row: pd.Series) -> int:
+    road_class = (safe_str(row.get("road_class")) or "").lower()
+    if "motorway" in road_class or "trunk" in road_class:
+        return 5
+    if "primary" in road_class:
+        return 4
+    if "secondary" in road_class:
+        return 3
+    if "tertiary" in road_class:
+        return 2
+    if "service" in road_class or "residential" in road_class:
+        return 1
+    return 2
+
+
+def road_class_clip_distance(
+    row: pd.Series,
+    rule: RoadRule,
+    connected_count: int = 3,
+    min_adjacent_angle_deg: float | None = None,
+    junction_type: str | None = None,
+    is_minor_to_major: bool = False,
+) -> float:
+    road_class = (safe_str(row.get("road_class")) or "").lower()
+    if "motorway" in road_class or "trunk" in road_class or "link" in road_class:
+        base = 28.0
+    elif "primary" in road_class:
+        base = 24.0
+    elif "secondary" in road_class:
+        base = 16.0
+    elif "service" in road_class:
+        base = 10.0
+    else:
+        base = 12.0
+    width_driven = max(rule.road_width * 1.2, rule.lane_width * rule.lane_count * 1.5)
+    complexity = max(0, connected_count - 3) * 2.0
+    distance = max(base, width_driven) + complexity
+
+    if min_adjacent_angle_deg is not None:
+        if min_adjacent_angle_deg < 45.0:
+            distance += 4.0
+        elif min_adjacent_angle_deg < 65.0:
+            distance += 2.0
+
+    if junction_type in {"MULTI_ARM_JUNCTION", "ROUNDABOUT_LIKE"}:
+        distance += 3.0
+    elif junction_type == "RAMP_MERGE":
+        distance += 2.0
+
+    if is_minor_to_major and road_priority(row) <= 1:
+        distance -= 3.0
+    if rule.lane_count <= 1 and ("service" in road_class or "residential" in road_class):
+        distance -= 1.5
+
+    return max(MIN_JUNCTION_CLIP_DISTANCE_M, min(MAX_JUNCTION_CLIP_DISTANCE_M, distance))
+
+
+def socket_cross_section_points(socket: RoadSocket, include_sidewalk: bool = False) -> tuple[tuple[float, float], tuple[float, float]]:
+    if not include_sidewalk:
+        return socket.left_edge, socket.right_edge
+    return socket_edges(socket.center, socket.normal, socket.road_width + 2.0 * socket.sidewalk_width)
+
+
+def socket_edges(center: tuple[float, float], normal: tuple[float, float], road_width: float) -> tuple[tuple[float, float], tuple[float, float]]:
+    half_width = road_width / 2.0
+    cx, cy = center
+    nx, ny = normal
+    return (
+        (cx + nx * half_width, cy + ny * half_width),
+        (cx - nx * half_width, cy - ny * half_width),
+    )
+
+
+def socket_approach_type(row: pd.Series, sign: float) -> str:
+    direction = oneway_direction(row)
+    if direction == 0:
+        return "bidirectional"
+    if direction == 1:
+        return "ingress" if sign < 0.0 else "egress"
+    if direction == -1:
+        return "ingress" if sign > 0.0 else "egress"
+    return "bidirectional"
+
+
+def build_lane_sockets(socket: RoadSocket) -> list[LaneSocket]:
+    lane_sockets: list[LaneSocket] = []
+    lane_count = max(1, int(socket.lane_count))
+    half_width = socket.road_width / 2.0
+    cx, cy = socket.center
+    nx, ny = socket.normal
+    forward_lane_indexes = set(range(max(0, min(socket.forward_lane_count, lane_count))))
+    backward_start = max(0, lane_count - max(0, socket.backward_lane_count))
+    backward_lane_indexes = set(range(backward_start, lane_count))
+
+    for lane_idx in range(lane_count):
+        offset = -half_width + socket.lane_width / 2.0 + lane_idx * socket.lane_width
+        center = (cx + nx * offset, cy + ny * offset)
+        if socket.approach_type == "ingress":
+            role = "ingress"
+        elif socket.approach_type == "egress":
+            role = "egress"
+        elif lane_count == 1:
+            role = "ingress"
+        elif lane_idx in forward_lane_indexes and lane_idx not in backward_lane_indexes:
+            role = "ingress" if socket.line_direction_sign < 0.0 else "egress"
+        elif lane_idx in backward_lane_indexes and lane_idx not in forward_lane_indexes:
+            role = "ingress" if socket.line_direction_sign > 0.0 else "egress"
+        else:
+            role = "ingress" if offset < 0.0 else "egress"
+        lane_sockets.append(
+            LaneSocket(
+                lane_socket_id=f"{socket.socket_id}_L{lane_idx:02d}",
+                parent_socket_id=socket.socket_id,
+                road_id=socket.road_id,
+                lane_index=lane_idx,
+                lane_role=role,
+                center=center,
+                tangent=socket.tangent,
+                normal=socket.normal,
+                lane_width=socket.lane_width,
+                allowed_movements=["left", "straight", "right"],
+                lane_id=f"{socket.road_id}:lane:{lane_idx}",
+                movement="inbound" if role == "ingress" else "outbound",
+                allowed_turns=["left", "straight", "right"] if role == "ingress" else ["straight"],
+                traffic_direction=role,
+                signal_group=f"{socket.junction_id}_{role}",
+                stop_control="stop_line" if role == "ingress" else "none",
+            )
+        )
+    return lane_sockets
+
+
+def classify_junction_type(junction_node_or_sockets) -> str:
+    sockets = junction_node_or_sockets.sockets if isinstance(junction_node_or_sockets, JunctionNode) else junction_node_or_sockets
+    degree = len(sockets)
+    if degree <= 2:
+        return "RAMP_MERGE"
+    if any("roundabout" in (socket.road_class or "").lower() or "circular" in (socket.road_class or "").lower() for socket in sockets):
+        return "ROUNDABOUT_LIKE"
+
+    priorities = [road_priority(pd.Series({"road_class": socket.road_class})) for socket in sockets]
+    has_link = any("link" in (socket.road_class or "").lower() or "ramp" in (socket.road_class or "").lower() for socket in sockets)
+    if has_link or (degree == 3 and max(priorities) - min(priorities) >= 3):
+        return "RAMP_MERGE"
+
+    directions = [socket.tangent for socket in sockets]
+    sorted_angles = sorted(math.atan2(direction[1], direction[0]) for direction in directions)
+    gaps = []
+    for idx, angle in enumerate(sorted_angles):
+        nxt = sorted_angles[(idx + 1) % len(sorted_angles)]
+        gap = (nxt - angle) % (2.0 * math.pi)
+        gaps.append(math.degrees(gap))
+    max_gap = max(gaps) if gaps else 0.0
+    min_gap = min(gaps) if gaps else 0.0
+
+    if degree == 3:
+        return "T_JUNCTION" if max_gap > 150.0 else "Y_JUNCTION"
+    if degree == 4:
+        return "CROSS_JUNCTION" if min_gap > 45.0 and max_gap < 145.0 else "MULTI_ARM_JUNCTION"
+    if degree > 4:
+        return "MULTI_ARM_JUNCTION"
+    return "UNKNOWN"
+
+
+def classify_junction_hierarchy(sockets: list[RoadSocket], junction_type: str) -> str:
+    if junction_type == "ROUNDABOUT_LIKE":
+        return "ROUNDABOUT_JUNCTION"
+    if junction_type == "RAMP_MERGE":
+        return "RAMP_OR_GRADE_SEPARATED"
+    priorities = [road_priority(pd.Series({"road_class": socket.road_class})) for socket in sockets]
+    max_priority = max(priorities) if priorities else 0
+    max_lanes = max((socket.lane_count for socket in sockets), default=1)
+    max_width = max((socket.road_width for socket in sockets), default=0.0)
+    if junction_type == "MULTI_ARM_JUNCTION" or len(sockets) >= 5:
+        return "COMPLEX_MULTI_ARM"
+    if max_priority >= 4 or max_lanes >= 4 or max_width >= 14.0:
+        return "MAJOR_ARTERIAL"
+    if max_priority >= 3 or max_lanes >= 3 or max_width >= 10.0:
+        return "SECONDARY_COLLECTOR"
+    return "LOCAL_JUNCTION"
+
+
+def junction_surface_strategy_for(hierarchy: str, junction_type: str) -> str:
+    if hierarchy == "ROUNDABOUT_JUNCTION":
+        return "socket_boundary"
+    if hierarchy == "COMPLEX_MULTI_ARM":
+        return "socket_boundary_then_edge"
+    if hierarchy == "RAMP_OR_GRADE_SEPARATED":
+        return "ramp_merge_edge"
+    if hierarchy in {"MAJOR_ARTERIAL", "SECONDARY_COLLECTOR", "LOCAL_JUNCTION"}:
+        return "edge_intersection"
+    return "edge_intersection"
+
+
+def adjacent_angle_by_socket(socket_idx: int, directions: list[tuple[float, float]]) -> float | None:
+    if len(directions) < 2 or socket_idx >= len(directions):
+        return None
+    angle = math.atan2(directions[socket_idx][1], directions[socket_idx][0])
+    gaps = []
+    for idx, direction in enumerate(directions):
+        if idx == socket_idx:
+            continue
+        other = math.atan2(direction[1], direction[0])
+        gaps.append(abs(math.degrees(math.atan2(math.sin(other - angle), math.cos(other - angle)))))
+    return min(gaps) if gaps else None
+
+
+def build_junction_nodes(
+    road_entries: list[tuple[pd.Series, LineString, RoadRule]],
+    junction_points: list[Point],
+) -> list[JunctionNode]:
+    nodes: list[JunctionNode] = []
+    for node_idx, point in enumerate(junction_points):
+        connected = [(row, line, rule) for row, line, rule in road_entries if line.distance(point) <= JUNCTION_NODE_TOLERANCE_M * 1.5]
+        if len(connected) < 2:
+            continue
+
+        radius = max(junction_clip_radius(rule, len(connected)) for _, _, rule in connected)
+        junction_id = f"J{node_idx:04d}"
+        sockets: list[RoadSocket] = []
+        arm_specs: list[tuple[pd.Series, LineString, RoadRule, float, float, tuple[float, float]]] = []
+        for row, line, rule in connected:
+            node_distance = float(line.project(point))
+            is_internal_node = JUNCTION_NODE_TOLERANCE_M < node_distance < line.length - JUNCTION_NODE_TOLERANCE_M
+            signs = [1.0, -1.0] if is_internal_node else ([1.0] if node_distance <= line.length * 0.5 else [-1.0])
+            for sign in signs:
+                outside_distance = max(0.0, min(float(line.length), node_distance + sign * max(radius, JUNCTION_RADIUS_M)))
+                outside = line.interpolate(outside_distance)
+                node = line.interpolate(node_distance)
+                direction = unit_vector((node.x, node.y), (outside.x, outside.y))
+                if vector_length(direction) > 0.01:
+                    arm_specs.append((row, line, rule, node_distance, sign, direction))
+
+        if len(arm_specs) < 3:
+            continue
+
+        preliminary_type = "UNKNOWN"
+        priorities = [road_priority(spec[0]) for spec in arm_specs]
+        max_priority = max(priorities) if priorities else 0
+
+        for socket_idx, (row, line, rule, node_distance, sign, direction) in enumerate(arm_specs):
+            min_angle = adjacent_angle_by_socket(socket_idx, [spec[5] for spec in arm_specs])
+            is_minor_to_major = road_priority(row) + 2 <= max_priority
+            clip_distance = road_class_clip_distance(
+                row,
+                rule,
+                len(arm_specs),
+                min_adjacent_angle_deg=min_angle,
+                junction_type=preliminary_type,
+                is_minor_to_major=is_minor_to_major,
+            )
+            socket_distance = max(0.0, min(float(line.length), node_distance + sign * clip_distance))
+            socket_point, _, _ = line_frame_at_distance(line, socket_distance)
+            tangent_to_junction = (-direction[0], -direction[1])
+            normal = (-tangent_to_junction[1], tangent_to_junction[0])
+            center = (socket_point.x, socket_point.y)
+            left_edge, right_edge = socket_edges(center, normal, rule.road_width)
+            lane_layout = lane_layout_for_row(row, rule)
+            socket = RoadSocket(
+                socket_id=f"{junction_id}_S{socket_idx:02d}_{safe_str(row.get('road_id')) or 'road'}",
+                road_id=str(row.get("road_id")),
+                junction_id=junction_id,
+                distance_m=socket_distance,
+                center=center,
+                tangent=tangent_to_junction,
+                normal=normal,
+                road_width=rule.road_width,
+                lane_count=rule.lane_count,
+                lane_width=rule.lane_width,
+                forward_lane_count=lane_layout.forward_count,
+                backward_lane_count=lane_layout.backward_count,
+                sidewalk_width=rule.sidewalk_width,
+                curb_width=rule.curb_width,
+                clip_radius=radius,
+                clip_distance=clip_distance,
+                line_direction_sign=sign,
+                elevation=float(row.get("elevation", 0.0)),
+                approach_type=socket_approach_type(row, sign),
+                left_edge=left_edge,
+                right_edge=right_edge,
+                lane_sockets=[],
+                road_class=safe_str(row.get("road_class")) or "unknown",
+                node_distance_m=node_distance,
+                road_name=safe_str(row.get("road_name")) or "unknown",
+            )
+            socket.lane_sockets = build_lane_sockets(socket)
+            sockets.append(socket)
+
+        if len(sockets) >= 3:
+            node_type = classify_junction_type(sockets)
+            hierarchy = classify_junction_hierarchy(sockets, node_type)
+            surface_strategy = junction_surface_strategy_for(hierarchy, node_type)
+            nodes.append(
+                JunctionNode(
+                    junction_id=junction_id,
+                    center=point,
+                    radius=max(socket.clip_distance for socket in sockets),
+                    sockets=sockets,
+                    junction_type=node_type,
+                    hierarchy=hierarchy,
+                    surface_strategy=surface_strategy,
+                    detection_method="enhanced_topology",
+                    metadata={
+                        "connected_road_count": len(connected),
+                        "socket_count": len(sockets),
+                        "road_classes": sorted(set(socket.road_class for socket in sockets)),
+                        "surface_strategy": surface_strategy,
+                    },
+                )
+            )
+    return nodes
+
+
+def socket_boundary_polygon(node: JunctionNode, include_sidewalk: bool = False) -> Polygon | None:
+    boundary_points: list[tuple[float, float]] = []
+    for socket in node.sockets:
+        boundary_points.extend(socket_cross_section_points(socket, include_sidewalk=include_sidewalk))
+
+    if len(boundary_points) < 3:
+        return None
+
+    cx, cy = node.center.x, node.center.y
+    ordered = sorted(boundary_points, key=lambda pt: math.atan2(pt[1] - cy, pt[0] - cx))
+    polygon = Polygon(ordered)
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    if polygon.is_empty or polygon.area <= 1.0:
+        return None
+
+    hull = MultiPolygon([polygon]).convex_hull if isinstance(polygon, Polygon) else polygon.convex_hull
+    if hull is not None and not hull.is_empty and hull.area > polygon.area:
+        polygon = hull
+
+    # Keep the junction footprint as a single clean node shape. Earlier Bezier
+    # interpolation between socket edges could overshoot and create tangled
+    # center islands on dense intersections.
+    fillet = max(0.5, min(1.6 if include_sidewalk else 1.2, node.radius * 0.08))
+    try:
+        polygon = polygon.buffer(fillet, resolution=6, join_style=1).buffer(-fillet, resolution=6, join_style=1)
+    except Exception:
+        pass
+    if polygon.is_empty:
+        return None
+    return polygon
+
+
+def infinite_line_intersection(
+    a_point: tuple[float, float],
+    a_dir: tuple[float, float],
+    b_point: tuple[float, float],
+    b_dir: tuple[float, float],
+) -> tuple[float, float] | None:
+    ax, ay = a_point
+    bx, by = b_point
+    adx, ady = a_dir
+    bdx, bdy = b_dir
+    denom = adx * bdy - ady * bdx
+    if abs(denom) <= 1e-6:
+        return None
+    t = ((bx - ax) * bdy - (by - ay) * bdx) / denom
+    return (ax + adx * t, ay + ady * t)
+
+
+def clean_junction_polygon(geom, node: JunctionNode, include_sidewalk: bool = False):
+    polygon = clean_polygonal(geom)
+    if polygon is None or polygon.is_empty:
+        return None
+    if isinstance(polygon, MultiPolygon):
+        parts = [part for part in polygon.geoms if part.area >= JUNCTION_MIN_SURFACE_AREA_M2]
+        if not parts:
+            return None
+        polygon = max(parts, key=lambda part: part.area)
+    if polygon.area < JUNCTION_MIN_SURFACE_AREA_M2:
+        return None
+    fillet = max(0.35, min(JUNCTION_CLEAN_FILLET_M + (0.25 if include_sidewalk else 0.0), node.radius * 0.06))
+    try:
+        polygon = polygon.buffer(fillet, resolution=6, join_style=1).buffer(-fillet, resolution=6, join_style=1)
+    except Exception:
+        pass
+    polygon = clean_polygonal(polygon)
+    if polygon is None or polygon.is_empty or polygon.area < JUNCTION_MIN_SURFACE_AREA_M2:
+        return None
+    return polygon
+
+
+def convex_hull_junction_polygon(node: JunctionNode, include_sidewalk: bool = False):
+    points: list[tuple[float, float]] = []
+    for socket in node.sockets:
+        points.extend(socket_cross_section_points(socket, include_sidewalk=include_sidewalk))
+    if len(points) < 3:
+        return None
+    return clean_junction_polygon(MultiPolygon([Polygon(points)]).convex_hull, node, include_sidewalk)
+
+
+def edge_intersection_junction_polygon(node: JunctionNode, include_sidewalk: bool = False) -> Polygon | None:
+    """
+    Main CIM3 junction footprint algorithm. It intersects adjacent offset road
+    edges to create a less convex node boundary. socket_boundary_polygon() stays
+    as the stable fallback, and a convex hull is the final safety net.
+    """
+    if len(node.sockets) < 3:
+        return None
+
+    ordered = sorted(
+        node.sockets,
+        key=lambda socket: math.atan2(socket.center[1] - node.center.y, socket.center[0] - node.center.x),
+    )
+    max_distance = max(
+        node.radius * JUNCTION_EDGE_MAX_INTERSECTION_FACTOR,
+        max((socket.clip_distance + socket.road_width for socket in ordered), default=node.radius),
+    )
+    max_width = max((socket.road_width + (2.0 * socket.sidewalk_width if include_sidewalk else 0.0) for socket in ordered), default=7.0)
+    boundary_points: list[tuple[float, float]] = []
+
+    for idx, current in enumerate(ordered):
+        nxt = ordered[(idx + 1) % len(ordered)]
+        current_edges = socket_cross_section_points(current, include_sidewalk=include_sidewalk)
+        next_edges = socket_cross_section_points(nxt, include_sidewalk=include_sidewalk)
+        candidates: list[tuple[float, tuple[float, float]]] = []
+        for current_edge in current_edges:
+            for next_edge in next_edges:
+                point = infinite_line_intersection(current_edge, current.tangent, next_edge, nxt.tangent)
+                if point is None:
+                    continue
+                distance = math.hypot(point[0] - node.center.x, point[1] - node.center.y)
+                if 0.5 <= distance <= max_distance:
+                    candidates.append((distance, point))
+        if candidates:
+            boundary_points.append(sorted(candidates, key=lambda item: item[0])[0][1])
+        else:
+            # Keep the boundary moving even when adjacent road edges are nearly
+            # parallel; the validation below decides whether this is good enough.
+            boundary_points.extend([current_edges[1], next_edges[0]])
+
+    if len(boundary_points) < 3:
+        return None
+    try:
+        raw_polygon = Polygon(boundary_points).buffer(0)
+        polygon = unary_union([raw_polygon, node.center.buffer(max(0.75, max_width * 0.18), resolution=12)])
+    except Exception:
+        return None
+    cleaned = clean_junction_polygon(polygon, node, include_sidewalk)
+    if cleaned is None:
+        return None
+    if not cleaned.buffer(0.05).contains(node.center):
+        repaired = clean_junction_polygon(unary_union([cleaned, node.center.buffer(max(0.75, max_width * 0.22), resolution=12)]), node, include_sidewalk)
+        if repaired is None or not repaired.buffer(0.05).contains(node.center):
+            return None
+        cleaned = repaired
+    return cleaned
+
+
+def robust_junction_polygon(node: JunctionNode, include_sidewalk: bool = False) -> Polygon | None:
+    polygon = edge_intersection_junction_polygon(node, include_sidewalk=include_sidewalk)
+    if polygon is not None:
+        return polygon
+    logging.info("Junction %s edge-intersection polygon failed; using socket fallback.", node.junction_id)
+    polygon = socket_boundary_polygon(node, include_sidewalk=include_sidewalk)
+    if polygon is not None:
+        return polygon
+    logging.warning("Junction %s socket fallback failed; using convex hull fallback.", node.junction_id)
+    return convex_hull_junction_polygon(node, include_sidewalk=include_sidewalk)
+
+
+def junction_polygon_with_method(node: JunctionNode, include_sidewalk: bool = False) -> tuple[Polygon | None, str]:
+    strategy = node.surface_strategy or junction_surface_strategy_for(node.hierarchy, node.junction_type)
+    if strategy == "socket_boundary":
+        polygon = socket_boundary_polygon(node, include_sidewalk=include_sidewalk)
+        if polygon is not None:
+            return polygon, "socket_boundary_by_hierarchy"
+    elif strategy == "socket_boundary_then_edge":
+        polygon = socket_boundary_polygon(node, include_sidewalk=include_sidewalk)
+        if polygon is not None:
+            return polygon, "socket_boundary_complex"
+        polygon = edge_intersection_junction_polygon(node, include_sidewalk=include_sidewalk)
+        if polygon is not None:
+            return polygon, "edge_intersection_after_socket"
+    else:
+        polygon = edge_intersection_junction_polygon(node, include_sidewalk=include_sidewalk)
+        if polygon is not None:
+            return polygon, f"{strategy}:edge_intersection"
+        logging.info("Junction %s edge-intersection polygon failed; using socket fallback.", node.junction_id)
+        polygon = socket_boundary_polygon(node, include_sidewalk=include_sidewalk)
+        if polygon is not None:
+            return polygon, f"{strategy}:socket_boundary_fallback"
+    logging.warning("Junction %s socket fallback failed; using convex hull fallback.", node.junction_id)
+    return convex_hull_junction_polygon(node, include_sidewalk=include_sidewalk), f"{strategy}:convex_hull_fallback"
+
+
+def bezier_closed_boundary_points(
+    points: list[tuple[float, float]],
+    samples_per_edge: int = 6,
+) -> list[tuple[float, float]]:
+    if len(points) < 4:
+        return points
+
+    smooth: list[tuple[float, float]] = []
+    count = len(points)
+    for idx in range(count):
+        p0 = points[(idx - 1) % count]
+        p1 = points[idx]
+        p2 = points[(idx + 1) % count]
+        p3 = points[(idx + 2) % count]
+        c1 = (
+            p1[0] + (p2[0] - p0[0]) / 6.0,
+            p1[1] + (p2[1] - p0[1]) / 6.0,
+        )
+        c2 = (
+            p2[0] - (p3[0] - p1[0]) / 6.0,
+            p2[1] - (p3[1] - p1[1]) / 6.0,
+        )
+        segment = bezier_points(p1, c1, c2, p2, samples=samples_per_edge)
+        if smooth:
+            smooth.extend(segment[1:])
+        else:
+            smooth.extend(segment)
+    return smooth
+
+
+def line_junction_clip_ranges(
+    row: pd.Series,
+    line: LineString,
+    rule: RoadRule,
+    junction_points: list[Point],
+    junction_nodes: list[JunctionNode] | None = None,
+) -> list[tuple[float, float]]:
+    ranges = []
+    if junction_nodes is not None:
+        for node in junction_nodes:
+            if line.distance(node.center) > JUNCTION_NODE_TOLERANCE_M * 1.5:
+                continue
+            node_distance = float(line.project(node.center))
+            road_id = str(row.get("road_id"))
+            sockets = [item for item in node.sockets if item.road_id == road_id]
+            if sockets:
+                for socket in sockets:
+                    start = min(node_distance, socket.distance_m)
+                    end = max(node_distance, socket.distance_m)
+                    ranges.append((max(0.0, start), min(float(line.length), end)))
+            else:
+                ranges.append((max(0.0, node_distance - node.radius), min(float(line.length), node_distance + node.radius)))
+    else:
+        for point in junction_points:
+            if line.distance(point) > JUNCTION_NODE_TOLERANCE_M * 1.5:
+                continue
+            node_distance = float(line.project(point))
+            radius = road_class_clip_distance(row, rule)
+            ranges.append((max(0.0, node_distance - radius), min(float(line.length), node_distance + radius)))
+
+    if not ranges:
+        return []
+
+    ranges.sort()
+    merged = [ranges[0]]
+    for start, end in ranges[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 0.25:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def line_segments_outside_ranges(line: LineString, ranges: list[tuple[float, float]]) -> list[tuple[LineString, float]]:
+    if not ranges:
+        return [(line, 0.0)]
+
+    segments: list[tuple[LineString, float]] = []
+    cursor = 0.0
+    for start, end in ranges:
+        if start - cursor > MIN_CONNECTOR_LENGTH_M:
+            part = substring(line, cursor, start)
+            if isinstance(part, LineString) and not part.is_empty and part.length > MIN_CONNECTOR_LENGTH_M:
+                segments.append((part, cursor))
+        cursor = max(cursor, end)
+
+    if line.length - cursor > MIN_CONNECTOR_LENGTH_M:
+        part = substring(line, cursor, line.length)
+        if isinstance(part, LineString) and not part.is_empty and part.length > MIN_CONNECTOR_LENGTH_M:
+            segments.append((part, cursor))
+    return segments
+
+
+def turn_arrow_polygon(center: tuple[float, float], direction: tuple[float, float], width: float) -> Polygon:
+    length = TURN_ARROW_LENGTH_M
+    tx, ty = direction
+    if vector_length(direction) <= 0.01:
+        tx, ty = 1.0, 0.0
+    nx, ny = -ty, tx
+    tail_w = width * 0.35
+    head_w = width * 0.75
+    return Polygon(
+        [
+            (center[0] - tx * length * 0.5 - nx * tail_w, center[1] - ty * length * 0.5 - ny * tail_w),
+            (center[0] + tx * length * 0.05 - nx * tail_w, center[1] + ty * length * 0.05 - ny * tail_w),
+            (center[0] + tx * length * 0.05 - nx * head_w, center[1] + ty * length * 0.05 - ny * head_w),
+            (center[0] + tx * length * 0.5, center[1] + ty * length * 0.5),
+            (center[0] + tx * length * 0.05 + nx * head_w, center[1] + ty * length * 0.05 + ny * head_w),
+            (center[0] + tx * length * 0.05 + nx * tail_w, center[1] + ty * length * 0.05 + ny * tail_w),
+            (center[0] - tx * length * 0.5 + nx * tail_w, center[1] - ty * length * 0.5 + ny * tail_w),
+        ]
+    )
+
+
+def approach_arrow_polygons(
+    row: pd.Series,
+    line: LineString,
+    node_distance: float,
+    sign: float,
+    rule: RoadRule,
+    radius: float,
+) -> list[Polygon]:
+    arrows: list[Polygon] = []
+    lane_offsets = incoming_lane_offsets(row, rule, sign)
+    if not lane_offsets:
+        return arrows
+
+    candidate_offsets = [radius + APPROACH_ARROW_NEAR_M]
+    if line.length > radius + APPROACH_ARROW_FAR_M + APPROACH_ARROW_MIN_GAP_M:
+        candidate_offsets.append(radius + APPROACH_ARROW_FAR_M)
+
+    for advance in candidate_offsets:
+        arrow_distance = max(0.0, min(float(line.length), node_distance + sign * advance))
+        if abs(arrow_distance - node_distance) < radius + APPROACH_ARROW_MIN_GAP_M:
+            continue
+        point, tangent, normal = line_frame_at_distance(line, arrow_distance)
+        tx, ty = tangent
+        nx, ny = normal
+        approach_direction = (-sign * tx, -sign * ty)
+        for lane_offset in lane_offsets:
+            center = (
+                point.x + nx * lane_offset,
+                point.y + ny * lane_offset,
+            )
+            arrows.append(turn_arrow_polygon(center, approach_direction, max(0.42, rule.lane_width * 0.22)))
+    return arrows
+
+
+def channelization_island_polygon(
+    center: Point,
+    direction_a: tuple[float, float],
+    direction_b: tuple[float, float],
+    radius: float,
+) -> Polygon | None:
+    gap = angular_gap(direction_a, direction_b)
+    if gap < math.radians(CHANNELIZATION_MIN_ANGLE_DEG):
+        return None
+    if gap > math.radians(CHANNELIZATION_MAX_ANGLE_DEG):
+        return None
+
+    ax, ay = direction_a
+    bx, by = direction_b
+    bisector = (ax + bx, ay + by)
+    if vector_length(bisector) <= 0.01:
+        return None
+    bl = vector_length(bisector)
+    ux, uy = bisector[0] / bl, bisector[1] / bl
+
+    nose = radius * 0.58
+    tail = radius * 0.96
+    lateral = min(2.0, radius * 0.14)
+    nx, ny = -uy, ux
+    polygon = Polygon(
+        [
+            (center.x + ux * nose, center.y + uy * nose),
+            (center.x + ux * tail + nx * lateral, center.y + uy * tail + ny * lateral),
+            (center.x + ux * tail - nx * lateral, center.y + uy * tail - ny * lateral),
+        ]
+    )
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    if polygon.is_empty or polygon.area < 1.0:
+        return None
+    return polygon
+
+
+def angular_gap(direction_a: tuple[float, float], direction_b: tuple[float, float]) -> float:
+    angle_a = math.atan2(direction_a[1], direction_a[0])
+    angle_b = math.atan2(direction_b[1], direction_b[0])
+    gap = abs(math.atan2(math.sin(angle_b - angle_a), math.cos(angle_b - angle_a)))
+    if gap > math.pi:
+        gap = 2.0 * math.pi - gap
+    return gap
+
+
+def is_link_or_ramp_rule(row: pd.Series) -> bool:
+    road_class = (safe_str(row.get("road_class")) or "").lower()
+    road_ref = (safe_str(row.get("road_ref")) or "").lower()
+    return "link" in road_class or "ramp" in road_class or "ramp" in road_ref
+
+
+def channelization_chevron_polygons(
+    center: Point,
+    direction_a: tuple[float, float],
+    direction_b: tuple[float, float],
+    radius: float,
+) -> list[Polygon]:
+    gap = angular_gap(direction_a, direction_b)
+    if gap < math.radians(CHANNELIZATION_MIN_ANGLE_DEG) or gap > math.radians(155.0):
+        return []
+
+    bisector = (direction_a[0] + direction_b[0], direction_a[1] + direction_b[1])
+    if vector_length(bisector) <= 0.01:
+        return []
+    bl = vector_length(bisector)
+    ux, uy = bisector[0] / bl, bisector[1] / bl
+    nx, ny = -uy, ux
+
+    markings: list[Polygon] = []
+    for idx, distance_ratio in enumerate((0.55, 0.68, 0.81)):
+        bar_center = (
+            center.x + ux * radius * distance_ratio,
+            center.y + uy * radius * distance_ratio,
+        )
+        half_len = max(0.8, min(1.8, radius * (0.12 + idx * 0.025)))
+        bar = LineString(
+            [
+                (bar_center[0] - nx * half_len, bar_center[1] - ny * half_len),
+                (bar_center[0] + nx * half_len, bar_center[1] + ny * half_len),
+            ]
+        )
+        markings.append(bar.buffer(LANE_GUIDE_MARKING_WIDTH_M / 2.0, cap_style=2, join_style=2))
+    return markings
+
+
+def adjacent_arm_pairs(arm_infos: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any], float]]:
+    pairs: list[tuple[dict[str, Any], dict[str, Any], float]] = []
+    if len(arm_infos) < 2:
+        return pairs
+    for idx, arm in enumerate(arm_infos):
+        target = arm_infos[(idx + 1) % len(arm_infos)]
+        pairs.append((arm, target, angular_gap(arm["direction"], target["direction"])))
+    return pairs
+
+
+def build_junction_detail_geometries(
+    road_entries: list[tuple[pd.Series, LineString, RoadRule]],
+    junction_points: list[Point],
+    junction_nodes: list[JunctionNode] | None = None,
+) -> tuple[list[Polygon], list[Polygon], list[Polygon], list[Polygon], list[Polygon], list[Polygon], list[Polygon], int, int, list[dict[str, Any]]]:
+    junction_surfaces: list[Polygon] = []
+    junction_total_surfaces: list[Polygon] = []
+    stop_lines: list[Polygon] = []
+    crosswalks: list[Polygon] = []
+    lane_guides: list[Polygon] = []
+    turn_arrows: list[Polygon] = []
+    channelization_islands: list[Polygon] = []
+    junction_metadata: list[dict[str, Any]] = []
+    parametric_junction_count = 0
+    junction_socket_count = 0
+
+    nodes = junction_nodes if junction_nodes is not None else build_junction_nodes(road_entries, junction_points)
+    for node in nodes:
+        point = node.center
+        connected = [(row, line, rule) for row, line, rule in road_entries if line.distance(point) <= JUNCTION_NODE_TOLERANCE_M * 1.5]
+        if len(connected) < 2:
+            continue
+
+        radius = node.radius
+        socket_polygon, polygon_method = junction_polygon_with_method(node)
+        socket_total_polygon, total_polygon_method = junction_polygon_with_method(node, include_sidewalk=True)
+        if socket_polygon is not None:
+            junction_surfaces.append(socket_polygon)
+            parametric_junction_count += 1
+            junction_socket_count += len(node.sockets)
+            junction_metadata.append({
+                "junction_id": node.junction_id,
+                "junction_type": node.junction_type,
+                "junction_hierarchy": node.hierarchy,
+                "surface_strategy": node.surface_strategy,
+                "surface_algorithm": polygon_method,
+                "total_surface_algorithm": total_polygon_method,
+                "socket_count": len(node.sockets),
+                "center": [round(float(point.x), 3), round(float(point.y), 3)],
+                "area_m2": round(float(socket_polygon.area), 3),
+                "road_ids": sorted(set(socket.road_id for socket in node.sockets)),
+                "road_names": sorted(set(socket.road_name for socket in node.sockets if socket.road_name)),
+                "road_classes": sorted(set(socket.road_class for socket in node.sockets if socket.road_class)),
+            })
+        else:
+            junction_surfaces.append(point.buffer(radius, resolution=12))
+        if socket_total_polygon is not None:
+            junction_total_surfaces.append(socket_total_polygon)
+        elif socket_polygon is not None:
+            max_sidewalk = max((socket.sidewalk_width for socket in node.sockets), default=0.0)
+            junction_total_surfaces.append(socket_polygon.buffer(max_sidewalk, join_style=1))
+
+        # Lane connectors are still built in QC to simulate vehicle movement,
+        # but they are not rendered as separate road strips. CityEngine-style
+        # intersections use one clean node surface and clipped street arms.
+        _lane_connectors = build_lane_connectors(node)
+
+        for socket in node.sockets:
+            if socket.approach_type != "egress":
+                stop_lines.append(socket_bound_stop_line(socket))
+                crosswalks.extend(socket_bound_crosswalks(socket))
+        arms = []
+
+        for row, line, rule in connected:
+            node_distance = float(line.project(point))
+            if node_distance <= line.length * 0.5:
+                sign = 1.0
+            else:
+                sign = -1.0
+
+            arms.append((row, line, rule, node_distance, sign))
+
+        if GENERATE_TURN_ARROWS:
+            for row, line, rule, node_distance, sign in arms:
+                turn_arrows.extend(approach_arrow_polygons(row, line, node_distance, sign, rule, radius))
+
+        arm_infos = []
+        for row, line, rule, node_distance, sign in arms:
+            node_xy, direction, _ = arm_direction_from_junction(line, node_distance, radius * 1.25)
+            angle = math.atan2(direction[1], direction[0])
+            arm_infos.append(
+                {
+                    "row": row,
+                    "line": line,
+                    "rule": rule,
+                    "node_distance": node_distance,
+                    "direction": direction,
+                    "angle": angle,
+                    "sign": sign,
+                }
+            )
+        arm_infos.sort(key=lambda item: item["angle"])
+
+        pairs = adjacent_arm_pairs(arm_infos)
+        ramp_like = any(is_link_or_ramp_rule(item["row"]) for item in arm_infos)
+        eligible_pairs = [
+            pair
+            for pair in pairs
+            if math.radians(CHANNELIZATION_MIN_ANGLE_DEG) <= pair[2] <= math.radians(CHANNELIZATION_MAX_ANGLE_DEG)
+        ]
+        if len(arm_infos) == 3 or ramp_like:
+            for arm, target, _ in sorted(eligible_pairs, key=lambda pair: pair[2])[:1]:
+                island = channelization_island_polygon(point, arm["direction"], target["direction"], radius)
+                if island is not None:
+                    channelization_islands.append(island)
+
+    return (
+        junction_surfaces,
+        junction_total_surfaces,
+        stop_lines,
+        crosswalks,
+        lane_guides,
+        turn_arrows,
+        channelization_islands,
+        parametric_junction_count,
+        junction_socket_count,
+        junction_metadata,
+    )
 
 
 def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule]) -> list[dict[str, Any]]:
@@ -517,17 +2621,40 @@ def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRul
         road_surfaces = []
         total_surfaces = []
         lane_markings = []
+        stop_lines = []
+        crosswalks = []
+        lane_guides = []
+        turn_arrows = []
+        channelization_islands = []
+        roundabout_islands = []
+        junction_surfaces = []
         road_entries = []
+        swept_entries = []
+        clipped_road_entries = []
+        junction_metadata = []
         default_rule = rules.get("default_road")
+        group_junction_points = detect_junction_points(group)
 
         for _, row in group.iterrows():
             line: LineString = row.geometry
             rule = get_road_rule(row, rules)
             if line is None or line.is_empty:
                 continue
-            road_entries.append((line, rule))
+            road_entries.append((row, line, rule))
 
-        for line, rule in road_entries:
+        roundabout_rings, roundabout_totals, roundabout_islands = roundabout_ring_geometries(road_entries)
+        junction_surfaces.extend(roundabout_rings)
+        total_surfaces.extend(roundabout_totals)
+
+        junction_nodes = build_junction_nodes(road_entries, group_junction_points)
+
+        for row, line, rule in road_entries:
+            clip_ranges = line_junction_clip_ranges(row, line, rule, group_junction_points, junction_nodes)
+            clipped_segments = line_segments_outside_ranges(line, clip_ranges)
+            clipped_road_entries.extend((row, segment, rule, offset) for segment, offset in clipped_segments)
+            swept_entries.extend((row, segment, rule, offset) for segment, offset in clipped_segments)
+
+        for row, line, rule, _ in clipped_road_entries:
             road_surface = line_buffer(line, rule.road_width)
             total_surface = line_buffer(line, rule.road_width + 2 * rule.sidewalk_width)
 
@@ -537,11 +2664,33 @@ def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRul
             if not total_surface.is_empty:
                 total_surfaces.append(total_surface)
 
-            marking = line_buffer(line, rule.lane_marking_width)
-            if not marking.is_empty:
+            marking = lane_direction_boundary_marking(line, row, rule)
+            if marking is not None and not marking.is_empty:
                 lane_markings.append(marking)
+            lane_guides.extend(lane_offset_markings(line, row, rule))
 
-        for connector in build_short_road_connectors([line for line, _ in road_entries]):
+        (
+            detail_junctions,
+            detail_junction_totals,
+            detail_stop_lines,
+            detail_crosswalks,
+            detail_lane_guides,
+            detail_turn_arrows,
+            detail_channelization_islands,
+            parametric_junction_count,
+            junction_socket_count,
+            detail_junction_metadata,
+        ) = build_junction_detail_geometries(road_entries, group_junction_points, junction_nodes)
+        junction_surfaces.extend(detail_junctions)
+        total_surfaces.extend(detail_junction_totals)
+        stop_lines.extend(detail_stop_lines)
+        crosswalks.extend(detail_crosswalks)
+        lane_guides.extend(detail_lane_guides)
+        turn_arrows.extend(detail_turn_arrows)
+        channelization_islands.extend(detail_channelization_islands)
+        junction_metadata.extend(detail_junction_metadata)
+
+        for connector in build_short_road_connectors([line for _, line, _, _ in clipped_road_entries]):
             road_surface = line_buffer(connector, default_rule.road_width)
             total_surface = line_buffer(connector, default_rule.road_width + 2 * default_rule.sidewalk_width)
 
@@ -551,21 +2700,44 @@ def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRul
             if not total_surface.is_empty:
                 total_surfaces.append(total_surface)
 
-        if not road_surfaces or not total_surfaces:
+        if not road_surfaces and not junction_surfaces:
             continue
 
         # [核心] 仅对相同高程组内部的道路对象执行布尔并集 (初步路口与渠化融合)
-        merged_road = clean_polygonal(unary_union(road_surfaces))
-        merged_total = clean_polygonal(unary_union(total_surfaces))
+        merged_road = clean_polygonal(unary_union(road_surfaces)) if road_surfaces else None
+        merged_total = clean_polygonal(unary_union(total_surfaces)) if total_surfaces else None
+        junction_union = clean_polygonal(unary_union(junction_surfaces)) if junction_surfaces else None
 
-        if merged_road is None or merged_total is None:
+        if merged_road is None and junction_union is None:
             continue
+        if merged_road is None:
+            merged_road = junction_union
+        if merged_total is None:
+            merged_total = merged_road
+
+        if junction_union is not None:
+            merged_road = clean_polygonal(unary_union([merged_road, junction_union]))
+
+        if roundabout_islands:
+            island_union = clean_polygonal(unary_union(roundabout_islands))
+            if island_union is not None:
+                merged_road = clean_polygonal(merged_road.difference(island_union))
+                merged_total = clean_polygonal(merged_total.difference(island_union))
+                if junction_union is not None:
+                    junction_union = clean_polygonal(junction_union.difference(island_union))
 
         sidewalk = clean_polygonal(merged_total.difference(merged_road))
 
         curb = clean_polygonal(merged_road.buffer(default_rule.curb_width, join_style=2).difference(merged_road))
 
         lane_marking_union = clean_polygonal(unary_union(lane_markings).intersection(merged_road))
+        stop_line_union = clean_polygonal(unary_union(stop_lines).intersection(merged_road)) if stop_lines else None
+        crosswalk_union = clean_polygonal(unary_union(crosswalks).intersection(merged_road)) if crosswalks else None
+        if crosswalk_union is not None and junction_union is not None:
+            crosswalk_union = clean_polygonal(crosswalk_union.difference(junction_union.buffer(0.2, join_style=2)))
+        lane_guide_union = clean_polygonal(unary_union(lane_guides).intersection(merged_road)) if lane_guides else None
+        turn_arrow_union = clean_polygonal(unary_union(turn_arrows).intersection(merged_road)) if turn_arrows else None
+        channelization_union = clean_polygonal(unary_union(channelization_islands).intersection(merged_road)) if channelization_islands else None
 
         layers_geoms.append({
             "elevation": float(elevation),
@@ -573,6 +2745,22 @@ def generate_planar_geometries(roads: gpd.GeoDataFrame, rules: dict[str, RoadRul
             "sidewalk": sidewalk,
             "curb": curb,
             "lane_marking": lane_marking_union,
+            "junction_surface": junction_union,
+            "stop_line": stop_line_union,
+            "crosswalk": crosswalk_union,
+            "lane_guide": lane_guide_union,
+            "turn_arrow": turn_arrow_union,
+            "channelization_island": channelization_union,
+            "junction_count": len(junction_surfaces),
+            "parametric_junction_count": parametric_junction_count,
+            "junction_socket_count": junction_socket_count,
+            "lane_connector_count": len(detail_lane_guides),
+            "approach_arrow_count": len(detail_turn_arrows),
+            "channelization_island_count": len(detail_channelization_islands),
+            "clipped_segment_count": len(clipped_road_entries),
+            "swept_entries": swept_entries,
+            "junction_metadata": junction_metadata,
+            "junction_nodes": junction_nodes,
         })
 
     return layers_geoms
@@ -631,6 +2819,75 @@ def polygon_to_top_mesh(geom, z: float, name: str, visual_color=None) -> trimesh
     if not vertices or not faces:
         return trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3)), process=False)
 
+    mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+    mesh.metadata["name"] = name
+    if visual_color is not None:
+        mesh.visual.face_colors = visual_color
+    return mesh
+
+
+def interpolated_junction_z(x: float, y: float, nodes: list[JunctionNode], fallback_z: float) -> float:
+    samples: list[tuple[float, float]] = []
+    for node in nodes or []:
+        if math.hypot(x - node.center.x, y - node.center.y) > node.radius * 1.8:
+            continue
+        for socket in node.sockets:
+            d = max(0.25, math.hypot(x - socket.center[0], y - socket.center[1]))
+            samples.append((d, float(socket.elevation)))
+    if not samples:
+        return fallback_z
+    nearest = sorted(samples, key=lambda item: item[0])[:4]
+    numerator = 0.0
+    denominator = 0.0
+    for distance, z_value in nearest:
+        weight = 1.0 / (distance * distance)
+        numerator += z_value * weight
+        denominator += weight
+    return numerator / denominator if denominator > 0.0 else fallback_z
+
+
+def polygon_to_junction_mesh(
+    geom,
+    z: float,
+    name: str,
+    junction_nodes: list[JunctionNode] | None = None,
+    visual_color=None,
+) -> trimesh.Trimesh:
+    if not junction_nodes:
+        return polygon_to_top_mesh(geom, z, name, visual_color)
+
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    v_index: dict[tuple[float, float], int] = {}
+
+    def add_vertex(x, y) -> int:
+        key = (round(float(x), 6), round(float(y), 6))
+        if key in v_index:
+            return v_index[key]
+        z_value = interpolated_junction_z(float(x), float(y), junction_nodes, z) + 0.003
+        idx = len(vertices)
+        vertices.append((key[0], key[1], round(float(z_value), 6)))
+        v_index[key] = idx
+        return idx
+
+    for poly in iter_polygons(geom):
+        if poly.area <= 1e-6:
+            continue
+        try:
+            verts, fcs = triangulate_polygon(poly)
+        except Exception:
+            continue
+        for f in fcs:
+            idxs = [add_vertex(verts[f[0]][0], verts[f[0]][1]), add_vertex(verts[f[1]][0], verts[f[1]][1]), add_vertex(verts[f[2]][0], verts[f[2]][1])]
+            p0 = np.array(vertices[idxs[0]])
+            p1 = np.array(vertices[idxs[1]])
+            p2 = np.array(vertices[idxs[2]])
+            if np.cross(p1 - p0, p2 - p0)[2] < 0:
+                idxs = [idxs[0], idxs[2], idxs[1]]
+            faces.append(tuple(idxs))
+
+    if not vertices or not faces:
+        return empty_mesh(name)
     mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
     mesh.metadata["name"] = name
     if visual_color is not None:
@@ -729,7 +2986,484 @@ def polygon_to_extruded_mesh(geom, z_bottom: float, z_top: float, name: str, vis
     return mesh
 
 
-def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Scene, dict[str, trimesh.Trimesh]]:
+def empty_mesh(name: str) -> trimesh.Trimesh:
+    mesh = trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3)), process=False)
+    mesh.metadata["name"] = name
+    return mesh
+
+
+def merge_named_meshes(name: str, parts: list[trimesh.Trimesh], color=None) -> trimesh.Trimesh:
+    valid = [mesh for mesh in parts if mesh is not None and len(mesh.vertices) > 0]
+    if not valid:
+        return empty_mesh(name)
+    mesh = trimesh.util.concatenate(valid)
+    mesh.metadata["name"] = name
+    if color is not None:
+        mesh.visual.face_colors = color
+    return mesh
+
+
+def mesh_bounds_xy(meshes: Iterable[trimesh.Trimesh]) -> tuple[float, float, float, float] | None:
+    bounds = []
+    for mesh in meshes:
+        if mesh is None or len(mesh.vertices) == 0:
+            continue
+        mesh_bounds = mesh.bounds
+        bounds.append((float(mesh_bounds[0][0]), float(mesh_bounds[0][1]), float(mesh_bounds[1][0]), float(mesh_bounds[1][1])))
+    if not bounds:
+        return None
+    return (
+        min(item[0] for item in bounds),
+        min(item[1] for item in bounds),
+        max(item[2] for item in bounds),
+        max(item[3] for item in bounds),
+    )
+
+
+def projected_xy_to_latlon(x: float, y: float, crs: str = TARGET_CRS) -> tuple[float, float] | None:
+    try:
+        point = gpd.GeoSeries([Point(float(x), float(y))], crs=crs).to_crs("EPSG:4326").iloc[0]
+    except Exception as exc:
+        logging.warning("Unable to transform basemap center to lat/lon: %s", exc)
+        return None
+    return (float(point.y), float(point.x))
+
+
+def google_static_map_url(
+    center_latlon: tuple[float, float],
+    zoom: int = 16,
+    size: str = "640x640",
+    scale: int = 2,
+    maptype: str = "roadmap",
+) -> str | None:
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if not api_key:
+        return None
+    params = {
+        "center": f"{center_latlon[0]:.7f},{center_latlon[1]:.7f}",
+        "zoom": str(int(zoom)),
+        "size": size,
+        "scale": str(int(scale)),
+        "maptype": os.environ.get("GOOGLE_MAPTYPE", maptype),
+        "format": "png",
+        "key": api_key,
+    }
+    return "https://maps.googleapis.com/maps/api/staticmap?" + urlencode(params)
+
+
+def ensure_google_map_texture(center_latlon: tuple[float, float] | None) -> Path | None:
+    if center_latlon is None:
+        return None
+    if GOOGLE_MAP_TEXTURE_PATH.exists() and GOOGLE_MAP_TEXTURE_PATH.stat().st_size > 1024:
+        return GOOGLE_MAP_TEXTURE_PATH
+    url = google_static_map_url(
+        center_latlon,
+        zoom=int(os.environ.get("GOOGLE_MAP_ZOOM", "16")),
+        maptype=os.environ.get("GOOGLE_MAPTYPE", "roadmap"),
+    )
+    if url is None:
+        logging.warning("GOOGLE_MAPS_API_KEY is not set; using generated GIS basemap fallback.")
+        return None
+    try:
+        import requests
+
+        TEXTURE_DIR.mkdir(parents=True, exist_ok=True)
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        GOOGLE_MAP_TEXTURE_PATH.write_bytes(response.content)
+    except Exception as exc:
+        logging.warning("Unable to download Google Static Map texture: %s", exc)
+        return None
+    return GOOGLE_MAP_TEXTURE_PATH if GOOGLE_MAP_TEXTURE_PATH.exists() else None
+
+
+def textured_basemap_mesh(
+    minx: float,
+    miny: float,
+    maxx: float,
+    maxy: float,
+    z: float,
+    texture_path: Path | None,
+) -> trimesh.Trimesh:
+    vertices = np.array(
+        [
+            (minx, miny, z),
+            (maxx, miny, z),
+            (maxx, maxy, z),
+            (minx, maxy, z),
+        ],
+        dtype=float,
+    )
+    faces = np.array([(0, 1, 2), (0, 2, 3)])
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    mesh.metadata["name"] = "GIS_GoogleMap" if texture_path is not None else "GIS_BaseMap"
+    uv = np.array([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], dtype=float)
+    try:
+        mesh.visual = TextureVisuals(uv=uv, image=str(texture_path)) if texture_path is not None else mesh.visual
+    except Exception:
+        mesh.visual.face_colors = CIM3_COLORS["gis_basemap"]
+    if texture_path is None:
+        mesh.visual.face_colors = CIM3_COLORS["gis_basemap"]
+    return mesh
+
+
+def make_gis_basemap_meshes(
+    bounds: tuple[float, float, float, float] | None,
+    z: float = -0.08,
+    padding: float = 80.0,
+    grid_spacing: float = 100.0,
+    google_center_latlon: tuple[float, float] | None = None,
+) -> dict[str, trimesh.Trimesh]:
+    if bounds is None:
+        return {}
+    minx, miny, maxx, maxy = bounds
+    if maxx <= minx or maxy <= miny:
+        return {}
+    minx -= padding
+    miny -= padding
+    maxx += padding
+    maxy += padding
+
+    texture_path = ensure_google_map_texture(google_center_latlon)
+    base = textured_basemap_mesh(minx, miny, maxx, maxy, z, texture_path)
+
+    grid_parts = []
+    x = math.floor(minx / grid_spacing) * grid_spacing
+    while x <= maxx:
+        grid_parts.append(LineString([(x, miny), (x, maxy)]).buffer(0.12, cap_style=2, join_style=2))
+        x += grid_spacing
+    y = math.floor(miny / grid_spacing) * grid_spacing
+    while y <= maxy:
+        grid_parts.append(LineString([(minx, y), (maxx, y)]).buffer(0.12, cap_style=2, join_style=2))
+        y += grid_spacing
+
+    grid_geom = clean_polygonal(unary_union(grid_parts)) if grid_parts else None
+    grid = polygon_to_top_mesh(grid_geom, z + 0.004, "GIS_Grid", CIM3_COLORS["gis_grid"])
+    result = {}
+    if len(base.vertices) > 0:
+        result[base.metadata["name"]] = base
+    if len(grid.vertices) > 0:
+        result["GIS_Grid"] = grid
+    return result
+
+
+def cylinder_between(name: str, start, end, radius: float, color, sections: int = 12) -> trimesh.Trimesh | None:
+    p0 = np.array(start, dtype=float)
+    p1 = np.array(end, dtype=float)
+    if np.linalg.norm(p1 - p0) <= 0.05:
+        return None
+    mesh = trimesh.creation.cylinder(radius=radius, sections=sections, segment=np.vstack([p0, p1]))
+    mesh.metadata["name"] = name
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def box_at(name: str, center, size, color) -> trimesh.Trimesh:
+    mesh = trimesh.creation.box(extents=size)
+    mesh.apply_translation(center)
+    mesh.metadata["name"] = name
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def ellipsoid_at(name: str, center, radii, color, subdivisions: int = 2) -> trimesh.Trimesh:
+    mesh = trimesh.creation.icosphere(subdivisions=subdivisions, radius=1.0)
+    sx, sy, sz = radii
+    mesh.apply_transform(np.diag([sx, sy, sz, 1.0]))
+    mesh.apply_translation(center)
+    mesh.metadata["name"] = name
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def offset_segment_xy(a, b, offset: float) -> tuple[tuple[float, float], tuple[float, float]]:
+    ax, ay = a[0], a[1]
+    bx, by = b[0], b[1]
+    dx = bx - ax
+    dy = by - ay
+    length = math.hypot(dx, dy)
+    if length <= 0.05:
+        return (ax, ay), (bx, by)
+    nx = -dy / length
+    ny = dx / length
+    return (ax + nx * offset, ay + ny * offset), (bx + nx * offset, by + ny * offset)
+
+
+def line_side_point(line: LineString, distance: float, offset: float) -> tuple[float, float]:
+    distance = max(0.0, min(float(distance), float(line.length)))
+    p = line.interpolate(distance)
+    ahead = line.interpolate(min(line.length, distance + 0.5))
+    behind = line.interpolate(max(0.0, distance - 0.5))
+    dx = ahead.x - behind.x
+    dy = ahead.y - behind.y
+    length = math.hypot(dx, dy)
+    if length <= 0.05:
+        return (p.x, p.y)
+    nx = -dy / length
+    ny = dx / length
+    return (p.x + nx * offset, p.y + ny * offset)
+
+
+def iter_line_distances(line: LineString, spacing: float, first_offset: float) -> Iterable[float]:
+    if line.length < first_offset:
+        return
+    distance = first_offset
+    while distance < line.length:
+        yield distance
+        distance += spacing
+
+
+def build_guardrail_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Trimesh]:
+    meshes = []
+    if not bool(row.get("is_bridge", False)) and rule.lane_count < 4:
+        return meshes
+    z = float(row.get("road_z_mean", row.get("elevation", 0.0))) + 0.62
+    offsets = [rule.road_width / 2.0 + 0.45, -rule.road_width / 2.0 - 0.45]
+    for line in [row.geometry]:
+        coords = list(line.coords)
+        for seg_idx, (a, b) in enumerate(zip(coords, coords[1:])):
+            for side_idx, offset in enumerate(offsets):
+                start_xy, end_xy = offset_segment_xy(a, b, offset)
+                mesh = cylinder_between(
+                    f"Guardrail_{row['road_id']}_{seg_idx}_{side_idx}",
+                    (start_xy[0], start_xy[1], z),
+                    (end_xy[0], end_xy[1], z),
+                    0.055,
+                    CIM3_COLORS["guardrail"],
+                    sections=8,
+                )
+                if mesh is not None:
+                    meshes.append(mesh)
+    return meshes
+
+
+def build_street_light_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Trimesh]:
+    meshes = []
+    line: LineString = row.geometry
+    lateral = rule.road_width / 2.0 + max(rule.sidewalk_width * 0.65, 0.8)
+    junction_distances = row_junction_distances(row)
+    candidate_distances = list(iter_line_distances(line, STREET_LIGHT_SPACING_M, STREET_LIGHT_SPACING_M / 2.0))
+    for junction_distance in junction_distances:
+        for offset in (-CROSSWALK_DISTANCE_FROM_JUNCTION_M - 3.0, CROSSWALK_DISTANCE_FROM_JUNCTION_M + 3.0):
+            candidate = max(0.0, min(float(line.length), junction_distance + offset))
+            if 1.0 < candidate < line.length - 1.0:
+                candidate_distances.append(candidate)
+
+    filtered_distances = []
+    for distance in sorted(set(round(float(d), 3) for d in candidate_distances)):
+        if is_near_any_distance(distance, junction_distances, JUNCTION_RADIUS_M * 0.75):
+            continue
+        filtered_distances.append(distance)
+
+    for dist_idx, distance in enumerate(filtered_distances):
+        side = 1.0 if dist_idx % 2 == 0 else -1.0
+        point, tangent, normal = line_frame_at_distance(line, distance)
+        nx, ny = normal
+        x = point.x + nx * lateral * side
+        y = point.y + ny * lateral * side
+        arm_end = (
+            x - nx * side * 1.25,
+            y - ny * side * 1.25,
+        )
+        z0 = elevation_at_distance(row, distance) + rule.curb_height
+        base = cylinder_between(
+            f"Street_Light_Base_{row['road_id']}_{dist_idx}",
+            (x, y, z0),
+            (x, y, z0 + 0.28),
+            0.18,
+            CIM3_COLORS["street_light"],
+            sections=14,
+        )
+        pole = cylinder_between(
+            f"Street_Light_Pole_{row['road_id']}_{dist_idx}",
+            (x, y, z0 + 0.18),
+            (x, y, z0 + 6.4),
+            0.075,
+            CIM3_COLORS["street_light"],
+            sections=14,
+        )
+        arm = cylinder_between(
+            f"Street_Light_Arm_{row['road_id']}_{dist_idx}",
+            (x, y, z0 + 6.25),
+            (arm_end[0], arm_end[1], z0 + 5.85),
+            0.045,
+            CIM3_COLORS["street_light"],
+            sections=10,
+        )
+        lamp = box_at(
+            f"Street_Light_Lamp_{row['road_id']}_{dist_idx}",
+            (arm_end[0], arm_end[1], z0 + 5.75),
+            (0.78, 0.24, 0.16),
+            CIM3_COLORS["street_light_lamp"],
+        )
+        if base is not None:
+            meshes.append(base)
+        if pole is not None:
+            meshes.append(pole)
+        if arm is not None:
+            meshes.append(arm)
+        meshes.append(lamp)
+    return meshes
+
+
+def build_tree_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Trimesh]:
+    meshes = []
+    line: LineString = row.geometry
+    if line.length < TREE_SPACING_M * 0.8:
+        return meshes
+
+    lateral = rule.road_width / 2.0 + max(rule.sidewalk_width * 0.82, 1.15)
+    junction_distances = row_junction_distances(row)
+    junction_clearance = max(
+        TREE_JUNCTION_CLEARANCE_M,
+        JUNCTION_RADIUS_M * 2.0,
+        road_class_clip_distance(row, rule) * 0.85,
+        rule.road_width + rule.sidewalk_width * 2.0,
+    )
+    candidate_distances = list(iter_line_distances(line, TREE_SPACING_M, TREE_SPACING_M * 0.55))
+    filtered_distances = []
+    for distance in sorted(set(round(float(d), 3) for d in candidate_distances)):
+        if is_near_any_distance(distance, junction_distances, junction_clearance):
+            continue
+        filtered_distances.append(distance)
+
+    for tree_idx, distance in enumerate(filtered_distances):
+        side = -1.0 if tree_idx % 2 == 0 else 1.0
+        x, y = line_side_point(line, distance, lateral * side)
+        # Keep trees out of the entire junction throat, not only the centerline
+        # point, so crowns do not appear in the middle of intersection surfaces.
+        if any(Point(x, y).distance(line.interpolate(jd)) <= junction_clearance for jd in junction_distances):
+            continue
+        z0 = elevation_at_distance(row, distance) + rule.curb_height
+        trunk_h = 2.6
+        crown_base = z0 + trunk_h
+        trunk = cylinder_between(
+            f"Tree_Trunk_{row['road_id']}_{tree_idx}",
+            (x, y, z0),
+            (x, y, crown_base + 0.15),
+            0.16,
+            CIM3_COLORS["tree_trunk"],
+            sections=10,
+        )
+        crown = ellipsoid_at(
+            f"Tree_Crown_{row['road_id']}_{tree_idx}",
+            (x, y, crown_base + 1.15),
+            (1.35, 1.35, 1.55),
+            CIM3_COLORS["tree_crown"],
+            subdivisions=2,
+        )
+        crown_top = ellipsoid_at(
+            f"Tree_Crown_Top_{row['road_id']}_{tree_idx}",
+            (x, y, crown_base + 2.25),
+            (0.95, 0.95, 0.95),
+            CIM3_COLORS["tree_crown"],
+            subdivisions=1,
+        )
+        if trunk is not None:
+            meshes.append(trunk)
+        meshes.extend([crown, crown_top])
+    return meshes
+
+
+def build_bridge_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Trimesh]:
+    if not bool(row.get("is_bridge", False)):
+        return []
+    line: LineString = row.geometry
+    road_z = float(row.get("road_z_mean", row.get("elevation", 0.0)))
+    deck_geom = line_buffer(line, rule.road_width + 1.2)
+    deck = polygon_to_extruded_mesh(
+        deck_geom,
+        z_bottom=road_z - 0.65,
+        z_top=road_z - 0.15,
+        name=f"Bridge_Deck_{row['road_id']}",
+        visual_color=CIM3_COLORS["bridge_deck"],
+    )
+    meshes = [deck]
+    for pier_idx, distance in enumerate(iter_line_distances(line, BRIDGE_PIER_SPACING_M, BRIDGE_PIER_SPACING_M / 2.0)):
+        point = line.interpolate(distance)
+        pier = cylinder_between(
+            f"Bridge_Pier_{row['road_id']}_{pier_idx}",
+            (point.x, point.y, 0.0),
+            (point.x, point.y, max(0.2, road_z - 0.65)),
+            0.45,
+            CIM3_COLORS["bridge_pier"],
+            sections=14,
+        )
+        if pier is not None:
+            meshes.append(pier)
+    return meshes
+
+
+def build_median_mesh(row: pd.Series, rule: RoadRule) -> trimesh.Trimesh:
+    if rule.lane_count < 4:
+        return empty_mesh(f"Median_{row['road_id']}")
+    z = float(row.get("road_z_mean", row.get("elevation", 0.0)))
+    geom = line_buffer(row.geometry, 0.8)
+    return polygon_to_extruded_mesh(
+        geom,
+        z_bottom=z + 0.01,
+        z_top=z + 0.18,
+        name=f"Median_{row['road_id']}",
+        visual_color=CIM3_COLORS["median"],
+    )
+
+
+def build_cim3_road_asset_meshes(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule]) -> dict[str, trimesh.Trimesh]:
+    meshes: dict[str, trimesh.Trimesh] = {}
+    for _, row in roads.iterrows():
+        if row.geometry is None or row.geometry.is_empty or not isinstance(row.geometry, LineString):
+            continue
+        rule = get_road_rule(row, rules)
+        asset_groups = {
+            "Median": [build_median_mesh(row, rule)],
+            "Guardrail": build_guardrail_meshes(row, rule),
+            "Street_Light": build_street_light_meshes(row, rule),
+            "Tree": build_tree_meshes(row, rule),
+            "Bridge": build_bridge_meshes(row, rule),
+        }
+        for prefix, parts in asset_groups.items():
+            color = None if prefix == "Tree" else CIM3_COLORS.get(prefix.lower())
+            mesh = merge_named_meshes(
+                f"{prefix}_{row['road_id']}",
+                parts,
+                color,
+            )
+            if len(mesh.vertices) > 0:
+                meshes[mesh.metadata["name"]] = mesh
+    return meshes
+
+
+def junction_label_color(node: JunctionNode) -> list[int]:
+    if node.hierarchy == "MAJOR_ARTERIAL":
+        return CIM3_COLORS["junction_label_major"]
+    if node.hierarchy == "SECONDARY_COLLECTOR":
+        return CIM3_COLORS["junction_label_secondary"]
+    if node.hierarchy == "RAMP_OR_GRADE_SEPARATED":
+        return CIM3_COLORS["junction_label_ramp"]
+    if node.hierarchy in {"COMPLEX_MULTI_ARM", "ROUNDABOUT_JUNCTION"}:
+        return CIM3_COLORS["junction_label_complex"]
+    return CIM3_COLORS["junction_label_local"]
+
+
+def build_junction_label_meshes(nodes: list[JunctionNode], z: float) -> dict[str, trimesh.Trimesh]:
+    meshes: dict[str, trimesh.Trimesh] = {}
+    for node in nodes:
+        radius = 0.55 if node.hierarchy == "LOCAL_JUNCTION" else 0.75
+        height = 0.08
+        mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=12)
+        mesh.apply_translation((node.center.x, node.center.y, z + 0.12 + height / 2.0))
+        mesh.metadata["name"] = f"Junction_Label_{node.junction_id}_{node.junction_type}_{node.hierarchy}"
+        mesh.visual.face_colors = junction_label_color(node)
+        meshes[mesh.metadata["name"]] = mesh
+    return meshes
+
+
+def make_scene(
+    layers: list[dict[str, Any]],
+    rule: RoadRule,
+    google_center_latlon: tuple[float, float] | None = None,
+    include_basemap: bool = True,
+) -> tuple[trimesh.Scene, dict[str, trimesh.Trimesh]]:
     """
     场景构建器：接收加工好的 2D 几何信息，映射相关高度与颜色预设，转化为真正的 3D Mesh 对象，
     并将它们统筹装配合并至 Trimesh 核心场景容器 (Scene) 内部。
@@ -739,6 +3473,12 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
     sidewalk_color = [170, 170, 170, 255]
     curb_color = [210, 210, 210, 255]
     marking_color = [255, 255, 255, 255]
+    lane_colors = [
+        [46, 46, 44, 255],
+        [39, 39, 38, 255],
+        [52, 52, 49, 255],
+        [43, 43, 41, 255],
+    ]
 
     scene = trimesh.Scene()
     all_meshes = {}
@@ -747,12 +3487,44 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
         z = layer["elevation"] + rule.road_z
 
         # 分层级生成路面、人行道、路缘石和标线的独立 Mesh 对象
-        road_mesh = polygon_to_top_mesh(
-            layer["road_surface"],
-            z=z,
-            name=f"Road_Surface_{i}",
-            visual_color=road_color,
-        )
+        road_swept_parts = []
+        lane_meshes = {}
+        for road_idx, entry in enumerate(layer.get("swept_entries", [])):
+            if len(entry) == 4:
+                row, line, road_rule, distance_offset = entry
+            else:
+                row, line, road_rule = entry
+                distance_offset = 0.0
+            road_swept_parts.append(
+                swept_road_mesh(
+                    row,
+                    line,
+                    road_rule,
+                    name=f"Road_Surface_Swept_{i}_{road_idx}",
+                    visual_color=road_color,
+                    distance_offset=distance_offset,
+                )
+            )
+            for lane_idx in range(road_rule.lane_count):
+                lane_name = f"Lane_Surface_{i}_{road_idx}_{lane_idx}"
+                lane_meshes[lane_name] = swept_lane_mesh(
+                    row,
+                    line,
+                    road_rule,
+                    lane_idx,
+                    lane_name,
+                    visual_color=lane_colors[lane_idx % len(lane_colors)],
+                    distance_offset=distance_offset,
+                )
+
+        road_mesh = merge_named_meshes(f"Road_Surface_{i}", road_swept_parts, road_color)
+        if len(road_mesh.vertices) == 0:
+            road_mesh = polygon_to_top_mesh(
+                layer["road_surface"],
+                z=z,
+                name=f"Road_Surface_{i}",
+                visual_color=road_color,
+            )
 
         sidewalk_mesh = polygon_to_top_mesh(
             layer["sidewalk"],
@@ -775,19 +3547,70 @@ def make_scene(layers: list[dict[str, Any]], rule: RoadRule) -> tuple[trimesh.Sc
             name=f"Lane_Marking_{i}",
             visual_color=marking_color,
         )
+        junction_mesh = polygon_to_junction_mesh(
+            layer.get("junction_surface"),
+            z=z,
+            name=f"Junction_Surface_{i}",
+            junction_nodes=layer.get("junction_nodes", []),
+            visual_color=CIM3_COLORS["junction"],
+        )
+        stop_line_mesh = polygon_to_top_mesh(
+            layer.get("stop_line"),
+            z=z + rule.lane_marking_z_offset + 0.004,
+            name=f"Stop_Line_{i}",
+            visual_color=CIM3_COLORS["stop_line"],
+        )
+        crosswalk_mesh = polygon_to_top_mesh(
+            layer.get("crosswalk"),
+            z=z + rule.lane_marking_z_offset + 0.006,
+            name=f"Crosswalk_{i}",
+            visual_color=CIM3_COLORS["crosswalk"],
+        )
+        lane_guide_mesh = polygon_to_top_mesh(
+            layer.get("lane_guide"),
+            z=z + rule.lane_marking_z_offset + 0.008,
+            name=f"Lane_Guide_{i}",
+            visual_color=CIM3_COLORS["lane_guide"],
+        )
+        turn_arrow_mesh = polygon_to_top_mesh(
+            layer.get("turn_arrow"),
+            z=z + rule.lane_marking_z_offset + 0.01,
+            name=f"Turn_Arrow_{i}",
+            visual_color=CIM3_COLORS["turn_arrow"],
+        )
+        channelization_mesh = polygon_to_top_mesh(
+            layer.get("channelization_island"),
+            z=z + rule.curb_height + 0.006,
+            name=f"Channelization_Island_{i}",
+            visual_color=CIM3_COLORS["channelization"],
+        )
 
         layer_meshes = {
             f"Road_Surface_{i}": road_mesh,
             f"Sidewalk_{i}": sidewalk_mesh,
             f"Curb_{i}": curb_mesh,
             f"Lane_Marking_{i}": lane_mesh,
+            f"Junction_Surface_{i}": junction_mesh,
+            f"Stop_Line_{i}": stop_line_mesh,
+            f"Crosswalk_{i}": crosswalk_mesh,
+            f"Lane_Guide_{i}": lane_guide_mesh,
+            f"Turn_Arrow_{i}": turn_arrow_mesh,
+            f"Channelization_Island_{i}": channelization_mesh,
         }
+        layer_meshes.update(lane_meshes)
+        layer_meshes.update(build_junction_label_meshes(layer.get("junction_nodes", []), z))
 
         # 过滤掉空数据的网格，将有效模型添加到场景容器中
         for name, mesh in layer_meshes.items():
             if len(mesh.vertices) > 0:
                 scene.add_geometry(mesh, node_name=name, geom_name=name)
                 all_meshes[name] = mesh
+
+    if include_basemap:
+        base_bounds = mesh_bounds_xy(all_meshes.values())
+        for name, mesh in make_gis_basemap_meshes(base_bounds, google_center_latlon=google_center_latlon).items():
+            scene.add_geometry(mesh, node_name=name, geom_name=name)
+            all_meshes[name] = mesh
 
     return scene, all_meshes
 
@@ -797,6 +3620,7 @@ def export_scene(scene: trimesh.Scene) -> None:
     将整个 trimesh 场景导出为 OBJ。FBX 在 Blender 材质流程中导出。
     """
     scene.export(OBJ_PATH)
+    scene.export(GLB_PATH)
 
 
 def build_semantic_json(
@@ -815,12 +3639,25 @@ def build_semantic_json(
 
     # POC 阶段中的 3D 几何对象被整合为一个连续大面，在此依然保留每条路源数据的中心线记录供后续溯源追溯
     for _, row in roads.iterrows():
+        rule = get_road_rule(row, rules)
+        lane_layout = lane_layout_for_row(row, rule)
         objects.append({
             "object_id": f"{row['road_id']}_source_centerline",
             "source_road_id": row["road_id"],
             "road_name": row["road_name"],
             "road_class": safe_str(row.get("road_class")),
-            "lane_count": safe_str(row.get("lane_count")),
+            "cim3_road_grade": cim3_road_grade(row.get("road_class")),
+            "design_speed_kmh": design_speed_kmh(row.get("road_class"), row.get("maxspeed")),
+            "lane_count": parse_lane_count(row.get("lane_count"), default=rule.lane_count),
+            "lanes_forward": lane_layout.forward_count,
+            "lanes_backward": lane_layout.backward_count,
+            "lane_width_m": rule.lane_width,
+            "road_width_m": rule.road_width,
+            "osm_width_m": parse_road_width_m(row.get("osm_width")),
+            "sidewalk_width_m": rule.sidewalk_width,
+            "surface_material": rule.material,
+            "construction_year": safe_str(row.get("start_date")) or "unknown",
+            "owner_unit": safe_str(row.get("operator")) or "unknown",
             "maxspeed": safe_str(row.get("maxspeed")),
             "oneway": safe_str(row.get("oneway")),
             "is_bridge": bool(row.get("is_bridge")),
@@ -838,7 +3675,11 @@ def build_semantic_json(
             "road_z_start": float(row.get("road_z_start", 0.0)),
             "road_z_end": float(row.get("road_z_end", 0.0)),
             "road_z_mean": float(row.get("road_z_mean", 0.0)),
-            "rule_id": safe_str(row.get("road_class")) if safe_str(row.get("road_class")) in rules else "default_road",
+            "elevation_profile": json.loads(row.get("elevation_profile_json", "{\"samples\": []}")),
+            "max_grade_percent": float(row.get("max_grade_percent", 0.0)),
+            "junction_distances_m": row_junction_distances(row),
+            "transition_curve_count": int(row.get("transition_curve_count", 0)),
+            "rule_id": canonical_road_class(row.get("road_class"), rules),
         })
 
     for i, layer in enumerate(layers):
@@ -848,10 +3689,18 @@ def build_semantic_json(
             ("Sidewalk", layer["sidewalk"], default_rule.sidewalk_material),
             ("Curb", layer["curb"], default_rule.curb_material),
             ("Lane_Marking", layer["lane_marking"], default_rule.marking_material),
+            ("Stop_Line", layer.get("stop_line"), default_rule.marking_material),
+            ("Crosswalk", layer.get("crosswalk"), default_rule.marking_material),
+            ("Lane_Guide", layer.get("lane_guide"), default_rule.marking_material),
+            ("Turn_Arrow", layer.get("turn_arrow"), default_rule.marking_material),
+            ("Channelization_Island", layer.get("channelization_island"), "painted_channelization_island"),
+            ("Junction_Surface", layer.get("junction_surface"), default_rule.material),
         ]
 
         for base_type, geom, material in merged_objects:
-            area = 0.0 if geom is None or geom.is_empty else float(geom.area)
+            if geom is None or geom.is_empty:
+                continue
+            area = float(geom.area)
             objects.append({
                 "object_id": f"{base_type}_layer_{i}",
                 "object_type": base_type,
@@ -866,10 +3715,79 @@ def build_semantic_json(
                 ],
             })
 
+        for item in layer.get("junction_metadata", []):
+            objects.append({
+                "object_id": item["junction_id"],
+                "object_type": "Junction_Node",
+                "junction_type": item.get("junction_type", "UNKNOWN"),
+                "junction_hierarchy": item.get("junction_hierarchy", "LOCAL_JUNCTION"),
+                "surface_strategy": item.get("surface_strategy", "edge_intersection"),
+                "surface_algorithm": item.get("surface_algorithm", "unknown"),
+                "total_surface_algorithm": item.get("total_surface_algorithm", "unknown"),
+                "socket_count": item.get("socket_count", 0),
+                "source_road_ids": item.get("road_ids", []),
+                "source_road_names": item.get("road_names", []),
+                "source_road_classes": item.get("road_classes", []),
+                "center_xy": item.get("center", []),
+                "area_m2": item.get("area_m2", 0.0),
+                "material": default_rule.material,
+                "mesh_files": [
+                    str(OBJ_PATH.relative_to(ROOT)),
+                    str(GLB_PATH.relative_to(ROOT)),
+                ],
+            })
+
+        for node in layer.get("junction_nodes", []):
+            for socket in node.sockets:
+                for lane in socket.lane_sockets:
+                    objects.append({
+                        "object_id": lane.lane_socket_id,
+                        "object_type": "Lane_Socket",
+                        "junction_id": node.junction_id,
+                        "source_road_id": socket.road_id,
+                        "lane_id": lane.lane_id or lane.lane_socket_id,
+                        "lane_index": lane.lane_index,
+                        "lane_width_m": lane.lane_width,
+                        "movement": lane.movement,
+                        "allowed_turns": lane.allowed_turns or lane.allowed_movements,
+                        "traffic_direction": lane.traffic_direction,
+                        "signal_group": lane.signal_group,
+                        "stop_control": lane.stop_control,
+                    })
+
     semantic = {
         "project": "cim_road_poc",
-        "model_level": "CIM3",
+        "model_level": "CIM4_candidate",
         "description": "第一轮 POC：统一道路模板生成公共道路模型",
+        "cim3_requirements": {
+            "scale_range": "1:500-1:2000",
+            "plan_accuracy_m": CIM3_PLAN_ACCURACY_M,
+            "height_accuracy_m": CIM3_HEIGHT_ACCURACY_M,
+            "min_geometric_detail_m": CIM3_MIN_GEOMETRIC_DETAIL_M,
+            "lane_width_tolerance_m": 0.3,
+            "sidewalk_width_tolerance_m": 0.5,
+            "length_radius_tolerance_percent": 5,
+            "junction_gap_tolerance_m": 0.2,
+            "elevation_sample_interval_m": ELEVATION_SAMPLE_INTERVAL_M,
+            "junction_node_tolerance_m": JUNCTION_NODE_TOLERANCE_M,
+            "junction_canalization": True,
+            "crosswalk_generation": GENERATE_CROSSWALKS,
+            "stop_line_generation": True,
+            "clothoid_transition_centerlines": True,
+            "lane_level_junction_topology": True,
+            "cross_section_driven_sweep": True,
+            "junction_clipped_road_sweep": True,
+            "junction_socket_model": True,
+            "socket_driven_junction_mesh": True,
+            "approach_lane_arrows": GENERATE_TURN_ARROWS,
+            "turn_arrow_generation": GENERATE_TURN_ARROWS,
+            "channelization_islands": True,
+            "road_crown_slope": CROWN_SLOPE,
+            "lane_crown_slope": LANE_CROWN_SLOPE,
+            "sweep_sample_interval_m": SWEEP_SAMPLE_INTERVAL_M,
+            "transition_min_angle_deg": TRANSITION_MIN_ANGLE_DEG,
+            "transition_max_length_m": TRANSITION_MAX_LENGTH_M,
+        },
         "coordinate": {
             "source_crs": "OSM WGS84 -> projected",
             "model_crs": meta["target_crs"],
@@ -914,6 +3832,100 @@ def mesh_qc(meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
     return result
 
 
+def arrow_traffic_qc(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule]) -> dict[str, Any]:
+    if not GENERATE_TURN_ARROWS:
+        return {
+            "enabled": False,
+            "checked_arrow_count": 0,
+            "ingress_lane_count": 0,
+            "simulated_connector_count": 0,
+            "wrong_direction_count": 0,
+            "disconnected_ingress_count": 0,
+            "passed": True,
+            "sample_issues": [],
+        }
+
+    issues: list[dict[str, Any]] = []
+    checked_arrow_count = 0
+    ingress_lane_count = 0
+    disconnected_ingress_count = 0
+    wrong_direction_count = 0
+    simulated_connector_count = 0
+
+    grouped_roads = roads.copy()
+    grouped_roads["topology_group"] = grouped_roads.apply(road_topology_group, axis=1)
+    for _, group in grouped_roads.groupby("topology_group"):
+        road_entries: list[tuple[pd.Series, LineString, RoadRule]] = []
+        for _, row in group.iterrows():
+            line = row.geometry
+            if line is None or line.is_empty or not isinstance(line, LineString):
+                continue
+            road_entries.append((row, line, get_road_rule(row, rules)))
+
+        junction_nodes = build_junction_nodes(road_entries, detect_junction_points(group))
+        for node in junction_nodes:
+            connected = [(row, line, rule) for row, line, rule in road_entries if line.distance(node.center) <= JUNCTION_NODE_TOLERANCE_M * 1.5]
+            for row, line, rule in connected:
+                node_distance = float(line.project(node.center))
+                sign = 1.0 if node_distance <= line.length * 0.5 else -1.0
+                approach_arrows = approach_arrow_polygons(row, line, node_distance, sign, rule, node.radius)
+                checked_arrow_count += len(approach_arrows)
+                for arrow in approach_arrows:
+                    if arrow.centroid.distance(node.center) <= node.radius:
+                        wrong_direction_count += 1
+                        issues.append(
+                            {
+                                "junction_id": node.junction_id,
+                                "road_id": row.get("road_id"),
+                                "issue": "approach_arrow_inside_junction_radius",
+                                "distance_to_junction_m": round(float(arrow.centroid.distance(node.center)), 3),
+                                "junction_radius_m": round(float(node.radius), 3),
+                            }
+                        )
+
+            connectors = build_lane_connectors(node)
+            simulated_connector_count += len(connectors)
+            connector_from_ids = {connector.from_lane.lane_socket_id for connector in connectors}
+
+            for socket in node.sockets:
+                for lane in socket.lane_sockets:
+                    if lane.lane_role != "ingress":
+                        continue
+                    ingress_lane_count += 1
+                    dot = lane.tangent[0] * socket.tangent[0] + lane.tangent[1] * socket.tangent[1]
+                    if dot < 0.98:
+                        wrong_direction_count += 1
+                        issues.append(
+                            {
+                                "junction_id": node.junction_id,
+                                "road_id": socket.road_id,
+                                "lane_id": lane.lane_socket_id,
+                                "issue": "ingress_arrow_not_aligned_with_travel_direction",
+                                "dot": round(float(dot), 4),
+                            }
+                        )
+                    if lane.lane_socket_id not in connector_from_ids:
+                        disconnected_ingress_count += 1
+                        issues.append(
+                            {
+                                "junction_id": node.junction_id,
+                                "road_id": socket.road_id,
+                                "lane_id": lane.lane_socket_id,
+                                "issue": "ingress_lane_has_no_simulated_exit_connector",
+                            }
+                        )
+
+    return {
+        "checked_arrow_count": checked_arrow_count,
+        "ingress_lane_count": ingress_lane_count,
+        "simulated_connector_count": simulated_connector_count,
+        "wrong_direction_count": wrong_direction_count,
+        "disconnected_ingress_count": disconnected_ingress_count,
+        "passed": wrong_direction_count == 0 and disconnected_ingress_count == 0,
+        "sample_issues": issues[:20],
+    }
+
+
 def geometry_qc(roads: gpd.GeoDataFrame, layers: list[dict[str, Any]], rule: RoadRule) -> dict[str, Any]:
     """
     2D 几何平面质检：统计生成道路的总中心线长及分类铺装面（如人行道、路缘石）覆盖面积。
@@ -922,6 +3934,44 @@ def geometry_qc(roads: gpd.GeoDataFrame, layers: list[dict[str, Any]], rule: Roa
     sidewalk_area = sum([0.0 if l["sidewalk"] is None else float(l["sidewalk"].area) for l in layers])
     curb_area = sum([0.0 if l["curb"] is None else float(l["curb"].area) for l in layers])
     marking_area = sum([0.0 if l["lane_marking"] is None else float(l["lane_marking"].area) for l in layers])
+    stop_line_area = sum([0.0 if l.get("stop_line") is None else float(l["stop_line"].area) for l in layers])
+    crosswalk_area = sum([0.0 if l.get("crosswalk") is None else float(l["crosswalk"].area) for l in layers])
+    lane_guide_area = sum([0.0 if l.get("lane_guide") is None else float(l["lane_guide"].area) for l in layers])
+    turn_arrow_area = sum([0.0 if l.get("turn_arrow") is None else float(l["turn_arrow"].area) for l in layers])
+    channelization_area = sum([0.0 if l.get("channelization_island") is None else float(l["channelization_island"].area) for l in layers])
+    junction_area = sum([0.0 if l.get("junction_surface") is None else float(l["junction_surface"].area) for l in layers])
+    junction_count = sum(int(l.get("junction_count", 0)) for l in layers)
+    parametric_junction_count = sum(int(l.get("parametric_junction_count", 0)) for l in layers)
+    junction_socket_count = sum(int(l.get("junction_socket_count", 0)) for l in layers)
+    junction_algorithm_counts: dict[str, int] = {}
+    junction_type_counts: dict[str, int] = {}
+    junction_hierarchy_counts: dict[str, int] = {}
+    junction_strategy_counts: dict[str, int] = {}
+    for layer in layers:
+        for item in layer.get("junction_metadata", []):
+            method = item.get("surface_algorithm", "unknown")
+            junction_algorithm_counts[method] = junction_algorithm_counts.get(method, 0) + 1
+            jtype = item.get("junction_type", "UNKNOWN")
+            junction_type_counts[jtype] = junction_type_counts.get(jtype, 0) + 1
+            hierarchy = item.get("junction_hierarchy", "LOCAL_JUNCTION")
+            junction_hierarchy_counts[hierarchy] = junction_hierarchy_counts.get(hierarchy, 0) + 1
+            strategy = item.get("surface_strategy", "unknown")
+            junction_strategy_counts[strategy] = junction_strategy_counts.get(strategy, 0) + 1
+    lane_connector_count = sum(int(l.get("lane_connector_count", 0)) for l in layers)
+    approach_arrow_count = sum(int(l.get("approach_arrow_count", 0)) for l in layers)
+    channelization_island_count = sum(int(l.get("channelization_island_count", 0)) for l in layers)
+    swept_road_count = sum(len(l.get("swept_entries", [])) for l in layers)
+    swept_lane_count = 0
+    lane_widths = []
+    lane_width_ratios = []
+    for layer in layers:
+        for entry in layer.get("swept_entries", []):
+            road_rule = entry[2]
+            swept_lane_count += road_rule.lane_count
+            lane_widths.append(float(road_rule.lane_width))
+            if road_rule.lane_count > 0:
+                lane_width_ratios.append(float(road_rule.road_width) / float(road_rule.lane_count))
+    clipped_segment_count = sum(int(l.get("clipped_segment_count", 0)) for l in layers)
 
     return {
         "road_count": int(len(roads)),
@@ -933,12 +3983,40 @@ def geometry_qc(roads: gpd.GeoDataFrame, layers: list[dict[str, Any]], rule: Roa
         "sidewalk_area_m2": sidewalk_area,
         "curb_area_m2": curb_area,
         "lane_marking_area_m2": marking_area,
+        "stop_line_area_m2": stop_line_area,
+        "crosswalk_area_m2": crosswalk_area,
+        "lane_guide_area_m2": lane_guide_area,
+        "turn_arrow_area_m2": turn_arrow_area,
+        "channelization_island_area_m2": channelization_area,
+        "junction_surface_area_m2": junction_area,
+        "detected_junction_count": junction_count,
+        "parametric_junction_count": parametric_junction_count,
+        "junction_socket_count": junction_socket_count,
+        "junction_algorithm_counts": junction_algorithm_counts,
+        "junction_type_counts": junction_type_counts,
+        "junction_hierarchy_counts": junction_hierarchy_counts,
+        "junction_strategy_counts": junction_strategy_counts,
+        "lane_connector_count": lane_connector_count,
+        "approach_arrow_count": approach_arrow_count,
+        "channelization_island_count": channelization_island_count,
+        "transition_curve_count": int(roads.get("transition_curve_count", pd.Series([0])).sum()),
+        "swept_road_count": swept_road_count,
+        "swept_lane_count": swept_lane_count,
+        "lane_width_values_m": sorted(set(round(width, 3) for width in lane_widths)),
+        "lane_width_min_m": min(lane_widths) if lane_widths else 0.0,
+        "lane_width_max_m": max(lane_widths) if lane_widths else 0.0,
+        "road_width_per_lane_min_m": min(lane_width_ratios) if lane_width_ratios else 0.0,
+        "road_width_per_lane_max_m": max(lane_width_ratios) if lane_width_ratios else 0.0,
+        "clipped_road_segment_count": clipped_segment_count,
+        "road_crown_slope": CROWN_SLOPE,
+        "max_grade_percent": float(roads.get("max_grade_percent", pd.Series([0.0])).max()),
     }
 
 
 def write_qc_report(
     roads: gpd.GeoDataFrame,
     rule: RoadRule,
+    rules: dict[str, RoadRule],
     layers: list[dict[str, Any]],
     meshes: dict[str, trimesh.Trimesh],
     meta: dict[str, Any],
@@ -964,6 +4042,30 @@ def write_qc_report(
             "empty_geometry": int(roads.geometry.is_empty.sum()),
         },
         "geometry_check": geometry_qc(roads, layers, rule),
+        "arrow_traffic_simulation_check": arrow_traffic_qc(roads, rules),
+        "cim3_compliance_check": {
+            "model_level": "CIM3",
+            "plan_accuracy_target_m": CIM3_PLAN_ACCURACY_M,
+            "height_accuracy_target_m": CIM3_HEIGHT_ACCURACY_M,
+            "min_geometric_detail_m": CIM3_MIN_GEOMETRIC_DETAIL_M,
+            "road_required_parts": [
+                "Road_Surface",
+                "Sidewalk",
+                "Curb",
+                "Lane_Marking",
+                "Stop_Line",
+                "Lane_Guide",
+                "Channelization_Island",
+                "Junction_Surface",
+                "Median",
+                "Guardrail",
+                "Street_Light",
+                "Tree",
+                "Bridge_Deck",
+                "Bridge_Pier",
+            ],
+            "generated_parts": sorted({name.split("_")[0] if not name.startswith("Street_Light") else "_".join(name.split("_")[:2]) for name in meshes}),
+        },
         "mesh_check": mesh_qc(meshes),
         "outputs": {
             "obj": str(OBJ_PATH.relative_to(ROOT)),
@@ -996,13 +4098,22 @@ def main() -> None:
     layers_geoms = generate_planar_geometries(roads, rules)
 
     print("3. 生成三维 Mesh 和 Scene...")
-    scene, meshes = make_scene(layers_geoms, default_rule)
+    scene, meshes = make_scene(layers_geoms, default_rule, google_center_latlon=projected_xy_to_latlon(origin.x, origin.y))
+    asset_meshes = build_cim3_road_asset_meshes(roads, rules)
+    for name, mesh in asset_meshes.items():
+        scene.add_geometry(mesh.copy(), node_name=name, geom_name=name)
+    meshes.update(asset_meshes)
 
     print("4. 导出 OBJ...")
     export_scene(scene)
+    build_semantic_json(roads, origin, meta, rules, layers_geoms)
+    write_qc_report(roads, default_rule, rules, layers_geoms, meshes, meta)
 
     print("完成。输出文件：")
     print(f"- {OBJ_PATH}")
+    print(f"- {GLB_PATH}")
+    print(f"- {SEMANTIC_PATH}")
+    print(f"- {QC_PATH}")
 
 
 if __name__ == "__main__":

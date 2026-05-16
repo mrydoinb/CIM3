@@ -49,6 +49,7 @@ RAW_DIR = ROOT / "data" / "raw"
 OUT_PATH = ROOT / "output" / "obj" / "cim_city.obj"
 MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
 MODULE_OBJ_PATHS = {
+    "basemap": MODULE_OBJ_DIR / "cim_city_basemap.obj",
     "roads": MODULE_OBJ_DIR / "cim_city_roads.obj",
     "buildings": MODULE_OBJ_DIR / "cim_city_buildings.obj",
     "subway_tunnels": MODULE_OBJ_DIR / "cim_city_subway_tunnels.obj",
@@ -73,6 +74,8 @@ UTILITY_TYPES = [
 ]
 
 COLORS = {
+    "gis_basemap": [88, 118, 94, 255],
+    "gis_grid": [132, 150, 132, 255],
     "road_surface": [45, 45, 45, 255],
     "sidewalk": [135, 135, 130, 255],
     "curb": [190, 185, 170, 255],
@@ -177,6 +180,33 @@ def compute_origin(*layers: gpd.GeoDataFrame) -> tuple[float, float]:
     return ((minx + maxx) / 2.0, (miny + maxy) / 2.0)
 
 
+def localized_bounds(*layers: gpd.GeoDataFrame) -> tuple[float, float, float, float] | None:
+    bounds = [layer.total_bounds for layer in layers if not layer.empty]
+    if not bounds:
+        return None
+    stacked = np.array(bounds)
+    return (
+        float(stacked[:, 0].min()),
+        float(stacked[:, 1].min()),
+        float(stacked[:, 2].max()),
+        float(stacked[:, 3].max()),
+    )
+
+
+def build_gis_basemap_meshes(*layers: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
+    bounds = localized_bounds(*layers)
+    center = None
+    if bounds is not None:
+        center = road_gen.projected_xy_to_latlon((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
+    return road_gen.make_gis_basemap_meshes(
+        bounds,
+        z=-0.08,
+        padding=80.0,
+        grid_spacing=100.0,
+        google_center_latlon=center,
+    )
+
+
 def building_height(row) -> float:
     height = safe_float(row.get("height"), 0.0)
     if height > 0:
@@ -196,6 +226,7 @@ def prepare_roads_for_surfaces(roads: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     prepared = prepared[prepared.geometry.geom_type.isin(["LineString", "MultiLineString"])].copy()
     prepared = prepared.explode(index_parts=False).reset_index(drop=True)
     prepared = prepared[prepared.geometry.geom_type == "LineString"].copy()
+    prepared = road_gen.deduplicate_bidirectional_osm_edges(prepared)
 
     if "osmid" in prepared.columns:
         prepared["road_id"] = prepared["osmid"].apply(road_gen.normalize_osmid)
@@ -207,10 +238,15 @@ def prepare_roads_for_surfaces(roads: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     prepared["road_name"] = prepared["name"].fillna("unknown") if "name" in prepared.columns else "unknown"
     prepared["road_class"] = prepared["highway"] if "highway" in prepared.columns else "unclassified"
     prepared["lane_count"] = prepared["lanes"] if "lanes" in prepared.columns else None
+    prepared["lanes_forward"] = prepared["lanes:forward"] if "lanes:forward" in prepared.columns else None
+    prepared["lanes_backward"] = prepared["lanes:backward"] if "lanes:backward" in prepared.columns else None
+    prepared["osm_width"] = prepared["width"] if "width" in prepared.columns else None
     prepared["maxspeed"] = prepared["maxspeed"] if "maxspeed" in prepared.columns else None
     prepared["oneway"] = prepared["oneway"] if "oneway" in prepared.columns else None
+    prepared["junction_type"] = prepared["junction"] if "junction" in prepared.columns else None
     prepared["road_ref"] = prepared["ref"] if "ref" in prepared.columns else None
     prepared["access"] = prepared["access"] if "access" in prepared.columns else None
+    prepared["lane_count"] = road_gen.normalize_corridor_lane_counts(prepared)
     prepared["is_bridge"] = prepared["bridge"].apply(road_gen.check_is_bridge) if "bridge" in prepared.columns else False
     prepared["bridge_clearance"] = prepared["road_class"].apply(road_gen.get_bridge_clearance)
     prepared["ground_z_start"] = 0.0
@@ -239,7 +275,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         raise ValueError("Missing default_road rule in road_rules.json")
 
     layers = road_gen.generate_planar_geometries(prepared_roads, rules)
-    _, road_meshes = road_gen.make_scene(layers, default_rule)
+    _, road_meshes = road_gen.make_scene(layers, default_rule, include_basemap=False)
+    road_meshes.update(road_gen.build_cim3_road_asset_meshes(prepared_roads, rules))
     return {name: mesh.copy() for name, mesh in road_meshes.items()}
 
 
@@ -316,7 +353,12 @@ def build_transit_node_meshes(
             subway_station_meshes[name] = mesh
         elif str(row.get("highway", "")).lower() == "bus_stop" or str(row.get("bus", "")).lower() == "yes":
             name = f"Bus_Stop_{idx}"
-            mesh = make_box(name, (point.x, point.y, 1.3), (3.0, 1.4, 2.6), COLORS["bus_stop"])
+            base = make_box(f"{name}_Base", (point.x, point.y, 0.12), (4.2, 1.8, 0.24), COLORS["bus_stop"])
+            shelter = make_box(f"{name}_Shelter", (point.x, point.y, 1.45), (3.6, 0.18, 2.3), COLORS["bus_stop"])
+            canopy = make_box(f"{name}_Canopy", (point.x, point.y, 2.65), (4.4, 2.0, 0.18), COLORS["bus_stop"])
+            mesh = trimesh.util.concatenate([base, shelter, canopy])
+            mesh.metadata["name"] = name
+            mesh.visual.face_colors = COLORS["bus_stop"]
             bus_stop_meshes[name] = mesh
     return subway_station_meshes, bus_stop_meshes
 
@@ -399,6 +441,7 @@ def main() -> None:
 
     subway_station_meshes, bus_stop_meshes = build_transit_node_meshes(transport)
     modules = {
+        "basemap": build_gis_basemap_meshes(roads, buildings, transport, railways),
         "roads": build_road_surface_meshes(roads),
         "buildings": build_building_meshes(buildings),
         "subway_tunnels": build_subway_tunnel_meshes(railways),
