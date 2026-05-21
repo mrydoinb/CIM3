@@ -9,7 +9,6 @@ Input:
 
 Output:
 - output/fbx/cim_city.fbx
-- output/fbx/modules/cim_city_basemap.fbx
 - output/fbx/modules/cim_city_roads.fbx
 - output/fbx/modules/cim_city_buildings.fbx
 - output/fbx/modules/cim_city_subway_tunnels.fbx
@@ -31,10 +30,6 @@ MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
 MODULE_FBX_DIR = ROOT / "output" / "fbx" / "modules"
 GOOGLE_MAP_TEXTURE_PATH = ROOT / "output" / "textures" / "google_static_map.png"
 MODULE_EXPORTS = {
-    "basemap": (
-        MODULE_OBJ_DIR / "cim_city_basemap.obj",
-        MODULE_FBX_DIR / "cim_city_basemap.fbx",
-    ),
     "roads": (
         MODULE_OBJ_DIR / "cim_city_roads.obj",
         MODULE_FBX_DIR / "cim_city_roads.fbx",
@@ -65,21 +60,35 @@ MATERIALS = {
     "GIS_GoogleMap": ("CIM_Google_Map", (1.0, 1.0, 1.0, 1.0), 0.9),
     "GIS_BaseMap": ("CIM_GIS_BaseMap", (0.22, 0.32, 0.24, 1.0), 0.9),
     "GIS_Grid": ("CIM_GIS_Grid", (0.42, 0.48, 0.42, 1.0), 0.82),
-    "Road_Surface": ("CIM_Road_Asphalt", (0.03, 0.03, 0.03, 1.0), 0.78),
-    "Lane_Surface": ("CIM_Lane_Asphalt", (0.04, 0.04, 0.038, 1.0), 0.74),
-    "Sidewalk": ("CIM_Sidewalk_Concrete", (0.46, 0.46, 0.43, 1.0), 0.72),
-    "Curb": ("CIM_Curb_Light_Concrete", (0.74, 0.72, 0.66, 1.0), 0.7),
-    "Lane_Marking": ("CIM_Lane_Marking_White", (0.95, 0.92, 0.78, 1.0), 0.35),
+    "Road_Surface_Main": ("CIM_Road_Main_Asphalt", (0.038, 0.040, 0.039, 1.0), 0.84),
+    "Road_Surface_Service": ("CIM_Road_Service_Asphalt", (0.052, 0.054, 0.052, 1.0), 0.82),
+    "Road_Surface_Branch": ("CIM_Road_Branch_Asphalt", (0.095, 0.098, 0.092, 1.0), 0.82),
+    "Road_Surface": ("CIM_Road_Asphalt_Fine", (0.045, 0.047, 0.045, 1.0), 0.84),
+    "Lane_Surface": ("CIM_Lane_Asphalt_Fine", (0.052, 0.052, 0.049, 1.0), 0.80),
+    "Non_Motor_Lane": ("CIM_Non_Motor_Lane_Asphalt", (0.12, 0.18, 0.16, 1.0), 0.82),
+    "Parking_Lane": ("CIM_Parking_Lane_Asphalt", (0.19, 0.20, 0.19, 1.0), 0.78),
+    "Sidewalk": ("CIM_Sidewalk_Warm_Concrete", (0.64, 0.62, 0.56, 1.0), 0.72),
+    "Green_Belt": ("CIM_Roadside_Green_Belt", (0.16, 0.40, 0.20, 1.0), 0.86),
+    "Facility_Belt": ("CIM_Facility_Belt_Stone_Green", (0.34, 0.39, 0.31, 1.0), 0.76),
+    "Side_Divider": ("CIM_Side_Divider_Low_Green", (0.18, 0.34, 0.17, 1.0), 0.82),
+    "Curb": ("CIM_Curb_Light_Concrete", (0.76, 0.74, 0.68, 1.0), 0.68),
+    "Median": ("CIM_Landscaped_Median", (0.22, 0.44, 0.24, 1.0), 0.82),
+    "Lane_Marking_White": ("CIM_Lane_Marking_White", (0.95, 0.94, 0.86, 1.0), 0.32),
+    "Lane_Marking_Yellow": ("CIM_Lane_Marking_Yellow", (0.96, 0.76, 0.10, 1.0), 0.35),
+    "Lane_Marking": ("CIM_Lane_Marking_White", (0.95, 0.94, 0.86, 1.0), 0.32),
     "Stop_Line": ("CIM_Stop_Line_White", (0.95, 0.92, 0.78, 1.0), 0.35),
     "Crosswalk": ("CIM_Crosswalk_White", (0.95, 0.92, 0.78, 1.0), 0.35),
     "Lane_Guide": ("CIM_Lane_Guide_White", (0.95, 0.92, 0.78, 1.0), 0.35),
     "Turn_Arrow": ("CIM_Turn_Arrow_White", (0.95, 0.92, 0.78, 1.0), 0.35),
     "Channelization_Island": ("CIM_Channelization_Island", (0.72, 0.70, 0.62, 1.0), 0.62),
-    "Junction_Surface": ("CIM_Road_Asphalt", (0.03, 0.03, 0.03, 1.0), 0.78),
+    "Junction_Surface": ("CIM_Road_Asphalt_Fine", (0.045, 0.047, 0.045, 1.0), 0.84),
     "Median": ("CIM_Median_Concrete", (0.38, 0.42, 0.34, 1.0), 0.68),
     "Guardrail": ("CIM_Guardrail_Galvanized", (0.68, 0.70, 0.70, 1.0), 0.36),
-    "Street_Light": ("CIM_Street_Light_Painted_Metal", (0.34, 0.33, 0.30, 1.0), 0.42),
-    "Tree": ("CIM_Tree_Canopy", (0.18, 0.42, 0.20, 1.0), 0.72),
+    "Street_Light_Lamp": ("CIM_Street_Light_Warm_Lamp", (1.0, 0.78, 0.34, 1.0), 0.18),
+    "Street_Light": ("CIM_Street_Light_Painted_Metal", (0.30, 0.30, 0.28, 1.0), 0.46),
+    "Tree_Trunk": ("CIM_Tree_Bark", (0.34, 0.22, 0.13, 1.0), 0.86),
+    "Tree_Crown": ("CIM_Tree_Canopy_Varied", (0.18, 0.38, 0.20, 1.0), 0.88),
+    "Tree": ("CIM_Tree_Canopy_Varied", (0.18, 0.38, 0.20, 1.0), 0.88),
     "Bridge": ("CIM_Bridge_Concrete", (0.48, 0.48, 0.44, 1.0), 0.76),
     "Bridge_Deck": ("CIM_Bridge_Deck_Concrete", (0.44, 0.44, 0.40, 1.0), 0.76),
     "Bridge_Pier": ("CIM_Bridge_Pier_Concrete", (0.56, 0.56, 0.52, 1.0), 0.78),
@@ -89,6 +98,7 @@ MATERIALS = {
     "Bus_Stop": ("CIM_Bus_Stop_Green", (0.05, 0.55, 0.28, 1.0), 0.42),
     "Utility_Water": ("CIM_Utility_Water_Blue", (0.02, 0.34, 0.90, 1.0), 0.36),
     "Utility_Sewer": ("CIM_Utility_Sewer_Brown", (0.36, 0.23, 0.12, 1.0), 0.66),
+    "Utility_Gas": ("CIM_Utility_Gas_Orange", (0.90, 0.42, 0.08, 1.0), 0.42),
     "Utility_Power": ("CIM_Utility_Power_Yellow", (0.94, 0.68, 0.06, 1.0), 0.28),
     "Utility_Telecom": ("CIM_Utility_Telecom_Magenta", (0.88, 0.12, 0.64, 1.0), 0.34),
 }
@@ -111,6 +121,49 @@ def import_obj(path: Path) -> None:
         bpy.ops.import_scene.obj(filepath=str(path))
 
 
+def set_node_input(node, names: tuple[str, ...], value) -> None:
+    for name in names:
+        if name in node.inputs:
+            node.inputs[name].default_value = value
+            return
+
+
+def add_surface_detail(material: bpy.types.Material, bsdf, material_name: str) -> None:
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    if "Asphalt" in material_name:
+        noise = nodes.new(type="ShaderNodeTexNoise")
+        noise.inputs["Scale"].default_value = 62.0
+        noise.inputs["Detail"].default_value = 8.0
+        noise.inputs["Roughness"].default_value = 0.58
+        bump = nodes.new(type="ShaderNodeBump")
+        bump.inputs["Strength"].default_value = 0.055
+        bump.inputs["Distance"].default_value = 0.08
+        links.new(noise.outputs["Fac"], bump.inputs["Height"])
+        if "Normal" in bsdf.inputs:
+            links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    elif "Concrete" in material_name or "Curb" in material_name or "Sidewalk" in material_name:
+        noise = nodes.new(type="ShaderNodeTexNoise")
+        noise.inputs["Scale"].default_value = 38.0
+        noise.inputs["Detail"].default_value = 5.0
+        bump = nodes.new(type="ShaderNodeBump")
+        bump.inputs["Strength"].default_value = 0.035
+        bump.inputs["Distance"].default_value = 0.05
+        links.new(noise.outputs["Fac"], bump.inputs["Height"])
+        if "Normal" in bsdf.inputs:
+            links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    elif "Tree_Canopy" in material_name:
+        noise = nodes.new(type="ShaderNodeTexNoise")
+        noise.inputs["Scale"].default_value = 18.0
+        noise.inputs["Detail"].default_value = 6.0
+        bump = nodes.new(type="ShaderNodeBump")
+        bump.inputs["Strength"].default_value = 0.045
+        bump.inputs["Distance"].default_value = 0.12
+        links.new(noise.outputs["Fac"], bump.inputs["Height"])
+        if "Normal" in bsdf.inputs:
+            links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+
+
 def create_material(name: str, color: tuple[float, float, float, float], roughness: float) -> bpy.types.Material:
     material = bpy.data.materials.get(name)
     if material is not None:
@@ -123,8 +176,13 @@ def create_material(name: str, color: tuple[float, float, float, float], roughne
     bsdf = material.node_tree.nodes.get("Principled BSDF")
     if bsdf is not None:
         bsdf.inputs["Base Color"].default_value = color
-        bsdf.inputs["Roughness"].default_value = roughness
-        bsdf.inputs["Metallic"].default_value = 0.0
+        set_node_input(bsdf, ("Roughness",), roughness)
+        metal = 0.22 if any(token in name for token in ("Metal", "Guardrail", "Street_Light")) else 0.0
+        set_node_input(bsdf, ("Metallic",), metal)
+        if "Lamp" in name:
+            set_node_input(bsdf, ("Emission Color", "Emission"), color)
+            set_node_input(bsdf, ("Emission Strength",), 1.15)
+        add_surface_detail(material, bsdf, name)
 
     return material
 
@@ -212,6 +270,8 @@ def export_fbx(path: Path) -> None:
 
 def export_obj_to_fbx(obj_path: Path, fbx_path: Path) -> bool:
     if not obj_path.exists():
+        if fbx_path.exists():
+            fbx_path.unlink()
         print(f"[SKIP] Missing OBJ input: {obj_path}")
         return False
 

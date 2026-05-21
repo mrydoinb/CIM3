@@ -22,7 +22,7 @@ echo "==================================================="
 echo "       CIM city automatic modeling workflow"
 echo "==================================================="
 
-echo "[1/3] Downloading Munich Hauptbahnhof OSM source data..."
+echo "[1/3] Downloading Beijing Yizhuang OSM source data..."
 "$PYTHON_EXE" scripts/00_download_allianz_arena_osm.py
 
 echo "[2/3] Generating CIM city OBJ with roads, buildings, subway, bus stops, and utilities..."
