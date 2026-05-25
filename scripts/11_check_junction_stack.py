@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Thin wrapper for :mod:`render.cross_section_svg`."""
+"""Thin wrapper for :mod:`junction.stack_check`."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from render.cross_section_svg import main
+from junction.stack_check import main
 
 
 if __name__ == "__main__":

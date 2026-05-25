@@ -1,135 +1,117 @@
-# Scripts 技术索引
+﻿# Scripts 技术索引
 
-本目录包含 CIM 道路与 CIM 城市模型生成脚本。当前主流程是城市级流程，入口为项目根目录的 `run_city_workflow.bat` 或 `run_city_workflow.sh`。
+本目录保留当前城市级建模流程需要的脚本，以及少量结果检查/渲染工具。主入口在项目根目录：
+
+```text
+run_city_workflow.bat
+run_city_workflow.sh
+```
 
 ## 城市级主流程
 
 ```text
-00_download_allianz_arena_osm.py
-  -> 05_generate_cim_city.py
+05_generate_cim_city.py
   -> 06_export_cim_city_fbx_blender.py
 ```
 
-### `00_download_allianz_arena_osm.py`
-
-职责：下载慕尼黑中央火车站周边 OSM 数据。
-
-输出：
-
-```text
-data/raw/road_centerline.geojson
-data/raw/building_footprint.geojson
-data/raw/transport_points.geojson
-data/raw/railway_centerline.geojson
-```
-
-说明：脚本名称保留了历史上的 `allianz_arena`，但实际中心点已经改为 München Hauptbahnhof。
-
 ### `05_generate_cim_city.py`
 
-职责：生成 CIM 城市 OBJ。
+职责：读取 `data/Data` 下的工程数据，生成完整 CIM 城市 OBJ 与分模块 OBJ。
 
-输入：
+主要输入：
 
 ```text
-data/raw/road_centerline.geojson
-data/raw/building_footprint.geojson
-data/raw/transport_points.geojson
-data/raw/railway_centerline.geojson
+data/Data/road50kms/*.shp
+data/Data/公交站*/公交站*.shp
+data/Data/轨道线和站点转坐标2000/*.shp
+data/Data/供水+污水/*.shp
+data/Data/rq规划试验区校核/*.shp
 ```
 
-输出：
+主要输出：
 
 ```text
 output/obj/cim_city.obj
+output/obj/modules/*.obj
+output/semantic/*.json
+output/qc_report/*.json
 ```
-
-生成对象：
-
-- 道路面、人行道、路缘、车道标线。
-- 建筑体块。
-- 公交站。
-- 地铁站体块。
-- 地铁区间隧道。
-- 给水、污水、电力、通信管线。
 
 ### `06_export_cim_city_fbx_blender.py`
 
-职责：将 `cim_city.obj` 导入 Blender，按对象类型分配材质，并导出 `cim_city.fbx`。
+职责：将 `cim_city.obj` 和各模块 OBJ 导入 Blender，按对象名前缀分配材质，并导出 FBX。
 
-输出：
+主要输出：
 
 ```text
 output/fbx/cim_city.fbx
-```
-
-材质包括：
-
-- `CIM_Road_Asphalt`
-- `CIM_Sidewalk_Concrete`
-- `CIM_Curb_Light_Concrete`
-- `CIM_Lane_Marking_White`
-- `CIM_Building_Concrete`
-- `CIM_Subway_Tunnel_Dark_Concrete`
-- `CIM_Subway_Station_Blue`
-- `CIM_Bus_Stop_Green`
-- `CIM_Utility_Water_Blue`
-- `CIM_Utility_Sewer_Brown`
-- `CIM_Utility_Power_Yellow`
-- `CIM_Utility_Telecom_Magenta`
-
-### `07_inspect_fbx_materials_blender.py`
-
-职责：反向导入 `output/fbx/cim_city.fbx`，统计 Mesh 数量与材质名称，用于确认材质已经写入 FBX。
-
-运行：
-
-```bash
-blender --background --python scripts/07_inspect_fbx_materials_blender.py
-```
-
-## Road-only OBJ generation
-
-The old road-only Blender FBX/material scripts were removed. The remaining road-only entry is:
-
-```text
-01_generate_cim3_road.py
+output/fbx/modules/*.fbx
 ```
 
 ### `01_generate_cim3_road.py`
 
-Responsibilities:
+职责：历史兼容入口。道路几何库位于 `src/road/generator.py`，`05_generate_cim_city.py` 会导入它复用道路规则、断面、路口和资产生成函数。
 
-- Generates CIM3 road geometry from road centerlines.
-- Generates road surfaces, sidewalks, curbs, and lane markings.
-- Provides reusable road generation functions for the city workflow.
+旧 road-only `road_test.*` 输出已经退役；运行该脚本会提示改用城市级主流程。
 
-### `04_inspect_blend_materials.py`
+## 检查与渲染工具
 
-职责：检查 Blender 文件中的材质状态，主要用于道路 PBR 调试。
+详细说明见 [docs/cim_city_technical_documentation.md](../docs/cim_city_technical_documentation.md)。
 
-## 推荐命令
+当前主要脚本已经重构为薄入口，核心逻辑位于：
 
-生成完整 CIM 城市：
-
-```bat
-run_city_workflow.bat
+```text
+src/road/generator.py
+src/city/pipeline.py
+src/blender/fbx_export.py
 ```
 
-仅重新生成城市 OBJ：
+检查与渲染工具核心逻辑位于：
 
-```bash
-python scripts/05_generate_cim_city.py
+```text
+src/blender/fbx_inspect.py
+src/blender/road_quality_render.py
+src/blender/road_fbx_preview.py
+src/render/cross_section_svg.py
+src/junction/stack_check.py
 ```
 
-仅重新导出城市 FBX：
+### `07_inspect_fbx_materials_blender.py`
 
-```bash
-blender --background --python scripts/06_export_cim_city_fbx_blender.py
-```
-
-检查城市 FBX 材质：
+反向导入 `output/fbx/cim_city.fbx`，统计 Mesh 数量与材质名称。
 
 ```bash
 blender --background --python scripts/07_inspect_fbx_materials_blender.py
+```
+
+### `08_render_road_quality_views_blender.py`
+
+从 `output/fbx/modules/cim_city_roads.fbx` 渲染道路质量检查视图。
+
+```bash
+blender --background --python scripts/08_render_road_quality_views_blender.py
+```
+
+### `09_render_cross_section_diagrams.py`
+
+根据 `output/semantic/cim_city_roads_semantic.json` 生成道路横断面 SVG 示意图。
+
+```bash
+python scripts/09_render_cross_section_diagrams.py
+```
+
+### `10_render_road_fbx_preview_blender.py`
+
+渲染道路 FBX 俯视预览图。
+
+```bash
+blender --background --python scripts/10_render_road_fbx_preview_blender.py
+```
+
+### `11_check_junction_stack.py`
+
+检查路口面、道路组件、标线和道路资产之间的平面叠压与连通性。
+
+```bash
+python scripts/11_check_junction_stack.py
 ```

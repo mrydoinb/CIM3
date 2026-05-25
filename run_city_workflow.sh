@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PYTHON_EXE="${PYTHON_EXE:-/d/kaifahuanjing/anaconda3/envs/cim-road/python.exe}"
+PYTHON_EXE="${PYTHON_EXE:-/d/ProgramData/miniconda3/envs/cim-road/python.exe}"
 if [ ! -x "$PYTHON_EXE" ]; then
   PYTHON_EXE="python"
 fi
@@ -22,13 +22,10 @@ echo "==================================================="
 echo "       CIM city automatic modeling workflow"
 echo "==================================================="
 
-echo "[1/3] Downloading Beijing Yizhuang OSM source data..."
-"$PYTHON_EXE" scripts/00_download_allianz_arena_osm.py
-
-echo "[2/3] Generating CIM city OBJ with roads, buildings, subway, bus stops, and utilities..."
+echo "[1/2] Generating CIM city OBJ with roads, buildings, subway, bus stops, and utilities..."
 "$PYTHON_EXE" scripts/05_generate_cim_city.py
 
-echo "[3/3] Exporting materialized CIM city FBX..."
+echo "[2/2] Exporting materialized CIM city FBX..."
 "$BLENDER_EXE" --background --python scripts/06_export_cim_city_fbx_blender.py
 
 echo "==================================================="
