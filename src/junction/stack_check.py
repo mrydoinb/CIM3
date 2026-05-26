@@ -144,12 +144,17 @@ def record_component_layers(
     clip_profiles: dict[str, dict[Any, list[tuple[float, float]]]],
     stats: dict[str, dict[str, Any]],
     drivable_geoms_by_road: dict[Any, list[Any]],
+    component_geoms_by_key: dict[tuple[Any, str, str, str], list[Any]],
     drivable_core_clip_geom,
     junction_union,
     junction_mask,
     core_union,
     core_mask,
 ) -> None:
+    def remember_component_geom(road_idx: Any, layer: str, component_type: str, component_key: Any, geom) -> None:
+        if geom is not None and not geom.is_empty:
+            component_geoms_by_key[(road_idx, layer, component_type, str(component_key))].append(geom)
+
     for road_idx, row in prepared_roads.iterrows():
         row = row.copy()
         row.name = road_idx
@@ -188,6 +193,7 @@ def record_component_layers(
                             geom = clean_polygonal(city, geom.difference(local_clip))
                         if geom is not None and not geom.is_empty:
                             drivable_geoms_by_road[road_idx].append(geom)
+                    remember_component_geom(road_idx, layer, component_type, component_idx, geom)
                     record_overlap(
                         stats,
                         layer,
@@ -217,6 +223,7 @@ def record_component_layers(
                     ):
                         continue
                     geom = band_polygon(city, segment, boundary - curb_width / 2.0, boundary + curb_width / 2.0)
+                    remember_component_geom(road_idx, "Curb", "curb", f"curb_{idx}", geom)
                     record_overlap(
                         stats,
                         "Curb",
@@ -356,6 +363,237 @@ def record_assets(city: Any, prepared_roads, rules: dict[str, Any], junction_uni
     return dict(asset_stats)
 
 
+def summarize_junction_element_connectivity(
+    city: Any,
+    prepared_roads,
+    rules: dict[str, Any],
+    junction_surfaces: list[dict[str, Any]],
+    component_geoms_by_key: dict[tuple[Any, str, str, str], list[Any]],
+    roadside_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
+) -> dict[str, Any]:
+    connector_mesh_groups = city.build_junction_side_component_connector_meshes(
+        prepared_roads,
+        rules,
+        junction_surfaces,
+        roadside_clip_ranges,
+    )
+    connector_parts: dict[tuple[int, str, str], list[Any]] = defaultdict(list)
+    for meshes in connector_mesh_groups.values():
+        for mesh in meshes:
+            geom = mesh_polygon(city, mesh)
+            if geom is None or geom.is_empty:
+                continue
+            metadata = mesh.metadata or {}
+            try:
+                junction_index = int(metadata.get("junction_index", -1))
+            except (TypeError, ValueError):
+                junction_index = -1
+            component_type = str(metadata.get("component_type", ""))
+            connection_key = str(metadata.get("junction_connection_level_key", ""))
+            connector_parts[(junction_index, component_type, connection_key)].append(geom)
+
+    connector_cache: dict[tuple[int, str, str], Any] = {}
+
+    def connector_geom(key: tuple[int, str, str]):
+        if key not in connector_cache:
+            geoms = [geom for geom in connector_parts.get(key, []) if geom is not None and not geom.is_empty]
+            connector_cache[key] = clean_polygonal(city, unary_union(geoms)) if geoms else None
+        return connector_cache[key]
+
+    component_cache: dict[tuple[Any, str, str, str], Any] = {}
+
+    def component_geom(key: tuple[Any, str, str, str]):
+        if key not in component_cache:
+            geoms = [geom for geom in component_geoms_by_key.get(key, []) if geom is not None and not geom.is_empty]
+            component_cache[key] = clean_polygonal(city, unary_union(geoms)) if geoms else None
+        return component_cache[key]
+
+    def empty_category() -> dict[str, Any]:
+        return {
+            "checked_count": 0,
+            "disconnected_count": 0,
+            "missing_connector_count": 0,
+            "missing_component_count": 0,
+            "max_gap_m": 0.0,
+            "examples": [],
+        }
+
+    result = {
+        "tolerance_m": CONNECTIVITY_TOLERANCE_M,
+        "drivable": empty_category(),
+        "side_components": empty_category(),
+        "by_layer": defaultdict(empty_category),
+    }
+
+    def record_check(
+        category: str,
+        layer: str,
+        surface: dict[str, Any],
+        road_idx: Any,
+        component_type: str,
+        component_key: str,
+        gap: float | None,
+        missing_connector: bool = False,
+        missing_component: bool = False,
+    ) -> None:
+        buckets = [result[category], result["by_layer"][layer]]
+        failed = missing_connector or missing_component or gap is None or gap > CONNECTIVITY_TOLERANCE_M
+        for bucket in buckets:
+            bucket["checked_count"] += 1
+            if missing_connector:
+                bucket["missing_connector_count"] += 1
+            if missing_component:
+                bucket["missing_component_count"] += 1
+            if not failed:
+                continue
+            bucket["disconnected_count"] += 1
+            if gap is not None:
+                bucket["max_gap_m"] = max(float(bucket["max_gap_m"]), gap)
+            if len(bucket["examples"]) < 10:
+                point = surface.get("point")
+                bucket["examples"].append(
+                    {
+                        "junction_index": int(surface.get("index", -1)),
+                        "x": round(float(point.x), 3) if isinstance(point, Point) else None,
+                        "y": round(float(point.y), 3) if isinstance(point, Point) else None,
+                        "road": str(road_idx),
+                        "layer": layer,
+                        "component_type": component_type,
+                        "component_key": component_key,
+                        "gap_m": None if gap is None else round(float(gap), 3),
+                        "missing_connector": bool(missing_connector),
+                        "missing_component": bool(missing_component),
+                    }
+                )
+
+    for surface in junction_surfaces:
+        surface_geom = surface.get("geometry")
+        if surface_geom is None or surface_geom.is_empty:
+            continue
+        surface_idx = int(surface.get("index", -1))
+        surface_point = surface.get("point")
+        members = surface.get("members", [])
+        arms = city.junction_arm_records(prepared_roads, rules, surface_point, members)
+        connection_level_counts = defaultdict(int)
+        for arm in arms:
+            connection_level_counts[city.junction_connection_level_key_for_record(arm.get("road_level", {}))] += 1
+        connectable_levels = {key for key, count in connection_level_counts.items() if count >= 2}
+        member_distances: dict[Any, list[float]] = defaultdict(list)
+        for road_idx, distance_hint in members:
+            member_distances[road_idx].append(float(distance_hint))
+
+        side_records: list[dict[str, Any]] = []
+        type_level_roads: dict[tuple[str, str], set[Any]] = defaultdict(set)
+        for road_idx in sorted(member_distances, key=str):
+            if road_idx not in prepared_roads.index:
+                continue
+            row = prepared_roads.loc[road_idx].copy()
+            row.name = road_idx
+            rule = city.road_gen.get_road_rule(row, rules)
+            components = city.road_gen.cross_section_components_for_row(row) or city.fallback_cross_section_components(rule)
+            spans = city.component_spans(components)
+            level_record = city.road_level_record_for_row(row, rule)
+            connection_level = city.junction_connection_level_key_for_record(level_record)
+
+            for component_idx, (component, _, _) in enumerate(spans):
+                component_type = str(component.get("type", ""))
+                if component_type not in city.DRIVABLE_COMPONENT_TYPES:
+                    continue
+                layer = city.component_layer_name_for_row(component_type, row)
+                key = (road_idx, layer, component_type, str(component_idx))
+                geom = component_geom(key)
+                gap = float(surface_geom.distance(geom)) if geom is not None and not geom.is_empty else None
+                if component_type in {"non_motor_lane", "parking_lane"} and geom is not None and not geom.is_empty:
+                    connector = connector_geom((surface_idx, component_type, connection_level))
+                    if connector is not None and not connector.is_empty:
+                        connector_gap = float(connector.distance(geom))
+                        gap = connector_gap if gap is None else min(gap, connector_gap)
+                record_check(
+                    "drivable",
+                    layer,
+                    surface,
+                    road_idx,
+                    component_type,
+                    str(component_idx),
+                    gap,
+                    missing_component=geom is None or geom.is_empty,
+                )
+
+            if connection_level not in connectable_levels:
+                continue
+            for component_idx, component, _, _ in city.junction_side_connector_spans(spans, rule):
+                component_type = str(component.get("type", ""))
+                layer = "Curb" if component_type == "curb" else city.component_layer_name_for_row(component_type, row)
+                record = {
+                    "road_idx": road_idx,
+                    "connection_level": connection_level,
+                    "component_type": component_type,
+                    "component_key": str(component_idx),
+                    "layer": layer,
+                }
+                side_records.append(record)
+                type_level_roads[(component_type, connection_level)].add(road_idx)
+
+        expected_type_levels = {
+            key for key, roads in type_level_roads.items()
+            if len(roads) >= 2
+        }
+        for record in side_records:
+            type_level = (record["component_type"], record["connection_level"])
+            if type_level not in expected_type_levels:
+                continue
+            key = (
+                record["road_idx"],
+                record["layer"],
+                record["component_type"],
+                record["component_key"],
+            )
+            geom = component_geom(key)
+            connector = connector_geom((surface_idx, record["component_type"], record["connection_level"]))
+            gap = (
+                float(connector.distance(geom))
+                if connector is not None
+                and not connector.is_empty
+                and geom is not None
+                and not geom.is_empty
+                else None
+            )
+            record_check(
+                "side_components",
+                record["layer"],
+                surface,
+                record["road_idx"],
+                record["component_type"],
+                record["component_key"],
+                gap,
+                missing_connector=connector is None or connector.is_empty,
+                missing_component=geom is None or geom.is_empty,
+            )
+
+    cleaned_by_layer = {}
+    for layer, bucket in result["by_layer"].items():
+        cleaned_by_layer[layer] = {
+            "checked_count": int(bucket["checked_count"]),
+            "disconnected_count": int(bucket["disconnected_count"]),
+            "missing_connector_count": int(bucket["missing_connector_count"]),
+            "missing_component_count": int(bucket["missing_component_count"]),
+            "max_gap_m": round(float(bucket["max_gap_m"]), 3),
+            "examples": bucket["examples"],
+        }
+    result["by_layer"] = dict(sorted(cleaned_by_layer.items()))
+    for category in ("drivable", "side_components"):
+        result[category]["checked_count"] = int(result[category]["checked_count"])
+        result[category]["disconnected_count"] = int(result[category]["disconnected_count"])
+        result[category]["missing_connector_count"] = int(result[category]["missing_connector_count"])
+        result[category]["missing_component_count"] = int(result[category]["missing_component_count"])
+        result[category]["max_gap_m"] = round(float(result[category]["max_gap_m"]), 3)
+    result["total_disconnected_count"] = (
+        int(result["drivable"]["disconnected_count"])
+        + int(result["side_components"]["disconnected_count"])
+    )
+    return result
+
+
 def summarize_junction_connectivity(
     city: Any,
     junction_surfaces: list[dict[str, Any]],
@@ -468,18 +706,12 @@ def main() -> None:
     core_union = clean_polygonal(city, junction_union.buffer(-CORE_INSET_M, resolution=4, join_style=1))
     junction_mask = prep(junction_union)
     core_mask = prep(core_union) if core_union is not None and not core_union.is_empty else None
-    drivable_core_clip_geom = clean_polygonal(
-        city,
-        junction_union.buffer(
-            -city.JUNCTION_DRIVABLE_CORE_CLIP_INSET_M,
-            resolution=4,
-            join_style=1,
-        ),
-    )
+    drivable_core_clip_geom = clean_polygonal(city, junction_union)
     clip_profiles = city.junction_clip_range_profiles_by_road(prepared_roads, rules, junction_surfaces)
 
     stats: dict[str, dict[str, Any]] = defaultdict(new_layer_stats)
     drivable_geoms_by_road: dict[Any, list[Any]] = defaultdict(list)
+    component_geoms_by_key: dict[tuple[Any, str, str, str], list[Any]] = defaultdict(list)
     record_component_layers(
         city,
         prepared_roads,
@@ -487,6 +719,7 @@ def main() -> None:
         clip_profiles,
         stats,
         drivable_geoms_by_road,
+        component_geoms_by_key,
         drivable_core_clip_geom,
         junction_union,
         junction_mask,
@@ -506,6 +739,14 @@ def main() -> None:
     )
     assets = record_assets(city, prepared_roads, rules, junction_union, junction_mask, core_mask)
     connectivity = summarize_junction_connectivity(city, junction_surfaces, drivable_geoms_by_road)
+    element_connectivity = summarize_junction_element_connectivity(
+        city,
+        prepared_roads,
+        rules,
+        junction_surfaces,
+        component_geoms_by_key,
+        clip_profiles.get("roadside", {}),
+    )
 
     report = {
         "model": "cim_city_junction_stack_check",
@@ -518,10 +759,12 @@ def main() -> None:
             "deep_area_m2": f"Area that remains inside the junction surface after a {CORE_INSET_M} m inward buffer; this flags true stacking beyond seam blending.",
             "asset_inside_counts": "Street light and tree checks use asset XY center points.",
             "connectivity": "Each selected junction member road must have a drivable surface within the tolerance of its junction surface.",
+            "element_connectivity": "Drivable components must touch the junction surface; side components and curbs must touch generated same-plane connector patches.",
         },
         "layers": {},
         "assets": assets,
         "connectivity": connectivity,
+        "element_connectivity": element_connectivity,
     }
 
     for layer, item in sorted(stats.items()):
@@ -566,6 +809,7 @@ def main() -> None:
                 "flagged_layers": flagged_layers,
                 "drivable_seam_overlap_layers": seam_overlap_layers,
                 "connectivity": connectivity,
+                "element_connectivity": element_connectivity,
                 "assets": assets,
             },
             ensure_ascii=False,

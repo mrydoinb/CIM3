@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
@@ -87,6 +87,9 @@ SUBWAY_TUNNEL_RADIUS_M = 2.6
 SUBWAY_TUNNEL_DEPTH_M = -14.0
 SUBWAY_STATION_DEPTH_M = -11.0
 SUBWAY_STATION_SIZE_M = (34.0, 16.0, 7.0)
+# Road/junction generation switches. These settings are kept next to the city
+# output configuration because they control the visible road model, semantic
+# reports, and QC scores produced by this pipeline.
 GENERATE_ROAD_ASSETS = True
 GENERATE_SUBWAY_TUNNELS = True
 GENERATE_UTILITY_PIPES = True
@@ -94,17 +97,24 @@ ENABLE_TRANSITION_CURVES = True
 ENABLE_ROUNDED_JUNCTION_SURFACES = True
 GENERATE_JUNCTION_CROSSWALKS = True
 GENERATE_JUNCTION_STOP_LINES = True
+GENERATE_JUNCTION_SIDE_COMPONENT_CONNECTORS = True
 JUNCTION_MARKING_CLEARANCE_M = 11.0
 JUNCTION_SURFACE_Z_OFFSET_M = 0.026
-JUNCTION_PATCH_SMOOTH_M = 2.2
-JUNCTION_PATCH_MIN_THROAT_M = 8.0
-JUNCTION_PATCH_MAX_THROAT_M = 38.0
-JUNCTION_BUCKET_CLUSTER_M = 16.0
-JUNCTION_APPROACH_BLEND_OVERLAP_M = 0.25
-JUNCTION_DRIVABLE_BLEND_OVERLAP_M = 0.65
-JUNCTION_DRIVABLE_CORE_CLIP_INSET_M = 0.72
-JUNCTION_ROADSIDE_RETREAT_M = 0.75
+JUNCTION_PATCH_SMOOTH_M = 2.8
+JUNCTION_PATCH_MIN_THROAT_M = 10.0
+JUNCTION_PATCH_MAX_THROAT_M = 48.0
+JUNCTION_SIDE_COMPONENT_CONNECTOR_SMOOTH_M = 2.8
+JUNCTION_SIDE_COMPONENT_CONNECTOR_MIN_AREA_M2 = 0.12
+JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M = 6.0
+JUNCTION_SIDE_COMPONENT_CONNECTOR_BRIDGE_M = 3.2
+JUNCTION_LEVEL_ELEVATION_BUCKET_M = 0.5
+JUNCTION_BUCKET_CLUSTER_M = 22.0
+JUNCTION_APPROACH_BLEND_OVERLAP_M = 0.0
+JUNCTION_DRIVABLE_BLEND_OVERLAP_M = 0.0
+JUNCTION_DRIVABLE_CORE_CLIP_INSET_M = 0.0
+JUNCTION_ROADSIDE_RETREAT_M = 0.35
 JUNCTION_MARKING_RETREAT_M = 0.35
+JUNCTION_CHAINAGE_EPSILON_M = 0.02
 JUNCTION_APPROACH_MARKING_MAX_OFFSET_M = 52.0
 JUNCTION_MARKING_SURFACE_CLEARANCE_M = 2.6
 JUNCTION_DESIGN_SCORE_THRESHOLD = 72.0
@@ -401,7 +411,42 @@ def building_height(row) -> float:
     return BUILDING_DEFAULT_HEIGHT_M
 
 
+# ---------------------------------------------------------------------------
+# 道路与路口生成
+# ---------------------------------------------------------------------------
+#
+# 本段有意将完整的道路/路口流水线集中放在一起：
+#
+# 1. prepare_roads_for_surfaces()
+#    将源中心线规范化为每个 LineString 一行，并附加生成器所需字段：
+#    road_id、道路等级、车道数、高程、缓和曲线数量以及路口距离。
+# 2. swept_band_mesh(), strip_mesh(), and component helpers
+#    沿中心线扫掠偏移量，将横断面组件转换为路面、人行道、路缘石和
+#    车道标线网格。
+# 3. junction_point_buckets(), rounded_junction_polygon(), and related helpers
+#    将道路级的路口距离提示聚合为成簇的路口节点，选择设计方案，并构建
+#    圆角冲突区表面。
+# 4. junction_clip_range_profiles_by_road()
+#    将路口表面反算为每条道路上的距离范围，使道路组件、路缘石、标线和
+#    路侧资产能够从冲突区退让，同时不留下明显空隙。
+# 5. build_road_surface_meshes()
+#    对外可见的道路/路口入口函数。它编排所有生成的道路图层，并返回城市
+#    场景消费的合并网格。
+# 6. 道路/路口语义与 QC 辅助函数
+#    在网格生成后立即输出可追踪的 JSON 记录和评分报告，此时相关常量和
+#    几何辅助函数仍在附近，便于对照维护。
+
+
 def prepare_roads_for_surfaces(roads: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Normalize raw road centerlines into the city road generation schema.
+
+    The city pipeline may receive either OSM-like GeoJSON or local engineering
+    SHP data. This function makes both look the same to the mesh generator:
+    each row is a LineString, bidirectional duplicates are collapsed, IDs are
+    stable, widths/classes/lane counts are normalized, bridge elevations are
+    assigned, optional clothoid smoothing is applied, and junction distances are
+    attached for later clipping and marking placement.
+    """
     if roads.empty:
         return roads
 
@@ -534,6 +579,14 @@ def swept_band_mesh(
     distance_offset: float = 0.0,
     clip_mask=None,
 ) -> trimesh.Trimesh:
+    """Sweep a left/right offset band along one road line and return a mesh.
+
+    Most road layers are longitudinal strips: carriageways, sidewalks,
+    non-motor lanes, green belts, and curbs. When a junction clip mask is
+    supplied, the function first builds a planar polygon and subtracts the mask
+    so drivable road strips do not stack on top of the dedicated junction
+    surface. Otherwise it builds a lightweight sampled strip mesh directly.
+    """
     if right_offset <= left_offset:
         return road_gen.empty_mesh(name)
     local_clip = local_segment_clip_mask(line, left_offset, right_offset, clip_mask)
@@ -707,6 +760,14 @@ def strip_mesh(
     distance_offset: float = 0.0,
     clip_mask=None,
 ) -> trimesh.Trimesh:
+    """Build a pavement-marking strip along a road centerline.
+
+    The same primitive is used for solid lane edges, dashed lane dividers, and
+    yellow center lines. `blocked_distances` removes spans around intersections,
+    while `clip_mask` trims any remaining footprint out of the junction surface.
+    This keeps approach markings legible without drawing through the conflict
+    area.
+    """
     if width <= 0.01 or line is None or line.is_empty:
         return road_gen.empty_mesh(name)
 
@@ -827,6 +888,16 @@ COMPONENT_COLORS = {
 DRIVABLE_COMPONENT_TYPES = {"main_carriageway", "carriageway", "service_lane", "non_motor_lane", "parking_lane"}
 LANE_MARKING_COMPONENT_TYPES = {"main_carriageway", "carriageway", "service_lane"}
 RAISED_COMPONENT_TYPES = {"sidewalk", "green_belt", "facility_belt", "side_divider", "divider", "median"}
+JUNCTION_SIDE_COMPONENT_TYPES = {
+    "sidewalk",
+    "green_belt",
+    "facility_belt",
+    "side_divider",
+    "divider",
+    "median",
+    "non_motor_lane",
+    "parking_lane",
+}
 OPPOSING_CARRIAGEWAY_TYPES = {"main_carriageway", "carriageway"}
 
 
@@ -848,6 +919,8 @@ def component_layer_name_for_row(component_type: str, row: pd.Series) -> str:
 
 
 def component_z_offset(component_type: str, rule: Any) -> float:
+    if component_type == "curb":
+        return max(0.055, rule.curb_height * 0.45)
     if component_type == "sidewalk":
         return max(0.035, rule.curb_height * 0.65)
     if component_type in {"green_belt", "facility_belt", "side_divider", "divider", "median"}:
@@ -857,6 +930,74 @@ def component_z_offset(component_type: str, rule: Any) -> float:
     if component_type == "non_motor_lane":
         return 0.004
     return 0.0
+
+
+def clamp_junction_chainage(line: LineString, distance: float) -> float | None:
+    length = float(line.length)
+    distance = float(distance)
+    epsilon = max(float(JUNCTION_CHAINAGE_EPSILON_M), 0.0)
+    if distance < -epsilon or distance > length + epsilon:
+        return None
+    return max(0.0, min(length, distance))
+
+
+def road_level_record_for_row(row: pd.Series, rule: Any | None = None) -> dict[str, Any]:
+    """Normalize the road-level fields used by junction matching.
+
+    Road class, source section, layer, and elevation all affect whether two
+    approaches should share roadside components at a junction. Keeping the
+    normalization in one helper makes geometry generation and semantic records
+    use the same definition of "same level".
+    """
+    source_rule = road_gen.row_section_requirement(row)
+    road_class = road_gen.safe_str(row.get("road_class")) or "unclassified"
+    category = road_gen.section_category_name(source_rule, road_class) if source_rule else road_gen.road_class_category_name(road_class)
+    priority = int(road_gen.road_priority(row))
+    layer = int(road_gen.row_layer_value(row))
+    elevation = float(row.get("elevation", row.get("road_z_mean", 0.0)) or 0.0)
+    bucket_size = max(float(JUNCTION_LEVEL_ELEVATION_BUCKET_M), 0.05)
+    elevation_bucket = round(round(elevation / bucket_size) * bucket_size, 3)
+    return {
+        "category": category,
+        "priority": priority,
+        "spatial_layer": layer,
+        "elevation_bucket_m": elevation_bucket,
+    }
+
+
+def road_level_key_for_record(record: dict[str, Any]) -> str:
+    return (
+        f"{record.get('category', 'unknown')}:"
+        f"P{int(record.get('priority', 0) or 0)}:"
+        f"L{int(record.get('spatial_layer', 0) or 0)}:"
+        f"Z{float(record.get('elevation_bucket_m', 0.0) or 0.0):.2f}"
+    )
+
+
+def road_level_key_for_row(row: pd.Series, rule: Any | None = None) -> str:
+    return road_level_key_for_record(road_level_record_for_row(row, rule))
+
+
+def junction_connection_level_key_for_record(record: dict[str, Any]) -> str:
+    """Key used for same-plane physical junction stitching.
+
+    Road category and priority affect semantics, but solid surfaces at an
+    at-grade junction still need to meet. Keep stitching constrained to the
+    same spatial layer and elevation bucket so overpasses do not fuse.
+    """
+    record = record or {}
+    return (
+        f"L{int(record.get('spatial_layer', 0) or 0)}:"
+        f"Z{float(record.get('elevation_bucket_m', 0.0) or 0.0):.2f}"
+    )
+
+
+def junction_connection_level_key_for_row(row: pd.Series, rule: Any | None = None) -> str:
+    return junction_connection_level_key_for_record(road_level_record_for_row(row, rule))
+
+
+def junction_side_component_key(row: pd.Series, rule: Any, component_type: str) -> tuple[str, str]:
+    return (component_type, junction_connection_level_key_for_row(row, rule))
 
 
 def fallback_cross_section_components(rule: Any) -> list[dict[str, Any]]:
@@ -915,6 +1056,7 @@ def add_component_lane_markings(
     distance_offset: float = 0.0,
     clip_mask=None,
 ) -> None:
+    """Append white edge and dashed divider markings for one drivable component."""
     component_type = str(component.get("type", ""))
     if component_type not in LANE_MARKING_COMPONENT_TYPES:
         return
@@ -1125,6 +1267,14 @@ def add_junction_crosswalks_and_stop_lines(
     crosswalk_meshes: list[trimesh.Trimesh],
     stop_line_meshes: list[trimesh.Trimesh],
 ) -> Counter:
+    """Generate crosswalk stripes and stop lines for every valid junction arm.
+
+    The road already knows its junction distances from prepare_roads_for_surfaces().
+    For each side of each junction, this function steps away from the node far
+    enough to clear the rounded junction patch, checks that the marks fit on the
+    road segment, then places crosswalk stripes and a transverse stop line using
+    the local tangent/normal frame.
+    """
     stats: Counter[str] = Counter()
     if line is None or line.is_empty or line.length <= 1.0:
         return stats
@@ -1140,8 +1290,10 @@ def add_junction_crosswalks_and_stop_lines(
     default_z = float(row.get("road_z_mean", row.get("elevation", 0.0)))
 
     for junction_idx, junction_distance in enumerate(road_gen.row_junction_distances(row)):
-        if junction_distance < 0.0 or junction_distance > line.length:
+        clamped_distance = clamp_junction_chainage(line, junction_distance)
+        if clamped_distance is None:
             continue
+        junction_distance = clamped_distance
         for side_sign, side_name in [(-1.0, "Before"), (1.0, "After")]:
             crosswalk_distance = float(junction_distance) + side_sign * crosswalk_offset
             stop_line_distance = float(junction_distance) + side_sign * stop_line_offset
@@ -1199,6 +1351,14 @@ def add_junction_crosswalks_and_stop_lines(
 
 
 def junction_point_buckets(prepared_roads: gpd.GeoDataFrame) -> list[dict[str, Any]]:
+    """Cluster per-road junction distance hints into shared junction buckets.
+
+    `road_gen.attach_junction_distances()` stores distances on individual road
+    rows. This function projects those distances back to XY points, groups
+    nearby points, and keeps only groups touched by at least two roads. The
+    resulting buckets are the city-level junction candidates used by both mesh
+    generation and semantic export.
+    """
     buckets: dict[tuple[int, int], dict[str, Any]] = {}
     tolerance = max(road_gen.JUNCTION_NODE_TOLERANCE_M, 3.0)
     for road_idx, row in prepared_roads.iterrows():
@@ -1206,17 +1366,18 @@ def junction_point_buckets(prepared_roads: gpd.GeoDataFrame) -> list[dict[str, A
         if line is None or line.is_empty or not isinstance(line, LineString):
             continue
         for distance in road_gen.row_junction_distances(row):
-            if distance < 0.0 or distance > line.length:
+            clamped_distance = clamp_junction_chainage(line, distance)
+            if clamped_distance is None:
                 continue
-            point = line.interpolate(distance)
+            point = line.interpolate(clamped_distance)
             key = (round(point.x / tolerance), round(point.y / tolerance))
             bucket = buckets.setdefault(key, {"points": [], "members": []})
             bucket["points"].append(point)
-            bucket["members"].append((road_idx, float(distance)))
+            bucket["members"].append((road_idx, float(clamped_distance)))
 
     result = []
     for bucket in buckets.values():
-        if not bucket["points"] or len({road_idx for road_idx, _ in bucket["members"]}) < 2:
+        if not bucket["points"]:
             continue
         x = sum(point.x for point in bucket["points"]) / len(bucket["points"])
         y = sum(point.y for point in bucket["points"]) / len(bucket["points"])
@@ -1269,6 +1430,14 @@ def rounded_junction_polygon(
     members: list[tuple[Any, float]],
     design_parameters: dict[str, Any] | None = None,
 ):
+    """Build one rounded asphalt conflict-area polygon for a junction bucket.
+
+    The polygon is made by buffering short throat segments from every member
+    road, adding a compact center core, unioning the pieces, and applying a
+    small smooth/unsmooth pass. Design-option parameters tune throat length,
+    core size, and smoothing for compact local streets, arterial crossings,
+    ramp merges, and multi-arm junctions.
+    """
     parts = []
     widths = []
     design_parameters = design_parameters or {}
@@ -1293,7 +1462,22 @@ def rounded_junction_polygon(
         width = drivable_width_for_row(row, rule)
         if width <= 0.1:
             continue
-        widths.append(width)
+        components = road_gen.cross_section_components_for_row(row)
+        if not components:
+            components = fallback_cross_section_components(rule)
+        drivable_spans = [
+            (component, left_offset, right_offset)
+            for component, left_offset, right_offset in component_spans(components)
+            if str(component.get("type", "")) in DRIVABLE_COMPONENT_TYPES
+        ]
+        drivable_extent_width = max(
+            [width]
+            + [
+                max(abs(float(left_offset)), abs(float(right_offset))) * 2.0
+                for _, left_offset, right_offset in drivable_spans
+            ]
+        )
+        widths.append(drivable_extent_width)
         base_throat = max(
             min_throat,
             min(max_throat, width * 0.75 + 6.0),
@@ -1312,7 +1496,15 @@ def rounded_junction_polygon(
             continue
         if center_segment is None or center_segment.is_empty:
             continue
-        parts.append(center_segment.buffer(width / 2.0, cap_style=2, join_style=1, resolution=12))
+        drivable_parts = []
+        for _, left_offset, right_offset in drivable_spans:
+            geom = swept_band_polygon(center_segment, left_offset, right_offset)
+            if geom is not None and not geom.is_empty:
+                drivable_parts.append(geom)
+        if drivable_parts:
+            parts.extend(drivable_parts)
+        else:
+            parts.append(center_segment.buffer(width / 2.0, cap_style=2, join_style=1, resolution=12))
 
     if len(parts) < 2:
         return None
@@ -1441,6 +1633,7 @@ def junction_source_node_summary(arms: list[dict[str, Any]]) -> dict[str, Any]:
         "arm_count": len(arms),
         "road_class_counts": dict(Counter(arm["road_class"] for arm in arms)),
         "category_counts": dict(Counter(arm["category"] for arm in arms)),
+        "road_level_counts": dict(Counter(arm.get("road_level_key", "unknown") for arm in arms)),
         "max_priority": max(priorities, default=0),
         "min_priority": min(priorities, default=0),
         "priority_spread": max(priorities, default=0) - min(priorities, default=0),
@@ -1584,6 +1777,13 @@ def build_rounded_junction_surface_geometries(
     rules: dict[str, Any],
     buckets: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Create all city-level rounded junction surface geometries.
+
+    Each returned item stores the polygon plus the source bucket, connected road
+    members, and selected design option. Keeping this metadata with the geometry
+    lets later steps derive clip ranges, semantic junction records, and QC scores
+    from the same junction decision.
+    """
     if not ENABLE_ROUNDED_JUNCTION_SURFACES or prepared_roads.empty:
         return []
 
@@ -1809,6 +2009,17 @@ def junction_clip_range_profiles_by_road(
     rules: dict[str, Any],
     surface_geometries: list[dict[str, Any]],
 ) -> dict[str, dict[Any, list[tuple[float, float]]]]:
+    """Map junction polygons back to road-chainage clip ranges.
+
+    The mesh generator uses three retreat profiles:
+
+    - drivable: trims road surfaces where the junction surface replaces them,
+      keeping components touching at the boundary without coplanar overlap.
+    - roadside: retreats sidewalks, curbs, belts, and other side components a
+      little farther from the junction.
+    - marking: removes lane markings around the junction so crosswalks and stop
+      lines remain visually dominant.
+    """
     raw_ranges: dict[str, dict[Any, list[tuple[float, float]]]] = {
         "drivable": {},
         "roadside": {},
@@ -1873,6 +2084,306 @@ def junction_clip_range_profiles_by_road(
     }
 
 
+def junction_side_connector_spans(
+    spans: list[tuple[dict[str, Any], float, float]],
+    rule: Any,
+) -> list[tuple[Any, dict[str, Any], float, float]]:
+    connector_spans: list[tuple[Any, dict[str, Any], float, float]] = [
+        (component_idx, component, left_offset, right_offset)
+        for component_idx, (component, left_offset, right_offset) in enumerate(spans)
+        if str(component.get("type", "")) in JUNCTION_SIDE_COMPONENT_TYPES
+    ]
+
+    curb_width = max(0.18, min(float(rule.curb_width), 0.45))
+    for idx in range(len(spans) - 1):
+        left_component, _, boundary = spans[idx]
+        right_component, next_left, _ = spans[idx + 1]
+        if abs(boundary - next_left) > 0.01:
+            continue
+        left_type = str(left_component.get("type", ""))
+        right_type = str(right_component.get("type", ""))
+        has_curb_boundary = (
+            left_type in DRIVABLE_COMPONENT_TYPES and right_type in RAISED_COMPONENT_TYPES
+        ) or (
+            right_type in DRIVABLE_COMPONENT_TYPES and left_type in RAISED_COMPONENT_TYPES
+        )
+        if not has_curb_boundary:
+            continue
+        connector_spans.append(
+            (
+                f"curb_{idx}",
+                {"type": "curb", "width": curb_width},
+                boundary - curb_width / 2.0,
+                boundary + curb_width / 2.0,
+            )
+        )
+    return connector_spans
+
+
+def connector_clip_range_around_distance(
+    line_length: float,
+    node_distance: float,
+    clip_ranges: list[tuple[float, float]],
+    overlap_m: float = 0.0,
+) -> tuple[float, float] | None:
+    if not clip_ranges:
+        return None
+    line_length = max(float(line_length), 0.0)
+    node_distance = max(0.0, min(line_length, float(node_distance)))
+    best_range = None
+    best_gap = float("inf")
+    for start, end in clip_ranges:
+        start = max(0.0, min(line_length, float(start)))
+        end = max(0.0, min(line_length, float(end)))
+        if end < start:
+            start, end = end, start
+        gap = 0.0 if start <= node_distance <= end else min(abs(node_distance - start), abs(node_distance - end))
+        if gap < best_gap:
+            best_gap = gap
+            best_range = (start, end)
+    if best_range is None or best_gap > max(JUNCTION_BUCKET_CLUSTER_M, JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M):
+        return None
+    start, end = best_range
+    start = max(0.0, start - max(float(overlap_m), 0.0))
+    end = min(line_length, end + max(float(overlap_m), 0.0))
+    return (start, end) if end - start > 0.05 else None
+
+
+def build_junction_side_component_connector_meshes(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    surface_geometries: list[dict[str, Any]],
+    roadside_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
+) -> dict[str, list[trimesh.Trimesh]]:
+    """Build same-plane sidewalk/green-belt/facility-belt/curb patches.
+
+    Ordinary roadside strips intentionally retreat from the rounded conflict
+    area. Without a replacement patch, same-plane sidewalks, planted belts,
+    and curbs stop before they meet. This helper looks at each junction's arms,
+    finds component types that appear on at least two arms with the same
+    spatial/elevation key, and locally unions/smooths those component bands
+    around the junction. Grade-separated side components are not fused together.
+    """
+    if not GENERATE_JUNCTION_SIDE_COMPONENT_CONNECTORS or prepared_roads.empty:
+        return {}
+
+    mesh_groups: dict[str, list[trimesh.Trimesh]] = {}
+    connection_tolerance = max(road_gen.junction_connection_tolerance(), JUNCTION_BUCKET_CLUSTER_M)
+    if roadside_clip_ranges is None:
+        roadside_clip_ranges = junction_clip_range_profiles_by_road(
+            prepared_roads,
+            rules,
+            surface_geometries,
+        ).get("roadside", {})
+
+    for surface in surface_geometries:
+        surface_geom = surface.get("geometry")
+        surface_point = surface.get("point")
+        if surface_geom is None or surface_geom.is_empty or surface_point is None:
+            continue
+        surface_idx = int(surface.get("index", len(mesh_groups)))
+        members = surface.get("members", [])
+        arms = junction_arm_records(prepared_roads, rules, surface_point, members)
+        level_arm_counts = Counter(
+            junction_connection_level_key_for_record(arm.get("road_level", {}))
+            for arm in arms
+        )
+        connectable_levels = {level for level, count in level_arm_counts.items() if count >= 2}
+        if not connectable_levels:
+            continue
+
+        member_distances: dict[Any, list[float]] = {}
+        for road_idx, distance_hint in members:
+            member_distances.setdefault(road_idx, []).append(float(distance_hint))
+
+        subtract_geom = surface_geom
+
+        connector_groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for road_idx, distance_hints in member_distances.items():
+            if road_idx not in prepared_roads.index:
+                continue
+            row = prepared_roads.loc[road_idx].copy()
+            row.name = road_idx
+            line = row.geometry
+            if line is None or line.is_empty or not isinstance(line, LineString):
+                continue
+            rule = road_gen.get_road_rule(row, rules)
+            level_record = road_level_record_for_row(row, rule)
+            level_key = road_level_key_for_record(level_record)
+            connection_level_key = junction_connection_level_key_for_record(level_record)
+            if connection_level_key not in connectable_levels:
+                continue
+
+            components = road_gen.cross_section_components_for_row(row)
+            if not components:
+                components = fallback_cross_section_components(rule)
+            spans = component_spans(components)
+            side_spans = junction_side_connector_spans(spans, rule)
+            if not side_spans:
+                continue
+
+            projected_distance = float(line.project(surface_point))
+            if line.distance(surface_point) <= connection_tolerance:
+                node_distance = projected_distance
+            else:
+                node_distance = min(distance_hints, key=lambda value: abs(float(value) - projected_distance))
+            node_distance = max(0.0, min(float(line.length), float(node_distance)))
+            total_width = max(road_gen.component_total_width(components), float(rule.road_width))
+            connector_range = connector_clip_range_around_distance(
+                float(line.length),
+                node_distance,
+                roadside_clip_ranges.get(road_idx, []),
+                overlap_m=JUNCTION_APPROACH_BLEND_OVERLAP_M,
+            )
+            if connector_range is None:
+                base_reach = min(
+                    JUNCTION_PATCH_MAX_THROAT_M,
+                    junction_surface_throat_distance_for_row(row, rule)
+                    + total_width * 0.25
+                    + JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M,
+                )
+                roadside_reach = (
+                    total_width * 0.5
+                    + JUNCTION_ROADSIDE_RETREAT_M
+                    + JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M
+                    + 0.75
+                )
+                reach = max(JUNCTION_PATCH_MIN_THROAT_M, base_reach, roadside_reach)
+                start = max(0.0, node_distance - reach)
+                end = min(float(line.length), node_distance + reach)
+            else:
+                start, end = connector_range
+            if end - start <= 0.05:
+                continue
+            try:
+                segment = substring(line, start, end)
+            except Exception:
+                continue
+            if segment is None or segment.is_empty:
+                continue
+
+            local_margin = max(total_width * 0.5 + JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M, 2.5)
+            try:
+                local_limit = surface_geom.buffer(local_margin, resolution=4, join_style=1)
+            except Exception:
+                local_limit = None
+            z = road_gen.elevation_at_distance(
+                row,
+                node_distance,
+                default_z=float(row.get("road_z_mean", row.get("elevation", 0.0))),
+            )
+            for component_idx, component, left_offset, right_offset in side_spans:
+                component_type = str(component.get("type", ""))
+                component_key = junction_side_component_key(row, rule, component_type)
+                if component_type == "curb":
+                    layer_name = "Curb"
+                    color = COLORS["curb"]
+                else:
+                    layer_name = component_layer_name_for_row(component_type, row)
+                    color = COMPONENT_COLORS.get(layer_name, COLORS["green_belt"])
+                geom = swept_band_polygon(segment, left_offset, right_offset)
+                if geom is None or geom.is_empty:
+                    continue
+                if local_limit is not None and not local_limit.is_empty:
+                    try:
+                        geom = road_gen.clean_polygonal(geom.intersection(local_limit))
+                    except Exception:
+                        geom = None
+                if geom is None or geom.is_empty:
+                    continue
+                group_key = (surface_idx, component_key[0], component_key[1], layer_name)
+                group = connector_groups.setdefault(
+                    group_key,
+                    {
+                        "geoms": [],
+                        "z_values": [],
+                        "layer_name": layer_name,
+                        "color": color,
+                        "component_type": component_type,
+                        "level_key": level_key,
+                        "connection_level_key": connection_level_key,
+                        "road_level_keys": set(),
+                    },
+                )
+                group["geoms"].append(geom)
+                group["z_values"].append(z + component_z_offset(component_type, rule))
+                group["road_level_keys"].add(level_key)
+
+        for group_key, group in connector_groups.items():
+            geoms = group["geoms"]
+            if not geoms:
+                continue
+            try:
+                merged = road_gen.clean_polygonal(unary_union(geoms))
+            except Exception:
+                merged = None
+            if merged is None or merged.is_empty:
+                continue
+            bridge_m = max(float(JUNCTION_SIDE_COMPONENT_CONNECTOR_BRIDGE_M), 0.0)
+            if bridge_m > 0.0:
+                try:
+                    bridge_limit = surface_geom.buffer(
+                        JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M,
+                        resolution=4,
+                        join_style=1,
+                    )
+                    bridge_geom = road_gen.clean_polygonal(
+                        merged.buffer(bridge_m, resolution=4, join_style=1).intersection(bridge_limit)
+                    )
+                    if bridge_geom is not None and not bridge_geom.is_empty:
+                        merged = road_gen.clean_polygonal(unary_union([merged, bridge_geom]))
+                except Exception:
+                    pass
+            try:
+                smooth = float(JUNCTION_SIDE_COMPONENT_CONNECTOR_SMOOTH_M)
+                if smooth > 0.0:
+                    merged = road_gen.clean_polygonal(
+                        merged.buffer(smooth, resolution=4, join_style=1).buffer(
+                            -smooth,
+                            resolution=4,
+                            join_style=1,
+                        )
+                    )
+            except Exception:
+                pass
+            if merged is None or merged.is_empty:
+                continue
+            try:
+                merged = road_gen.clean_polygonal(merged.difference(subtract_geom))
+            except Exception:
+                pass
+            if merged is None or merged.is_empty:
+                continue
+
+            layer_name = str(group["layer_name"])
+            color = group["color"]
+            average_z = sum(group["z_values"]) / max(len(group["z_values"]), 1)
+            for polygon_idx, polygon in enumerate(iter_polygons(merged)):
+                if polygon.area < JUNCTION_SIDE_COMPONENT_CONNECTOR_MIN_AREA_M2:
+                    continue
+                mesh_name = (
+                    f"{layer_name}_Junction_Connector_"
+                    f"{surface_idx}_{group['component_type']}_{polygon_idx}"
+                )
+                mesh = road_gen.polygon_to_top_mesh(polygon, average_z, mesh_name, visual_color=color)
+                if len(mesh.vertices) == 0:
+                    continue
+                mesh.metadata.update(
+                    {
+                        "name": mesh_name,
+                        "junction_side_component_connector": True,
+                        "junction_index": surface_idx,
+                        "component_type": group["component_type"],
+                        "road_level_key": group["level_key"],
+                        "road_level_keys": sorted(group["road_level_keys"]),
+                        "junction_connection_level_key": group["connection_level_key"],
+                    }
+                )
+                mesh_groups.setdefault(layer_name, []).append(mesh)
+
+    return mesh_groups
+
+
 def junction_component_clip_ranges_by_road(
     prepared_roads: gpd.GeoDataFrame,
     rules: dict[str, Any],
@@ -1886,6 +2397,15 @@ def junction_component_clip_ranges_by_road(
 
 
 def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
+    """Build all road and junction meshes as one coordinated road module.
+
+    This is the public generation entry point used by `main()`. It deliberately
+    generates junction surfaces before ordinary road strips, because the
+    junction polygons decide how much each road component should be clipped.
+    The returned dictionary contains merged layer meshes such as
+    Road_Surface_Main_All, Junction_Surface_All, Crosswalk_All, Stop_Line_All,
+    Curb_All, lane markings, trees, and street lights.
+    """
     if roads.empty:
         return {}
 
@@ -1916,6 +2436,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     crosswalk_meshes: list[trimesh.Trimesh] = []
     stop_line_meshes: list[trimesh.Trimesh] = []
     junction_marking_stats: Counter[str] = Counter()
+    # First resolve intersections as dedicated surfaces. All road strips and
+    # markings generated later use these surfaces as clipping masks.
     junction_buckets = junction_point_buckets(prepared_roads)
     junction_surface_geometries = build_rounded_junction_surface_geometries(prepared_roads, rules, junction_buckets)
     junction_surface_meshes = build_rounded_junction_surface_meshes(junction_surface_geometries)
@@ -1927,13 +2449,9 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     junction_asset_filter_geom = junction_surface_union(junction_surface_geometries, clearance=1.0)
     junction_drivable_core_clip_geom = None
     if junction_mask_geom is not None and not junction_mask_geom.is_empty:
-        junction_drivable_core_clip_geom = road_gen.clean_polygonal(
-            junction_mask_geom.buffer(
-                -JUNCTION_DRIVABLE_CORE_CLIP_INSET_M,
-                resolution=4,
-                join_style=1,
-            )
-        )
+        junction_drivable_core_clip_geom = road_gen.clean_polygonal(junction_mask_geom)
+    # Convert the 2D junction polygons into chainage ranges per road so each
+    # layer can choose the correct retreat profile.
     junction_clip_profiles = junction_clip_range_profiles_by_road(
         prepared_roads,
         rules,
@@ -1942,6 +2460,12 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     drivable_clip_ranges = junction_clip_profiles.get("drivable", {})
     roadside_clip_ranges = junction_clip_profiles.get("roadside", {})
     marking_clip_ranges = junction_clip_profiles.get("marking", {})
+    junction_side_component_mesh_groups = build_junction_side_component_connector_meshes(
+        prepared_roads,
+        rules,
+        junction_surface_geometries,
+        roadside_clip_ranges,
+    )
     asset_mesh_groups: dict[str, list[trimesh.Trimesh]] = {}
     for road_idx, row in prepared_roads.iterrows():
         row = row.copy()
@@ -1971,6 +2495,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     )
                 return segment_cache[profile]
 
+            # 1. Longitudinal cross-section components: road surfaces,
+            # sidewalks, non-motor lanes, green belts, medians, and similar.
             for component_idx, (component, left_offset, right_offset) in enumerate(line_spans):
                 component_type = str(component.get("type", ""))
                 layer_name = component_layer_name_for_row(component_type, row)
@@ -1995,6 +2521,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     if len(mesh.vertices) > 0:
                         component_mesh_groups.setdefault(layer_name, []).append(mesh)
 
+            # 2. Lane markings are generated on the marking profile so they
+            # stop earlier than road surfaces near intersections.
             for segment, distance_offset in clipped_segments_for("marking"):
                 if segment is None or segment.is_empty:
                     continue
@@ -2022,6 +2550,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     distance_offset=distance_offset,
                 )
 
+            # 3. Curbs follow the roadside profile and retreat from junctions
+            # together with raised roadside components.
             for segment, distance_offset in clipped_segments_for("roadside"):
                 if segment is None or segment.is_empty:
                     continue
@@ -2033,6 +2563,9 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     curb_meshes,
                     distance_offset=distance_offset,
                 )
+            # 4. Crosswalks and stop lines are generated from the original
+            # line/junction distances, then filtered against the final junction
+            # masks below.
             junction_marking_stats.update(
                 add_junction_crosswalks_and_stop_lines(
                     row,
@@ -2043,6 +2576,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                 )
             )
 
+            # 5. Roadside assets are omitted when their footprint would land in
+            # or immediately beside a junction surface.
             if GENERATE_ROAD_ASSETS:
                 for mesh in road_gen.build_street_light_meshes(row, rule):
                     if mesh_center_inside_polygon(mesh, junction_asset_filter_geom):
@@ -2057,6 +2592,15 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     mesh.metadata["name"] = name
                     asset_mesh_groups.setdefault(road_gen.asset_mesh_group_name(mesh), []).append(mesh)
 
+    for group_name, connector_parts in junction_side_component_mesh_groups.items():
+        if group_name == "Curb":
+            curb_meshes.extend(connector_parts)
+        else:
+            component_mesh_groups.setdefault(group_name, []).extend(connector_parts)
+
+    # Crosswalks and stop lines must overlap the junction approach zone but not
+    # sit inside the conflict-area core. These filters convert that rule into a
+    # simple center/footprint test before the layer meshes are merged.
     if junction_mask_geom is not None:
         crosswalk_meshes, removed_crosswalks = filter_meshes_outside_polygon(
             crosswalk_meshes,
@@ -2117,7 +2661,1186 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     return combined_meshes
 
 
+REQUIRED_COMPONENT_TYPES_BY_CATEGORY = {
+    "expressway": {"main_carriageway", "median", "sidewalk", "side_divider"},
+    "arterial": {"main_carriageway", "median", "sidewalk"},
+    "primary": {"main_carriageway", "median", "sidewalk"},
+    "secondary": {"main_carriageway", "sidewalk"},
+    "branch": {"main_carriageway", "sidewalk"},
+}
+
+MODEL_SCORE_WEIGHTS = {
+    "geometry_symmetry_and_width": 25.0,
+    "section_rule_fit": 18.0,
+    "component_completeness": 17.0,
+    "semantic_attribute_completeness": 15.0,
+    "visual_layer_material_separation": 15.0,
+    "intersection_curve_treatment": 10.0,
+}
+
+JUNCTION_SCORE_WEIGHTS = {
+    "junction_surface_continuity": 16.0,
+    "approach_marking_clearance": 12.0,
+    "pedestrian_crossing": 12.0,
+    "stop_control_marking": 10.0,
+    "topology_semantic_completeness": 16.0,
+    "lane_movement_semantic": 14.0,
+    "asset_visibility_clearance": 8.0,
+    "layer_material_separation": 7.0,
+    "semantic_traceability": 5.0,
+}
+
+
+def rounded_components(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rounded = []
+    for component in components:
+        item = dict(component)
+        if "width" in item:
+            item["width"] = round(float(item["width"]), 3)
+        if "scaled_from_width" in item:
+            item["scaled_from_width"] = round(float(item["scaled_from_width"]), 3)
+        rounded.append(item)
+    return rounded
+
+
+def road_cross_section_record(row: pd.Series) -> dict[str, Any]:
+    """Create the semantic record for one generated road centerline."""
+    source_rule = road_gen.row_section_requirement(row)
+    modeled_rule = road_gen.modeled_section_requirement(row, source_rule)
+    rule = road_gen.get_road_rule(row, road_gen.load_rules())
+    components = road_gen.cross_section_components_for_row(row)
+    source_components = road_gen.source_cross_section_components_for_row(row)
+    source_section = road_gen.row_section_code(row) or (
+        road_gen.safe_str(source_rule.get("section_id") or source_rule.get("inferred_section"))
+        if source_rule
+        else None
+    )
+    modeled_section = (
+        road_gen.safe_str(modeled_rule.get("section_id") or modeled_rule.get("inferred_section"))
+        if modeled_rule
+        else None
+    )
+    road_class = road_gen.safe_str(row.get("road_class")) or "unclassified"
+    category = road_gen.section_category_name(source_rule, road_class) if source_rule else road_gen.road_class_category_name(road_class)
+    level_record = road_level_record_for_row(row, rule)
+    component_types = {str(component.get("type", "")) for component in components}
+    required_types = REQUIRED_COMPONENT_TYPES_BY_CATEGORY.get(category, REQUIRED_COMPONENT_TYPES_BY_CATEGORY["branch"])
+    missing_required = sorted(required_types - component_types)
+    source_width = road_gen.row_target_total_width(row, source_rule)
+    target_width = source_width
+    modeled_width = road_gen.component_total_width(components)
+    if (
+        source_section
+        and modeled_section
+        and source_section != modeled_section
+        and source_section in road_gen.SYMMETRIC_FALLBACK_KEEP_MODEL_WIDTH
+    ):
+        target_width = modeled_width
+    width_error = None if target_width is None else modeled_width - float(target_width)
+    spans = component_spans(components)
+    junction_distances = road_gen.row_junction_distances(row)
+
+    return {
+        "source_road_id": road_gen.safe_str(row.get("road_id")) or "",
+        "road_name": road_gen.safe_str(row.get("road_name")) or "",
+        "road_class": road_class,
+        "category": category,
+        "road_level": level_record,
+        "road_level_key": road_level_key_for_record(level_record),
+        "source_section_code": source_section,
+        "modeled_section_code": modeled_section,
+        "symmetry_normalized": bool(source_section and modeled_section and source_section != modeled_section),
+        "source_is_symmetric": road_gen.section_components_are_symmetric(source_components),
+        "modeled_is_symmetric": road_gen.section_components_are_symmetric(components),
+        "source_width_m": round(float(source_width), 3) if source_width is not None else None,
+        "target_width_m": round(float(target_width), 3) if target_width is not None else None,
+        "modeled_width_m": round(float(modeled_width), 3),
+        "width_error_m": round(float(width_error), 3) if width_error is not None else None,
+        "transition_curve_count": int(row.get("transition_curve_count", 0) or 0),
+        "junction_distances_m": [round(float(distance), 3) for distance in junction_distances],
+        "junction_marking_clearance_m": round(junction_marking_clearance_for_row(row, rule), 3),
+        "missing_required_components": missing_required,
+        "source_cross_section_components": rounded_components(source_components),
+        "modeled_cross_section_components": rounded_components(components),
+        "component_spans": [
+            {
+                "index": idx,
+                "type": str(component.get("type", "")),
+                "layer": component_layer_name_for_row(str(component.get("type", "")), row),
+                "left_offset_m": round(float(left_offset), 3),
+                "right_offset_m": round(float(right_offset), 3),
+                "width_m": round(float(right_offset - left_offset), 3),
+            }
+            for idx, (component, left_offset, right_offset) in enumerate(spans)
+        ],
+    }
+
+
+def build_city_road_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
+    records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
+    return {
+        "project": "cim_road_poc",
+        "model": "cim_city_roads",
+        "unit": "meter",
+        "coordinate": {
+            "model_crs": TARGET_CRS,
+            "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
+        },
+        "symmetry_policy": {
+            "enabled": road_gen.MODEL_CROSS_SECTIONS_AS_SYMMETRIC,
+            "fallbacks": road_gen.SYMMETRIC_SECTION_FALLBACKS,
+            "default_sections": road_gen.SYMMETRIC_DEFAULT_SECTION_BY_CATEGORY,
+        },
+        "objects": records,
+    }
+
+
+def write_city_road_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
+    semantic = build_city_road_semantic(prepared_roads, origin)
+    CITY_ROAD_SEMANTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CITY_ROAD_SEMANTIC_PATH.open("w", encoding="utf-8") as f:
+        json.dump(semantic, f, ensure_ascii=False, indent=2)
+    return semantic
+
+
+def vector_angle_deg(vector: tuple[float, float]) -> float:
+    return (math.degrees(math.atan2(vector[1], vector[0])) + 360.0) % 360.0
+
+
+def signed_angle_deg(from_vector: tuple[float, float], to_vector: tuple[float, float]) -> float:
+    cross = from_vector[0] * to_vector[1] - from_vector[1] * to_vector[0]
+    dot = from_vector[0] * to_vector[0] + from_vector[1] * to_vector[1]
+    return math.degrees(math.atan2(cross, dot))
+
+
+def turn_movement_type(turn_angle_deg: float) -> str:
+    abs_angle = abs(turn_angle_deg)
+    if abs_angle <= 35.0:
+        return "through"
+    if abs_angle >= 145.0:
+        return "u_turn"
+    return "left" if turn_angle_deg > 0.0 else "right"
+
+
+def angular_gaps_deg(vectors: list[tuple[float, float]]) -> list[float]:
+    if len(vectors) < 2:
+        return []
+    angles = sorted(vector_angle_deg(vector) for vector in vectors)
+    return [
+        round(float((angles[(idx + 1) % len(angles)] - angle) % 360.0), 3)
+        for idx, angle in enumerate(angles)
+    ]
+
+
+def classify_city_junction_type(arms: list[dict[str, Any]]) -> str:
+    arm_count = len(arms)
+    if arm_count <= 1:
+        return "UNKNOWN"
+    if any("roundabout" in arm["road_class"].lower() or "circular" in arm["road_class"].lower() for arm in arms):
+        return "ROUNDABOUT_LIKE"
+    if any("link" in arm["road_class"].lower() or "ramp" in arm["road_class"].lower() for arm in arms):
+        return "RAMP_MERGE"
+    priorities = [int(arm["road_priority"]) for arm in arms]
+    if arm_count <= 2:
+        return "TWO_ARM_CONNECTION"
+    if arm_count == 3 and max(priorities, default=0) - min(priorities, default=0) >= 3:
+        return "RAMP_MERGE"
+
+    gaps = angular_gaps_deg([arm["direction_out"] for arm in arms])
+    max_gap = max(gaps) if gaps else 0.0
+    min_gap = min(gaps) if gaps else 0.0
+    if arm_count == 3:
+        return "T_JUNCTION" if max_gap > 150.0 else "Y_JUNCTION"
+    if arm_count == 4:
+        return "CROSS_JUNCTION" if min_gap > 45.0 and max_gap < 145.0 else "SKEWED_CROSS_OR_MULTI_ARM"
+    return "MULTI_ARM_JUNCTION"
+
+
+def classify_city_junction_hierarchy(arms: list[dict[str, Any]], junction_type: str) -> str:
+    if junction_type == "ROUNDABOUT_LIKE":
+        return "ROUNDABOUT_JUNCTION"
+    if junction_type == "RAMP_MERGE":
+        return "RAMP_OR_GRADE_SEPARATED"
+    if junction_type in {"MULTI_ARM_JUNCTION", "SKEWED_CROSS_OR_MULTI_ARM"} or len(arms) >= 5:
+        return "COMPLEX_MULTI_ARM"
+    max_priority = max((int(arm["road_priority"]) for arm in arms), default=0)
+    max_lanes = max((int(arm["lane_count_estimate"]) for arm in arms), default=1)
+    max_width = max((float(arm["drivable_width_m"]) for arm in arms), default=0.0)
+    if max_priority >= 4 or max_lanes >= 4 or max_width >= 14.0:
+        return "MAJOR_ARTERIAL"
+    if max_priority >= 3 or max_lanes >= 3 or max_width >= 10.0:
+        return "SECONDARY_COLLECTOR"
+    return "LOCAL_JUNCTION"
+
+
+def lane_movement_policy(lane_count: int, hierarchy: str) -> dict[str, Any]:
+    if lane_count >= 4 or hierarchy in {"MAJOR_ARTERIAL", "COMPLEX_MULTI_ARM", "RAMP_OR_GRADE_SEPARATED"}:
+        return {
+            "left_turn_pocket": lane_count >= 3,
+            "right_turn_channel": lane_count >= 3,
+            "through_lane_min": max(1, lane_count - 2),
+            "policy": "dedicated_turn_pockets_when_width_allows",
+        }
+    if lane_count >= 2:
+        return {
+            "left_turn_pocket": False,
+            "right_turn_channel": False,
+            "through_lane_min": 1,
+            "policy": "shared_left_through_and_shared_right",
+        }
+    return {
+        "left_turn_pocket": False,
+        "right_turn_channel": False,
+        "through_lane_min": 1,
+        "policy": "single_mixed_lane",
+    }
+
+
+def junction_arm_records(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    point: Point,
+    members: list[tuple[Any, float]],
+) -> list[dict[str, Any]]:
+    arms: list[dict[str, Any]] = []
+    connection_tolerance = road_gen.junction_connection_tolerance()
+    member_distances: dict[Any, list[float]] = {}
+    for road_idx, distance_hint in members:
+        member_distances.setdefault(road_idx, []).append(float(distance_hint))
+
+    for road_idx, distance_hints in member_distances.items():
+        if road_idx not in prepared_roads.index:
+            continue
+        row = prepared_roads.loc[road_idx]
+        line = row.geometry
+        if line is None or line.is_empty or not isinstance(line, LineString):
+            continue
+        rule = road_gen.get_road_rule(row, rules)
+        projected_distance = float(line.project(point))
+        if line.distance(point) <= max(connection_tolerance, JUNCTION_BUCKET_CLUSTER_M):
+            node_distance = projected_distance
+        else:
+            node_distance = min(distance_hints, key=lambda value: abs(float(value) - projected_distance))
+        node_distance = max(0.0, min(float(line.length), node_distance))
+        is_internal = connection_tolerance < node_distance < line.length - connection_tolerance
+        signs = [-1.0, 1.0] if is_internal else ([1.0] if node_distance <= line.length * 0.5 else [-1.0])
+        drivable_width = drivable_width_for_row(row, rule)
+        source_rule = road_gen.row_section_requirement(row)
+        modeled_rule = road_gen.modeled_section_requirement(row, source_rule)
+        source_section = road_gen.row_section_code(row) or (
+            road_gen.safe_str(source_rule.get("section_id") or source_rule.get("inferred_section"))
+            if source_rule
+            else None
+        )
+        modeled_section = (
+            road_gen.safe_str(modeled_rule.get("section_id") or modeled_rule.get("inferred_section"))
+            if modeled_rule
+            else None
+        )
+        road_class = road_gen.safe_str(row.get("road_class")) or "unclassified"
+        level_record = road_level_record_for_row(row, rule)
+        level_key = road_level_key_for_record(level_record)
+        category = str(level_record["category"])
+        components = road_gen.cross_section_components_for_row(row)
+        lane_count_estimate = max(1, int(round(drivable_width / max(float(rule.lane_width), 2.8))))
+        crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+        min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
+        sample_step = max(JUNCTION_SEMANTIC_SAMPLE_DISTANCE_M, drivable_width * 0.65, 8.0)
+        for sign in signs:
+            sample_distance = max(0.0, min(float(line.length), node_distance + sign * sample_step))
+            if abs(sample_distance - node_distance) < 0.2:
+                continue
+            node = line.interpolate(node_distance)
+            outside = line.interpolate(sample_distance)
+            direction = road_gen.unit_vector((node.x, node.y), (outside.x, outside.y))
+            if road_gen.vector_length(direction) <= 0.01:
+                continue
+            side = "internal_before" if sign < 0.0 else "internal_after"
+            if not is_internal:
+                side = "from_start" if sign > 0.0 else "from_end"
+            crosswalk_distance = node_distance + sign * crosswalk_offset
+            stop_line_distance = node_distance + sign * stop_line_offset
+            marking_fit = (
+                min_margin < crosswalk_distance < line.length - min_margin
+                and min_margin < stop_line_distance < line.length - min_margin
+            )
+            arm_id = f"{road_idx}_{'neg' if sign < 0 else 'pos'}"
+            arms.append(
+                {
+                    "arm_id": arm_id,
+                    "source_road_id": road_gen.safe_str(row.get("road_id")) or "",
+                    "road_name": road_gen.safe_str(row.get("road_name")) or "",
+                    "road_class": road_class,
+                    "category": category,
+                    "road_level": level_record,
+                    "road_level_key": level_key,
+                    "source_section_code": source_section,
+                    "modeled_section_code": modeled_section,
+                    "road_priority": int(level_record["priority"]),
+                    "node_distance_m": round(float(node_distance), 3),
+                    "position_ratio": round(float(node_distance / line.length), 4) if line.length > 0 else 0.0,
+                    "approach_side": side,
+                    "direction_out": (round(float(direction[0]), 6), round(float(direction[1]), 6)),
+                    "bearing_out_deg": round(vector_angle_deg(direction), 3),
+                    "modeled_width_m": round(float(road_gen.component_total_width(components)), 3),
+                    "drivable_width_m": round(float(drivable_width), 3),
+                    "lane_count_estimate": lane_count_estimate,
+                    "lane_width_m": round(float(rule.lane_width), 3),
+                    "marked_approach_fit": bool(marking_fit),
+                    "crosswalk_distance_m": round(float(crosswalk_distance), 3) if marking_fit else None,
+                    "stop_line_distance_m": round(float(stop_line_distance), 3) if marking_fit else None,
+                }
+            )
+    arms.sort(key=lambda item: item["bearing_out_deg"])
+    return arms
+
+
+def build_junction_movements(junction_id: str, arms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    movements = []
+    for from_arm in arms:
+        inbound = (-float(from_arm["direction_out"][0]), -float(from_arm["direction_out"][1]))
+        for to_arm in arms:
+            if from_arm["arm_id"] == to_arm["arm_id"]:
+                continue
+            turn_angle = signed_angle_deg(inbound, to_arm["direction_out"])
+            movement_type = turn_movement_type(turn_angle)
+            movements.append(
+                {
+                    "movement_id": f"{junction_id}_{from_arm['arm_id']}_to_{to_arm['arm_id']}",
+                    "from_arm_id": from_arm["arm_id"],
+                    "to_arm_id": to_arm["arm_id"],
+                    "movement_type": movement_type,
+                    "signed_turn_angle_deg": round(float(turn_angle), 3),
+                    "allowed_by_default": movement_type != "u_turn",
+                }
+            )
+    return movements
+
+
+def build_junction_correspondence_records(arms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe how adjacent arms correspond across road levels.
+
+    The geometry code uses spatial layer and elevation to decide when raised
+    side components can connect. Exposing the pairwise result in semantics
+    makes grade-separated junctions auditable instead of leaving the matching
+    decision hidden inside mesh generation.
+    """
+    if len(arms) < 2:
+        return []
+    correspondences: list[dict[str, Any]] = []
+    for idx, arm in enumerate(arms):
+        next_arm = arms[(idx + 1) % len(arms)]
+        gap = (float(next_arm["bearing_out_deg"]) - float(arm["bearing_out_deg"])) % 360.0
+        same_road_level = arm.get("road_level_key") == next_arm.get("road_level_key")
+        arm_level = arm.get("road_level", {})
+        next_level = next_arm.get("road_level", {})
+        same_spatial_level = (
+            int(arm_level.get("spatial_layer", 0) or 0) == int(next_level.get("spatial_layer", 0) or 0)
+            and abs(
+                float(arm_level.get("elevation_bucket_m", 0.0) or 0.0)
+                - float(next_level.get("elevation_bucket_m", 0.0) or 0.0)
+            )
+            <= JUNCTION_LEVEL_ELEVATION_BUCKET_M
+        )
+        correspondences.append(
+            {
+                "from_arm_id": arm["arm_id"],
+                "to_arm_id": next_arm["arm_id"],
+                "angular_gap_deg": round(float(gap), 3),
+                "from_road_level_key": arm.get("road_level_key", "unknown"),
+                "to_road_level_key": next_arm.get("road_level_key", "unknown"),
+                "same_road_level": bool(same_road_level),
+                "same_spatial_level": bool(same_spatial_level),
+                "priority_delta": int(next_arm.get("road_priority", 0)) - int(arm.get("road_priority", 0)),
+                "correspondence_type": "side_component_connectable" if same_spatial_level else "mixed_level_conflict_area",
+            }
+        )
+    return correspondences
+
+
+def build_city_junction_semantic_records(prepared_roads: gpd.GeoDataFrame) -> list[dict[str, Any]]:
+    """Build semantic junction records from the same buckets used for meshes.
+
+    This mirrors the geometry pipeline: bucket -> arm records -> junction type
+    and hierarchy -> design option -> movement records. Keeping semantics tied
+    to the mesh buckets makes the QC report traceable back to visible junction
+    patches.
+    """
+    if prepared_roads.empty:
+        return []
+    rules = road_gen.load_rules()
+    records = []
+    for idx, bucket in enumerate(junction_point_buckets(prepared_roads)):
+        arms = junction_arm_records(prepared_roads, rules, bucket["point"], bucket["members"])
+        if len(arms) < 2:
+            continue
+        junction_id = f"J{idx:04d}"
+        junction_type = classify_city_junction_type(arms)
+        hierarchy = classify_city_junction_hierarchy(arms, junction_type)
+        design_profile = evaluate_junction_design_options(arms, junction_type, hierarchy)
+        selected_design = design_profile["selected_design_option"]
+        for arm in arms:
+            arm["role"] = "major" if int(arm["road_priority"]) == max(int(item["road_priority"]) for item in arms) else "minor"
+            arm["lane_movement_policy"] = lane_movement_policy(int(arm["lane_count_estimate"]), hierarchy)
+        movements = build_junction_movements(junction_id, arms)
+        correspondences = build_junction_correspondence_records(arms)
+        allowed_movements = [movement for movement in movements if movement["allowed_by_default"]]
+        type_counts = Counter(movement["movement_type"] for movement in movements)
+        connected_road_ids = sorted({arm["source_road_id"] for arm in arms if arm["source_road_id"]})
+        road_level_counts = Counter(arm.get("road_level_key", "unknown") for arm in arms)
+        connection_level_counts = Counter(
+            junction_connection_level_key_for_record(arm.get("road_level", {}))
+            for arm in arms
+        )
+        records.append(
+            {
+                "junction_id": junction_id,
+                "junction_type": junction_type,
+                "junction_hierarchy": hierarchy,
+                "surface_strategy": selected_design.get("option_id", "clustered_rounded_conflict_area_with_clipped_approaches"),
+                "source_node_summary": design_profile["source_node_summary"],
+                "candidate_design_options": design_profile["candidate_design_options"],
+                "selected_design_option": selected_design,
+                "design_references": design_profile["design_references"],
+                "center_local": {
+                    "x": round(float(bucket["point"].x), 3),
+                    "y": round(float(bucket["point"].y), 3),
+                    "z": 0.0,
+                },
+                "connected_road_count": len(connected_road_ids),
+                "arm_count": len(arms),
+                "marked_approach_count": sum(1 for arm in arms if arm["marked_approach_fit"]),
+                "connected_road_ids": connected_road_ids,
+                "road_class_counts": dict(Counter(arm["road_class"] for arm in arms)),
+                "road_level_counts": dict(road_level_counts),
+                "junction_connection_level_counts": dict(connection_level_counts),
+                "side_component_connectable_road_levels": [
+                    level_key for level_key, count in sorted(road_level_counts.items()) if count >= 2
+                ],
+                "side_component_connectable_connection_levels": [
+                    level_key for level_key, count in sorted(connection_level_counts.items()) if count >= 2
+                ],
+                "section_counts": dict(Counter(arm["modeled_section_code"] or "unknown" for arm in arms)),
+                "angular_gaps_deg": angular_gaps_deg([arm["direction_out"] for arm in arms]),
+                "max_drivable_width_m": round(max(float(arm["drivable_width_m"]) for arm in arms), 3),
+                "max_lane_count_estimate": max(int(arm["lane_count_estimate"]) for arm in arms),
+                "arms": arms,
+                "movements": movements,
+                "road_level_correspondence": correspondences,
+                "movement_summary": {
+                    "movement_count": len(movements),
+                    "allowed_movement_count": len(allowed_movements),
+                    "movement_type_counts": dict(type_counts),
+                },
+                "quality_flags": {
+                    "topology_complete": junction_type != "UNKNOWN" and len(arms) >= 2,
+                    "movement_semantic_complete": len(allowed_movements) > 0,
+                    "has_marked_approach": any(arm["marked_approach_fit"] for arm in arms),
+                    "has_major_minor_role": any(arm["role"] == "major" for arm in arms),
+                    "design_option_selected": bool(selected_design.get("option_id")),
+                    "design_review_required": bool(selected_design.get("review_required")),
+                },
+            }
+        )
+    return records
+
+
+def build_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
+    records = build_city_junction_semantic_records(prepared_roads)
+    for record in records:
+        local = record["center_local"]
+        record["center_global"] = {
+            "x": round(float(local["x"] + origin[0]), 3),
+            "y": round(float(local["y"] + origin[1]), 3),
+            "z": local["z"],
+        }
+    return {
+        "project": "cim_road_poc",
+        "model": "cim_city_junctions",
+        "unit": "meter",
+        "coordinate": {
+            "model_crs": TARGET_CRS,
+            "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
+        },
+        "semantic_level": "topology_node_with_arms_movements_and_scored_design_options",
+        "objects": records,
+        "summary": {
+            "junction_count": len(records),
+            "junction_type_counts": dict(Counter(record["junction_type"] for record in records)),
+            "junction_hierarchy_counts": dict(Counter(record["junction_hierarchy"] for record in records)),
+            "selected_design_option_counts": dict(
+                Counter(record.get("selected_design_option", {}).get("option_id", "unknown") for record in records)
+            ),
+            "design_review_required_count": sum(
+                1 for record in records if record.get("selected_design_option", {}).get("review_required")
+            ),
+            "total_arm_count": sum(int(record["arm_count"]) for record in records),
+            "total_allowed_movement_count": sum(int(record["movement_summary"]["allowed_movement_count"]) for record in records),
+        },
+    }
+
+
+def write_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
+    semantic = build_city_junction_semantic(prepared_roads, origin)
+    CITY_JUNCTION_SEMANTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CITY_JUNCTION_SEMANTIC_PATH.open("w", encoding="utf-8") as f:
+        json.dump(semantic, f, ensure_ascii=False, indent=2)
+    return semantic
+
+
+def score_ratio(success_count: int, total_count: int) -> float:
+    if total_count <= 0:
+        return 1.0
+    return max(0.0, min(1.0, success_count / total_count))
+
+
+def model_quality_grade(score: float) -> str:
+    if score >= 90.0:
+        return "A"
+    if score >= 80.0:
+        return "B"
+    if score >= 70.0:
+        return "C"
+    return "D"
+
+
+def build_city_road_model_score(prepared_roads: gpd.GeoDataFrame, road_meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
+    """Score whether the generated road model matches section rules and layers.
+
+    This report checks geometry width, symmetry fallback behavior, required
+    cross-section components, semantic completeness, material/layer separation,
+    and whether roads with junctions received transition/clearance treatment.
+    """
+    records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
+    total = len(records)
+    symmetric_count = sum(1 for record in records if record["modeled_is_symmetric"])
+    width_match_count = sum(
+        1
+        for record in records
+        if record["width_error_m"] is None or abs(float(record["width_error_m"])) <= 0.1
+    )
+    section_fit_count = sum(1 for record in records if record["source_section_code"] and record["modeled_section_code"])
+    complete_count = sum(1 for record in records if not record["missing_required_components"])
+    semantic_complete_count = sum(
+        1
+        for record in records
+        if all(record.get(key) for key in ("source_road_id", "road_class", "source_section_code", "modeled_section_code"))
+        and bool(record.get("modeled_cross_section_components"))
+    )
+    transition_curve_count = sum(int(record.get("transition_curve_count", 0) or 0) for record in records)
+    roads_with_transition_curves = sum(1 for record in records if int(record.get("transition_curve_count", 0) or 0) > 0)
+    roads_with_junction_clearance = sum(1 for record in records if record.get("junction_distances_m"))
+
+    expected_layers = {
+        span["layer"]
+        for record in records
+        for span in record["component_spans"]
+    } | {"Curb", "Lane_Marking_White", "Lane_Marking_Yellow"}
+    if ENABLE_ROUNDED_JUNCTION_SURFACES and roads_with_junction_clearance:
+        expected_layers.add("Junction_Surface")
+    if roads_with_junction_clearance:
+        if GENERATE_JUNCTION_CROSSWALKS:
+            expected_layers.add("Crosswalk")
+        if GENERATE_JUNCTION_STOP_LINES:
+            expected_layers.add("Stop_Line")
+    present_layers = {
+        name[:-4] if name.endswith("_All") else name
+        for name, mesh in road_meshes.items()
+        if mesh is not None and len(mesh.vertices) > 0
+    }
+    layer_hit_count = sum(1 for layer in expected_layers if layer in present_layers)
+
+    geometry_ratio = 0.7 * score_ratio(symmetric_count, total) + 0.3 * score_ratio(width_match_count, total)
+    section_ratio = score_ratio(section_fit_count, total)
+    component_ratio = score_ratio(complete_count, total)
+    semantic_ratio = score_ratio(semantic_complete_count, total)
+    layer_ratio = score_ratio(layer_hit_count, len(expected_layers))
+    curve_ratio = 1.0 if transition_curve_count == 0 or ENABLE_TRANSITION_CURVES else 0.0
+    junction_ratio = 1.0 if roads_with_junction_clearance == 0 else (1.0 if "Junction_Surface" in present_layers else 0.0)
+    intersection_curve_ratio = 0.55 * curve_ratio + 0.45 * junction_ratio
+
+    category_scores = {
+        "geometry_symmetry_and_width": round(MODEL_SCORE_WEIGHTS["geometry_symmetry_and_width"] * geometry_ratio, 2),
+        "section_rule_fit": round(MODEL_SCORE_WEIGHTS["section_rule_fit"] * section_ratio, 2),
+        "component_completeness": round(MODEL_SCORE_WEIGHTS["component_completeness"] * component_ratio, 2),
+        "semantic_attribute_completeness": round(MODEL_SCORE_WEIGHTS["semantic_attribute_completeness"] * semantic_ratio, 2),
+        "visual_layer_material_separation": round(MODEL_SCORE_WEIGHTS["visual_layer_material_separation"] * layer_ratio, 2),
+        "intersection_curve_treatment": round(MODEL_SCORE_WEIGHTS["intersection_curve_treatment"] * intersection_curve_ratio, 2),
+    }
+    total_score = round(sum(category_scores.values()), 2)
+
+    source_section_counts = Counter(record["source_section_code"] or "unknown" for record in records)
+    modeled_section_counts = Counter(record["modeled_section_code"] or "unknown" for record in records)
+    normalized_records = [record for record in records if record["symmetry_normalized"]]
+    failed_symmetry = [record for record in records if not record["modeled_is_symmetric"]]
+    incomplete_records = [record for record in records if record["missing_required_components"]]
+
+    findings = []
+    if normalized_records:
+        findings.append(
+            f"{len(normalized_records)} road centerlines used symmetric fallback sections to remove one-sided cross-section artifacts."
+        )
+    if failed_symmetry:
+        findings.append(f"{len(failed_symmetry)} modeled road centerlines are still asymmetric.")
+    if incomplete_records:
+        findings.append(f"{len(incomplete_records)} road centerlines are missing required component types.")
+    if transition_curve_count:
+        findings.append(f"{transition_curve_count} sharp polyline corners were converted to transition curves.")
+    if roads_with_junction_clearance and "Junction_Surface" in present_layers:
+        findings.append("Nearby junction nodes are clustered into rounded surfaces, and road components are clipped back at the junction throat.")
+    if roads_with_junction_clearance and {"Crosswalk", "Stop_Line"} <= present_layers:
+        findings.append("Crosswalk and stop-line layers are generated for valid junction approaches.")
+    if not findings:
+        findings.append("All modeled road centerlines pass the current symmetry, width, component, semantic, and layer checks.")
+
+    return {
+        "project": "cim_road_poc",
+        "model": "cim_city_roads",
+        "score": total_score,
+        "grade": model_quality_grade(total_score),
+        "weights": MODEL_SCORE_WEIGHTS,
+        "category_scores": category_scores,
+        "criteria_basis": [
+            "Municipal road BIM delivery: geometry, position, direction, color, dimensions, and non-geometric information.",
+            "CIM platform guidance: standardized data resources, model cleaning/conversion, query and visualization support.",
+            "Data-quality dimensions: accuracy, completeness, consistency, uniqueness, validity, and monitoring.",
+        ],
+        "metrics": {
+            "road_centerline_count": total,
+            "symmetric_modeled_count": symmetric_count,
+            "width_match_count": width_match_count,
+            "section_fit_count": section_fit_count,
+            "component_complete_count": complete_count,
+            "semantic_complete_count": semantic_complete_count,
+            "transition_curve_count": transition_curve_count,
+            "roads_with_transition_curves": roads_with_transition_curves,
+            "roads_with_junction_marking_clearance": roads_with_junction_clearance,
+            "expected_layers": sorted(expected_layers),
+            "present_layers": sorted(present_layers),
+            "source_section_counts": dict(source_section_counts),
+            "modeled_section_counts": dict(modeled_section_counts),
+            "symmetry_normalized_count": len(normalized_records),
+        },
+        "findings": findings,
+        "failed_examples": {
+            "asymmetry": failed_symmetry[:10],
+            "component_completeness": incomplete_records[:10],
+        },
+    }
+
+
+def write_city_road_model_score(
+    prepared_roads: gpd.GeoDataFrame,
+    road_meshes: dict[str, trimesh.Trimesh],
+) -> dict[str, Any]:
+    report = build_city_road_model_score(prepared_roads, road_meshes)
+    CITY_ROAD_SCORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CITY_ROAD_SCORE_PATH.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return report
+
+
+def count_valid_junction_approaches(prepared_roads: gpd.GeoDataFrame) -> int:
+    rules = road_gen.load_rules()
+    count = 0
+    for _, row in prepared_roads.iterrows():
+        line = row.geometry
+        if line is None or line.is_empty or not isinstance(line, LineString):
+            continue
+        rule = road_gen.get_road_rule(row, rules)
+        crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+        min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
+        for junction_distance in road_gen.row_junction_distances(row):
+            for side_sign in (-1.0, 1.0):
+                crosswalk_distance = float(junction_distance) + side_sign * crosswalk_offset
+                stop_line_distance = float(junction_distance) + side_sign * stop_line_offset
+                if (
+                    min_margin < crosswalk_distance < line.length - min_margin
+                    and min_margin < stop_line_distance < line.length - min_margin
+                ):
+                    count += 1
+    return count
+
+
+def mesh_area_m2(mesh: trimesh.Trimesh | None) -> float:
+    if mesh is None or len(mesh.vertices) == 0:
+        return 0.0
+    return float(mesh.area)
+
+
+def build_city_junction_score(
+    prepared_roads: gpd.GeoDataFrame,
+    road_meshes: dict[str, trimesh.Trimesh],
+    junction_semantic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Score visible junction geometry, markings, assets, and semantics."""
+    records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
+    junction_buckets = junction_point_buckets(prepared_roads)
+    junction_count = len(junction_buckets)
+    semantic_records = (junction_semantic or {}).get("objects") or build_city_junction_semantic_records(prepared_roads)
+    semantic_junction_count = len(semantic_records)
+    topology_complete_count = sum(
+        1
+        for record in semantic_records
+        if record.get("quality_flags", {}).get("topology_complete")
+    )
+    movement_complete_count = sum(
+        1
+        for record in semantic_records
+        if record.get("quality_flags", {}).get("movement_semantic_complete")
+    )
+    type_counts = Counter(record.get("junction_type", "UNKNOWN") for record in semantic_records)
+    hierarchy_counts = Counter(record.get("junction_hierarchy", "UNKNOWN") for record in semantic_records)
+    design_option_counts = Counter(
+        record.get("selected_design_option", {}).get("option_id", "unknown")
+        for record in semantic_records
+    )
+    avg_design_score = (
+        sum(float(record.get("selected_design_option", {}).get("score", 0.0) or 0.0) for record in semantic_records)
+        / len(semantic_records)
+        if semantic_records
+        else 0.0
+    )
+    design_review_required_count = sum(
+        1 for record in semantic_records if record.get("selected_design_option", {}).get("review_required")
+    )
+    total_arm_count = sum(int(record.get("arm_count", 0) or 0) for record in semantic_records)
+    total_allowed_movement_count = sum(
+        int(record.get("movement_summary", {}).get("allowed_movement_count", 0) or 0)
+        for record in semantic_records
+    )
+    roads_with_junctions = sum(1 for record in records if record.get("junction_distances_m"))
+    roads_with_clearance = sum(
+        1
+        for record in records
+        if record.get("junction_distances_m")
+        and float(record.get("junction_marking_clearance_m", 0.0)) >= JUNCTION_MARKING_CLEARANCE_M
+    )
+    source_expected_approaches = count_valid_junction_approaches(prepared_roads)
+
+    present_layers = {
+        name[:-4] if name.endswith("_All") else name
+        for name, mesh in road_meshes.items()
+        if mesh is not None and len(mesh.vertices) > 0
+    }
+    junction_mesh = road_meshes.get("Junction_Surface_All")
+    crosswalk_mesh = road_meshes.get("Crosswalk_All")
+    stop_line_mesh = road_meshes.get("Stop_Line_All")
+    junction_surface_count = int((junction_mesh.metadata or {}).get("part_count", 0)) if junction_mesh else 0
+    crosswalk_stripe_count = int(
+        (crosswalk_mesh.metadata or {}).get(
+            "junction_crosswalk_stripe_count",
+            (crosswalk_mesh.metadata or {}).get("part_count", 0),
+        )
+    ) if crosswalk_mesh else 0
+    stop_line_count = int(
+        (stop_line_mesh.metadata or {}).get(
+            "junction_stop_line_count",
+            (stop_line_mesh.metadata or {}).get("part_count", 0),
+        )
+    ) if stop_line_mesh else 0
+    mesh_expected_approaches = max(
+        int((crosswalk_mesh.metadata or {}).get("junction_candidate_approach_count", 0)) if crosswalk_mesh else 0,
+        int((stop_line_mesh.metadata or {}).get("junction_candidate_approach_count", 0)) if stop_line_mesh else 0,
+    )
+    expected_approaches = mesh_expected_approaches or source_expected_approaches
+
+    surface_ratio = score_ratio(junction_surface_count, junction_count)
+    clearance_ratio = score_ratio(roads_with_clearance, roads_with_junctions)
+    crossing_ratio = 1.0 if expected_approaches == 0 else min(1.0, crosswalk_stripe_count / max(1, expected_approaches * 3))
+    stop_ratio = score_ratio(stop_line_count, expected_approaches)
+    expected_layers = {"Junction_Surface", "Lane_Marking_White", "Lane_Marking_Yellow"}
+    if expected_approaches:
+        expected_layers |= {"Crosswalk", "Stop_Line"}
+    layer_ratio = score_ratio(sum(1 for layer in expected_layers if layer in present_layers), len(expected_layers))
+    light_present = any(layer.startswith("Street_Light") for layer in present_layers)
+    tree_present = any(layer.startswith("Tree") for layer in present_layers)
+    asset_ratio = 1.0 if not GENERATE_ROAD_ASSETS else (0.5 if light_present else 0.0) + (0.5 if tree_present else 0.0)
+    topology_ratio = (
+        score_ratio(semantic_junction_count, junction_count)
+        * score_ratio(topology_complete_count, semantic_junction_count)
+    )
+    movement_ratio = score_ratio(movement_complete_count, semantic_junction_count)
+    semantic_ratio = (
+        score_ratio(semantic_junction_count, junction_count)
+        if junction_count
+        else 1.0
+    )
+
+    category_ratios = {
+        "junction_surface_continuity": surface_ratio,
+        "approach_marking_clearance": clearance_ratio,
+        "pedestrian_crossing": crossing_ratio,
+        "stop_control_marking": stop_ratio,
+        "topology_semantic_completeness": topology_ratio,
+        "lane_movement_semantic": movement_ratio,
+        "asset_visibility_clearance": asset_ratio,
+        "layer_material_separation": layer_ratio,
+        "semantic_traceability": semantic_ratio,
+    }
+    category_scores = {
+        key: round(JUNCTION_SCORE_WEIGHTS[key] * value, 2)
+        for key, value in category_ratios.items()
+    }
+    total_score = round(sum(category_scores.values()), 2)
+
+    findings = [
+        f"Detected {junction_count} clustered junction nodes from centerline topology.",
+        f"Generated {junction_surface_count} rounded junction surface patches, {crosswalk_stripe_count} crosswalk stripes, and {stop_line_count} stop lines.",
+        f"{roads_with_clearance}/{roads_with_junctions} roads with junctions have lane-marking clearance zones.",
+        f"{semantic_junction_count} junction semantic nodes include {total_arm_count} arms and {total_allowed_movement_count} allowed movement records.",
+        f"Scored {len(design_option_counts)} junction design option families; average selected-option score is {avg_design_score:.2f}.",
+    ]
+    if expected_approaches and stop_line_count < expected_approaches:
+        findings.append(
+            f"{expected_approaches - stop_line_count} short or edge approaches could not fit a complete stop-line/crosswalk set."
+        )
+    if {"Junction_Surface", "Crosswalk", "Stop_Line"} <= present_layers:
+        findings.append("The visible junction model now includes clipped approach roads, conflict-area asphalt, pedestrian crossings, and stop control markings.")
+
+    return {
+        "project": "cim_road_poc",
+        "model": "cim_city_junctions",
+        "score": total_score,
+        "grade": model_quality_grade(total_score),
+        "weights": JUNCTION_SCORE_WEIGHTS,
+        "category_scores": category_scores,
+        "category_ratios": {key: round(value, 4) for key, value in category_ratios.items()},
+        "criteria_basis": [
+            {
+                "source": "CJJ 152 / urban road intersection practice",
+                "principle": "Treat intersections as dedicated conflict areas with approach throat control and clear pavement-marking organization.",
+            },
+            {
+                "source": "NACTO Urban Street Design Guide - Intersection Design Elements",
+                "url": "https://nacto.org/publication/urban-street-design-guide/intersection-design-elements/",
+                "principle": "Use compact intersections, visible crossings, and curb/asset placement that keeps conflicts legible.",
+            },
+            {
+                "source": "FHWA Signalized Intersections Informational Guide",
+                "url": "https://highways.dot.gov/safety/intersection-safety/intersection-types/signalized-intersections/signalized-intersections-informational-guide",
+                "principle": "Evaluate intersections through user safety, markings, channelization, and operational clarity.",
+            },
+            {
+                "source": "GB 51038 road traffic sign and marking practice",
+                "principle": "Use crosswalk and stop-line markings as independent pavement-marking elements at controlled approaches.",
+            },
+        ],
+        "metrics": {
+            "junction_count": junction_count,
+            "semantic_junction_count": semantic_junction_count,
+            "topology_complete_count": topology_complete_count,
+            "movement_complete_count": movement_complete_count,
+            "total_arm_count": total_arm_count,
+            "total_allowed_movement_count": total_allowed_movement_count,
+            "junction_type_counts": dict(type_counts),
+            "junction_hierarchy_counts": dict(hierarchy_counts),
+            "selected_design_option_counts": dict(design_option_counts),
+            "average_selected_design_score": round(float(avg_design_score), 3),
+            "design_review_required_count": int(design_review_required_count),
+            "road_centerline_count": len(records),
+            "roads_with_junction_distances": roads_with_junctions,
+            "roads_with_junction_marking_clearance": roads_with_clearance,
+            "expected_marked_approach_count": expected_approaches,
+            "source_expected_marked_approach_count": source_expected_approaches,
+            "junction_surface_count": junction_surface_count,
+            "junction_surface_area_m2": round(mesh_area_m2(junction_mesh), 3),
+            "crosswalk_stripe_count": crosswalk_stripe_count,
+            "crosswalk_area_m2": round(mesh_area_m2(crosswalk_mesh), 3),
+            "stop_line_count": stop_line_count,
+            "stop_line_area_m2": round(mesh_area_m2(stop_line_mesh), 3),
+            "expected_layers": sorted(expected_layers),
+            "present_layers": sorted(present_layers),
+            "asset_layers_present": {
+                "street_lights": light_present,
+                "trees": tree_present,
+            },
+            "settings": {
+                "rounded_junction_surfaces": ENABLE_ROUNDED_JUNCTION_SURFACES,
+                "crosswalk_generation": GENERATE_JUNCTION_CROSSWALKS,
+                "stop_line_generation": GENERATE_JUNCTION_STOP_LINES,
+                "crosswalk_band_length_m": CROSSWALK_BAND_LENGTH_M,
+                "crosswalk_stripe_width_m": CROSSWALK_STRIPE_WIDTH_M,
+                "crosswalk_stripe_gap_m": CROSSWALK_STRIPE_GAP_M,
+                "stop_line_width_m": STOP_LINE_WIDTH_M,
+                "stop_line_to_crosswalk_gap_m": STOP_LINE_TO_CROSSWALK_GAP_M,
+            },
+        },
+        "findings": findings,
+    }
+
+
+def write_city_junction_score(
+    prepared_roads: gpd.GeoDataFrame,
+    road_meshes: dict[str, trimesh.Trimesh],
+    junction_semantic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    report = build_city_junction_score(prepared_roads, road_meshes, junction_semantic)
+    CITY_JUNCTION_SCORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CITY_JUNCTION_SCORE_PATH.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return report
+
+
+def record_marking_issue(
+    issues: list[dict[str, Any]],
+    issue_type: str,
+    road_idx: Any,
+    overhang_m: float,
+    detail: dict[str, Any],
+) -> None:
+    if overhang_m <= 1e-6:
+        return
+    issues.append(
+        {
+            "type": issue_type,
+            "road_index": str(road_idx),
+            "overhang_m": round(float(overhang_m), 3),
+            **detail,
+        }
+    )
+
+
+def max_span_segment_length(spans: list[tuple[float, float]]) -> float:
+    max_length = 0.0
+    for start, end in spans:
+        distances = marking_span_distances(start, end)
+        for a, b in zip(distances, distances[1:]):
+            max_length = max(max_length, float(b - a))
+    return max_length
+
+
+def build_city_marking_alignment_qc(prepared_roads: gpd.GeoDataFrame) -> dict[str, Any]:
+    """Check that lane markings, crosswalks, and stop lines stay in bounds.
+
+    The mesh generator already clips markings, but this independent pass
+    recomputes lateral envelopes from the same cross-section spans. It catches
+    cases where a white/yellow lane mark or a transverse junction mark would
+    extend beyond its intended drivable component.
+    """
+    rules = road_gen.load_rules()
+    checks: Counter[str] = Counter()
+    issues: list[dict[str, Any]] = []
+    max_overhang = 0.0
+    max_solid_segment = 0.0
+
+    for road_idx, row in prepared_roads.iterrows():
+        row = row.copy()
+        row.name = road_idx
+        rule = road_gen.get_road_rule(row, rules)
+        components = road_gen.cross_section_components_for_row(row)
+        spans = component_spans(components)
+        white_edge_suppression = carriageway_boundary_edge_suppression(spans)
+
+        for component_idx, (component, left_offset, right_offset) in enumerate(spans):
+            component_type = str(component.get("type", ""))
+            if component_type not in LANE_MARKING_COMPONENT_TYPES:
+                continue
+            width = right_offset - left_offset
+            if width < 3.2:
+                continue
+            marking_width = max(0.10, min(rule.lane_marking_width, 0.16))
+            junction_distances = road_gen.row_junction_distances(row)
+            junction_clearance = junction_marking_clearance_for_row(row, rule)
+            solid_spans = subtract_blocked_spans(
+                [(0.0, float(row.geometry.length))],
+                junction_distances,
+                junction_clearance,
+                float(row.geometry.length),
+            ) if row.geometry is not None and not row.geometry.is_empty else []
+            max_solid_segment = max(max_solid_segment, max_span_segment_length(solid_spans))
+            edge_specs = []
+            suppressed_edges = white_edge_suppression.get(component_idx, set())
+            if "left" in suppressed_edges:
+                checks["suppressed_white_edge_at_double_yellow"] += 1
+            else:
+                edge_specs.append((left_offset + min(0.35, width * 0.15), "left_edge"))
+            if "right" in suppressed_edges:
+                checks["suppressed_white_edge_at_double_yellow"] += 1
+            else:
+                edge_specs.append((right_offset - min(0.35, width * 0.15), "right_edge"))
+            for edge_offset, suffix in edge_specs:
+                checks["white_edge_marking"] += 1
+                overhang = max(
+                    left_offset - (edge_offset - marking_width / 2.0),
+                    (edge_offset + marking_width / 2.0) - right_offset,
+                    0.0,
+                )
+                max_overhang = max(max_overhang, overhang)
+                record_marking_issue(
+                    issues,
+                    "white_edge_outside_component",
+                    road_idx,
+                    overhang,
+                    {
+                        "edge": suffix,
+                        "component_type": component_type,
+                        "component_left_m": round(float(left_offset), 3),
+                        "component_right_m": round(float(right_offset), 3),
+                        "marking_center_offset_m": round(float(edge_offset), 3),
+                    },
+                )
+
+            lane_count = max(1, int(round(width / max(rule.lane_width, 2.8))))
+            if lane_count <= 1:
+                continue
+            lane_step = width / lane_count
+            for lane_idx in range(1, lane_count):
+                offset = left_offset + lane_step * lane_idx
+                checks["white_dash_marking"] += 1
+                overhang = max(
+                    left_offset - (offset - marking_width / 2.0),
+                    (offset + marking_width / 2.0) - right_offset,
+                    0.0,
+                )
+                max_overhang = max(max_overhang, overhang)
+                record_marking_issue(
+                    issues,
+                    "white_dash_outside_component",
+                    road_idx,
+                    overhang,
+                    {
+                        "lane_index": lane_idx,
+                        "component_type": component_type,
+                        "component_left_m": round(float(left_offset), 3),
+                        "component_right_m": round(float(right_offset), 3),
+                        "marking_center_offset_m": round(float(offset), 3),
+                    },
+                )
+
+        for idx in range(len(spans) - 1):
+            left_component, union_left, boundary = spans[idx]
+            right_component, next_left, union_right = spans[idx + 1]
+            if abs(boundary - next_left) > 0.01:
+                continue
+            if left_component.get("type") not in {"main_carriageway", "carriageway"}:
+                continue
+            if right_component.get("type") not in {"main_carriageway", "carriageway"}:
+                continue
+            marking_width = max(0.09, min(rule.lane_marking_width, 0.14))
+            junction_distances = road_gen.row_junction_distances(row)
+            junction_clearance = junction_marking_clearance_for_row(row, rule)
+            solid_spans = subtract_blocked_spans(
+                [(0.0, float(row.geometry.length))],
+                junction_distances,
+                junction_clearance,
+                float(row.geometry.length),
+            ) if row.geometry is not None and not row.geometry.is_empty else []
+            max_solid_segment = max(max_solid_segment, max_span_segment_length(solid_spans))
+            for offset in (boundary - 0.16, boundary + 0.16):
+                checks["yellow_center_marking"] += 1
+                overhang = max(
+                    union_left - (offset - marking_width / 2.0),
+                    (offset + marking_width / 2.0) - union_right,
+                    0.0,
+                )
+                max_overhang = max(max_overhang, overhang)
+                record_marking_issue(
+                    issues,
+                    "yellow_center_outside_carriageway_pair",
+                    road_idx,
+                    overhang,
+                    {
+                        "pair_left_m": round(float(union_left), 3),
+                        "pair_right_m": round(float(union_right), 3),
+                        "marking_center_offset_m": round(float(offset), 3),
+                    },
+                )
+
+        road_width = drivable_width_for_row(row, rule)
+        road_half_width = road_width / 2.0
+        stripe_count, lateral_start, stripe_step = crosswalk_stripe_layout_for_width(road_width)
+        if stripe_count <= 1:
+            crosswalk_extent = CROSSWALK_STRIPE_WIDTH_M / 2.0
+        else:
+            left_extent = abs(lateral_start) + CROSSWALK_STRIPE_WIDTH_M / 2.0
+            right_extent = abs(lateral_start + (stripe_count - 1) * stripe_step) + CROSSWALK_STRIPE_WIDTH_M / 2.0
+            crosswalk_extent = max(left_extent, right_extent)
+        stop_extent = junction_marking_across_width(road_width) / 2.0
+        for junction_idx, _ in enumerate(road_gen.row_junction_distances(row)):
+            for side_name in ("before", "after"):
+                checks["crosswalk_approach"] += 1
+                crosswalk_overhang = max(0.0, crosswalk_extent - road_half_width)
+                max_overhang = max(max_overhang, crosswalk_overhang)
+                record_marking_issue(
+                    issues,
+                    "crosswalk_outside_drivable_width",
+                    road_idx,
+                    crosswalk_overhang,
+                    {
+                        "junction_index": junction_idx,
+                        "side": side_name,
+                        "road_width_m": round(float(road_width), 3),
+                        "stripe_count": stripe_count,
+                    },
+                )
+
+                checks["stop_line_approach"] += 1
+                stop_overhang = max(0.0, stop_extent - road_half_width)
+                max_overhang = max(max_overhang, stop_overhang)
+                record_marking_issue(
+                    issues,
+                    "stop_line_outside_drivable_width",
+                    road_idx,
+                    stop_overhang,
+                    {
+                        "junction_index": junction_idx,
+                        "side": side_name,
+                        "road_width_m": round(float(road_width), 3),
+                    },
+                )
+
+    issue_type_counts = Counter(issue["type"] for issue in issues)
+    if max_solid_segment > MARKING_SWEEP_SAMPLE_INTERVAL_M * 1.5:
+        issues.append(
+            {
+                "type": "solid_marking_under_sampled",
+                "max_segment_length_m": round(float(max_solid_segment), 3),
+                "allowed_segment_length_m": round(float(MARKING_SWEEP_SAMPLE_INTERVAL_M * 1.5), 3),
+            }
+        )
+        issue_type_counts = Counter(issue["type"] for issue in issues)
+    score = 100.0 if not issues else round(max(0.0, 100.0 - min(100.0, len(issues) * 0.02 + max_overhang * 10.0)), 2)
+    return {
+        "project": "cim_road_poc",
+        "model": "cim_city_roads",
+        "score": score,
+        "grade": model_quality_grade(score),
+        "policy": "all pavement markings must stay within their own drivable/component lateral envelope",
+        "metrics": {
+            "checked_marking_count": int(sum(checks.values())),
+            "check_counts": dict(checks),
+            "issue_count": len(issues),
+            "issue_type_counts": dict(issue_type_counts),
+            "max_lateral_overhang_m": round(float(max_overhang), 3),
+            "junction_marking_lateral_inset_m": JUNCTION_MARKING_LATERAL_INSET_M,
+            "marking_sweep_sample_interval_m": MARKING_SWEEP_SAMPLE_INTERVAL_M,
+            "max_solid_marking_segment_m": round(float(max_solid_segment), 3),
+        },
+        "sample_issues": issues[:50],
+        "findings": [
+            "White lane markings and yellow center markings are checked against their source carriageway components.",
+            "Crosswalk and stop-line markings are checked against drivable road width after lateral inset.",
+            "No marking overhang was detected." if not issues else f"{len(issues)} marking overhang issues were detected.",
+        ],
+    }
+
+
+def write_city_marking_alignment_qc(prepared_roads: gpd.GeoDataFrame) -> dict[str, Any]:
+    report = build_city_marking_alignment_qc(prepared_roads)
+    CITY_MARKING_QC_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CITY_MARKING_QC_PATH.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Other city modules
+# ---------------------------------------------------------------------------
+
+
 def build_building_meshes(buildings: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
+    """Build non-road city building meshes."""
     meshes = {}
     for idx, row in buildings.iterrows():
         height = building_height(row)
@@ -2457,1093 +4180,6 @@ def combine_mesh_list(name: str, meshes: list[trimesh.Trimesh], color: list[int]
     return combined
 
 
-REQUIRED_COMPONENT_TYPES_BY_CATEGORY = {
-    "expressway": {"main_carriageway", "median", "sidewalk", "side_divider"},
-    "arterial": {"main_carriageway", "median", "sidewalk"},
-    "primary": {"main_carriageway", "median", "sidewalk"},
-    "secondary": {"main_carriageway", "sidewalk"},
-    "branch": {"main_carriageway", "sidewalk"},
-}
-
-MODEL_SCORE_WEIGHTS = {
-    "geometry_symmetry_and_width": 25.0,
-    "section_rule_fit": 18.0,
-    "component_completeness": 17.0,
-    "semantic_attribute_completeness": 15.0,
-    "visual_layer_material_separation": 15.0,
-    "intersection_curve_treatment": 10.0,
-}
-
-JUNCTION_SCORE_WEIGHTS = {
-    "junction_surface_continuity": 16.0,
-    "approach_marking_clearance": 12.0,
-    "pedestrian_crossing": 12.0,
-    "stop_control_marking": 10.0,
-    "topology_semantic_completeness": 16.0,
-    "lane_movement_semantic": 14.0,
-    "asset_visibility_clearance": 8.0,
-    "layer_material_separation": 7.0,
-    "semantic_traceability": 5.0,
-}
-
-
-def rounded_components(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rounded = []
-    for component in components:
-        item = dict(component)
-        if "width" in item:
-            item["width"] = round(float(item["width"]), 3)
-        if "scaled_from_width" in item:
-            item["scaled_from_width"] = round(float(item["scaled_from_width"]), 3)
-        rounded.append(item)
-    return rounded
-
-
-def road_cross_section_record(row: pd.Series) -> dict[str, Any]:
-    source_rule = road_gen.row_section_requirement(row)
-    modeled_rule = road_gen.modeled_section_requirement(row, source_rule)
-    rule = road_gen.get_road_rule(row, road_gen.load_rules())
-    components = road_gen.cross_section_components_for_row(row)
-    source_components = road_gen.source_cross_section_components_for_row(row)
-    source_section = road_gen.row_section_code(row) or (
-        road_gen.safe_str(source_rule.get("section_id") or source_rule.get("inferred_section"))
-        if source_rule
-        else None
-    )
-    modeled_section = (
-        road_gen.safe_str(modeled_rule.get("section_id") or modeled_rule.get("inferred_section"))
-        if modeled_rule
-        else None
-    )
-    road_class = road_gen.safe_str(row.get("road_class")) or "unclassified"
-    category = road_gen.section_category_name(source_rule, road_class) if source_rule else road_gen.road_class_category_name(road_class)
-    component_types = {str(component.get("type", "")) for component in components}
-    required_types = REQUIRED_COMPONENT_TYPES_BY_CATEGORY.get(category, REQUIRED_COMPONENT_TYPES_BY_CATEGORY["branch"])
-    missing_required = sorted(required_types - component_types)
-    source_width = road_gen.row_target_total_width(row, source_rule)
-    target_width = source_width
-    modeled_width = road_gen.component_total_width(components)
-    if (
-        source_section
-        and modeled_section
-        and source_section != modeled_section
-        and source_section in road_gen.SYMMETRIC_FALLBACK_KEEP_MODEL_WIDTH
-    ):
-        target_width = modeled_width
-    width_error = None if target_width is None else modeled_width - float(target_width)
-    spans = component_spans(components)
-    junction_distances = road_gen.row_junction_distances(row)
-
-    return {
-        "source_road_id": road_gen.safe_str(row.get("road_id")) or "",
-        "road_name": road_gen.safe_str(row.get("road_name")) or "",
-        "road_class": road_class,
-        "category": category,
-        "source_section_code": source_section,
-        "modeled_section_code": modeled_section,
-        "symmetry_normalized": bool(source_section and modeled_section and source_section != modeled_section),
-        "source_is_symmetric": road_gen.section_components_are_symmetric(source_components),
-        "modeled_is_symmetric": road_gen.section_components_are_symmetric(components),
-        "source_width_m": round(float(source_width), 3) if source_width is not None else None,
-        "target_width_m": round(float(target_width), 3) if target_width is not None else None,
-        "modeled_width_m": round(float(modeled_width), 3),
-        "width_error_m": round(float(width_error), 3) if width_error is not None else None,
-        "transition_curve_count": int(row.get("transition_curve_count", 0) or 0),
-        "junction_distances_m": [round(float(distance), 3) for distance in junction_distances],
-        "junction_marking_clearance_m": round(junction_marking_clearance_for_row(row, rule), 3),
-        "missing_required_components": missing_required,
-        "source_cross_section_components": rounded_components(source_components),
-        "modeled_cross_section_components": rounded_components(components),
-        "component_spans": [
-            {
-                "index": idx,
-                "type": str(component.get("type", "")),
-                "layer": component_layer_name_for_row(str(component.get("type", "")), row),
-                "left_offset_m": round(float(left_offset), 3),
-                "right_offset_m": round(float(right_offset), 3),
-                "width_m": round(float(right_offset - left_offset), 3),
-            }
-            for idx, (component, left_offset, right_offset) in enumerate(spans)
-        ],
-    }
-
-
-def build_city_road_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
-    records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
-    return {
-        "project": "cim_road_poc",
-        "model": "cim_city_roads",
-        "unit": "meter",
-        "coordinate": {
-            "model_crs": TARGET_CRS,
-            "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
-        },
-        "symmetry_policy": {
-            "enabled": road_gen.MODEL_CROSS_SECTIONS_AS_SYMMETRIC,
-            "fallbacks": road_gen.SYMMETRIC_SECTION_FALLBACKS,
-            "default_sections": road_gen.SYMMETRIC_DEFAULT_SECTION_BY_CATEGORY,
-        },
-        "objects": records,
-    }
-
-
-def write_city_road_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
-    semantic = build_city_road_semantic(prepared_roads, origin)
-    CITY_ROAD_SEMANTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_ROAD_SEMANTIC_PATH.open("w", encoding="utf-8") as f:
-        json.dump(semantic, f, ensure_ascii=False, indent=2)
-    return semantic
-
-
-def vector_angle_deg(vector: tuple[float, float]) -> float:
-    return (math.degrees(math.atan2(vector[1], vector[0])) + 360.0) % 360.0
-
-
-def signed_angle_deg(from_vector: tuple[float, float], to_vector: tuple[float, float]) -> float:
-    cross = from_vector[0] * to_vector[1] - from_vector[1] * to_vector[0]
-    dot = from_vector[0] * to_vector[0] + from_vector[1] * to_vector[1]
-    return math.degrees(math.atan2(cross, dot))
-
-
-def turn_movement_type(turn_angle_deg: float) -> str:
-    abs_angle = abs(turn_angle_deg)
-    if abs_angle <= 35.0:
-        return "through"
-    if abs_angle >= 145.0:
-        return "u_turn"
-    return "left" if turn_angle_deg > 0.0 else "right"
-
-
-def angular_gaps_deg(vectors: list[tuple[float, float]]) -> list[float]:
-    if len(vectors) < 2:
-        return []
-    angles = sorted(vector_angle_deg(vector) for vector in vectors)
-    return [
-        round(float((angles[(idx + 1) % len(angles)] - angle) % 360.0), 3)
-        for idx, angle in enumerate(angles)
-    ]
-
-
-def classify_city_junction_type(arms: list[dict[str, Any]]) -> str:
-    arm_count = len(arms)
-    if arm_count <= 1:
-        return "UNKNOWN"
-    if any("roundabout" in arm["road_class"].lower() or "circular" in arm["road_class"].lower() for arm in arms):
-        return "ROUNDABOUT_LIKE"
-    if any("link" in arm["road_class"].lower() or "ramp" in arm["road_class"].lower() for arm in arms):
-        return "RAMP_MERGE"
-    priorities = [int(arm["road_priority"]) for arm in arms]
-    if arm_count <= 2:
-        return "TWO_ARM_CONNECTION"
-    if arm_count == 3 and max(priorities, default=0) - min(priorities, default=0) >= 3:
-        return "RAMP_MERGE"
-
-    gaps = angular_gaps_deg([arm["direction_out"] for arm in arms])
-    max_gap = max(gaps) if gaps else 0.0
-    min_gap = min(gaps) if gaps else 0.0
-    if arm_count == 3:
-        return "T_JUNCTION" if max_gap > 150.0 else "Y_JUNCTION"
-    if arm_count == 4:
-        return "CROSS_JUNCTION" if min_gap > 45.0 and max_gap < 145.0 else "SKEWED_CROSS_OR_MULTI_ARM"
-    return "MULTI_ARM_JUNCTION"
-
-
-def classify_city_junction_hierarchy(arms: list[dict[str, Any]], junction_type: str) -> str:
-    if junction_type == "ROUNDABOUT_LIKE":
-        return "ROUNDABOUT_JUNCTION"
-    if junction_type == "RAMP_MERGE":
-        return "RAMP_OR_GRADE_SEPARATED"
-    if junction_type in {"MULTI_ARM_JUNCTION", "SKEWED_CROSS_OR_MULTI_ARM"} or len(arms) >= 5:
-        return "COMPLEX_MULTI_ARM"
-    max_priority = max((int(arm["road_priority"]) for arm in arms), default=0)
-    max_lanes = max((int(arm["lane_count_estimate"]) for arm in arms), default=1)
-    max_width = max((float(arm["drivable_width_m"]) for arm in arms), default=0.0)
-    if max_priority >= 4 or max_lanes >= 4 or max_width >= 14.0:
-        return "MAJOR_ARTERIAL"
-    if max_priority >= 3 or max_lanes >= 3 or max_width >= 10.0:
-        return "SECONDARY_COLLECTOR"
-    return "LOCAL_JUNCTION"
-
-
-def lane_movement_policy(lane_count: int, hierarchy: str) -> dict[str, Any]:
-    if lane_count >= 4 or hierarchy in {"MAJOR_ARTERIAL", "COMPLEX_MULTI_ARM", "RAMP_OR_GRADE_SEPARATED"}:
-        return {
-            "left_turn_pocket": lane_count >= 3,
-            "right_turn_channel": lane_count >= 3,
-            "through_lane_min": max(1, lane_count - 2),
-            "policy": "dedicated_turn_pockets_when_width_allows",
-        }
-    if lane_count >= 2:
-        return {
-            "left_turn_pocket": False,
-            "right_turn_channel": False,
-            "through_lane_min": 1,
-            "policy": "shared_left_through_and_shared_right",
-        }
-    return {
-        "left_turn_pocket": False,
-        "right_turn_channel": False,
-        "through_lane_min": 1,
-        "policy": "single_mixed_lane",
-    }
-
-
-def junction_arm_records(
-    prepared_roads: gpd.GeoDataFrame,
-    rules: dict[str, Any],
-    point: Point,
-    members: list[tuple[Any, float]],
-) -> list[dict[str, Any]]:
-    arms: list[dict[str, Any]] = []
-    connection_tolerance = road_gen.junction_connection_tolerance()
-    member_distances: dict[Any, list[float]] = {}
-    for road_idx, distance_hint in members:
-        member_distances.setdefault(road_idx, []).append(float(distance_hint))
-
-    for road_idx, distance_hints in member_distances.items():
-        if road_idx not in prepared_roads.index:
-            continue
-        row = prepared_roads.loc[road_idx]
-        line = row.geometry
-        if line is None or line.is_empty or not isinstance(line, LineString):
-            continue
-        rule = road_gen.get_road_rule(row, rules)
-        projected_distance = float(line.project(point))
-        if line.distance(point) <= max(connection_tolerance, JUNCTION_BUCKET_CLUSTER_M):
-            node_distance = projected_distance
-        else:
-            node_distance = min(distance_hints, key=lambda value: abs(float(value) - projected_distance))
-        node_distance = max(0.0, min(float(line.length), node_distance))
-        is_internal = connection_tolerance < node_distance < line.length - connection_tolerance
-        signs = [-1.0, 1.0] if is_internal else ([1.0] if node_distance <= line.length * 0.5 else [-1.0])
-        drivable_width = drivable_width_for_row(row, rule)
-        source_rule = road_gen.row_section_requirement(row)
-        modeled_rule = road_gen.modeled_section_requirement(row, source_rule)
-        source_section = road_gen.row_section_code(row) or (
-            road_gen.safe_str(source_rule.get("section_id") or source_rule.get("inferred_section"))
-            if source_rule
-            else None
-        )
-        modeled_section = (
-            road_gen.safe_str(modeled_rule.get("section_id") or modeled_rule.get("inferred_section"))
-            if modeled_rule
-            else None
-        )
-        road_class = road_gen.safe_str(row.get("road_class")) or "unclassified"
-        category = road_gen.section_category_name(source_rule, road_class) if source_rule else road_gen.road_class_category_name(road_class)
-        components = road_gen.cross_section_components_for_row(row)
-        lane_count_estimate = max(1, int(round(drivable_width / max(float(rule.lane_width), 2.8))))
-        crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
-        min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
-        sample_step = max(JUNCTION_SEMANTIC_SAMPLE_DISTANCE_M, drivable_width * 0.65, 8.0)
-        for sign in signs:
-            sample_distance = max(0.0, min(float(line.length), node_distance + sign * sample_step))
-            if abs(sample_distance - node_distance) < 0.2:
-                continue
-            node = line.interpolate(node_distance)
-            outside = line.interpolate(sample_distance)
-            direction = road_gen.unit_vector((node.x, node.y), (outside.x, outside.y))
-            if road_gen.vector_length(direction) <= 0.01:
-                continue
-            side = "internal_before" if sign < 0.0 else "internal_after"
-            if not is_internal:
-                side = "from_start" if sign > 0.0 else "from_end"
-            crosswalk_distance = node_distance + sign * crosswalk_offset
-            stop_line_distance = node_distance + sign * stop_line_offset
-            marking_fit = (
-                min_margin < crosswalk_distance < line.length - min_margin
-                and min_margin < stop_line_distance < line.length - min_margin
-            )
-            arm_id = f"{road_idx}_{'neg' if sign < 0 else 'pos'}"
-            arms.append(
-                {
-                    "arm_id": arm_id,
-                    "source_road_id": road_gen.safe_str(row.get("road_id")) or "",
-                    "road_name": road_gen.safe_str(row.get("road_name")) or "",
-                    "road_class": road_class,
-                    "category": category,
-                    "source_section_code": source_section,
-                    "modeled_section_code": modeled_section,
-                    "road_priority": int(road_gen.road_priority(row)),
-                    "node_distance_m": round(float(node_distance), 3),
-                    "position_ratio": round(float(node_distance / line.length), 4) if line.length > 0 else 0.0,
-                    "approach_side": side,
-                    "direction_out": (round(float(direction[0]), 6), round(float(direction[1]), 6)),
-                    "bearing_out_deg": round(vector_angle_deg(direction), 3),
-                    "modeled_width_m": round(float(road_gen.component_total_width(components)), 3),
-                    "drivable_width_m": round(float(drivable_width), 3),
-                    "lane_count_estimate": lane_count_estimate,
-                    "lane_width_m": round(float(rule.lane_width), 3),
-                    "marked_approach_fit": bool(marking_fit),
-                    "crosswalk_distance_m": round(float(crosswalk_distance), 3) if marking_fit else None,
-                    "stop_line_distance_m": round(float(stop_line_distance), 3) if marking_fit else None,
-                }
-            )
-    arms.sort(key=lambda item: item["bearing_out_deg"])
-    return arms
-
-
-def build_junction_movements(junction_id: str, arms: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    movements = []
-    for from_arm in arms:
-        inbound = (-float(from_arm["direction_out"][0]), -float(from_arm["direction_out"][1]))
-        for to_arm in arms:
-            if from_arm["arm_id"] == to_arm["arm_id"]:
-                continue
-            turn_angle = signed_angle_deg(inbound, to_arm["direction_out"])
-            movement_type = turn_movement_type(turn_angle)
-            movements.append(
-                {
-                    "movement_id": f"{junction_id}_{from_arm['arm_id']}_to_{to_arm['arm_id']}",
-                    "from_arm_id": from_arm["arm_id"],
-                    "to_arm_id": to_arm["arm_id"],
-                    "movement_type": movement_type,
-                    "signed_turn_angle_deg": round(float(turn_angle), 3),
-                    "allowed_by_default": movement_type != "u_turn",
-                }
-            )
-    return movements
-
-
-def build_city_junction_semantic_records(prepared_roads: gpd.GeoDataFrame) -> list[dict[str, Any]]:
-    if prepared_roads.empty:
-        return []
-    rules = road_gen.load_rules()
-    records = []
-    for idx, bucket in enumerate(junction_point_buckets(prepared_roads)):
-        arms = junction_arm_records(prepared_roads, rules, bucket["point"], bucket["members"])
-        if len(arms) < 2:
-            continue
-        junction_id = f"J{idx:04d}"
-        junction_type = classify_city_junction_type(arms)
-        hierarchy = classify_city_junction_hierarchy(arms, junction_type)
-        design_profile = evaluate_junction_design_options(arms, junction_type, hierarchy)
-        selected_design = design_profile["selected_design_option"]
-        for arm in arms:
-            arm["role"] = "major" if int(arm["road_priority"]) == max(int(item["road_priority"]) for item in arms) else "minor"
-            arm["lane_movement_policy"] = lane_movement_policy(int(arm["lane_count_estimate"]), hierarchy)
-        movements = build_junction_movements(junction_id, arms)
-        allowed_movements = [movement for movement in movements if movement["allowed_by_default"]]
-        type_counts = Counter(movement["movement_type"] for movement in movements)
-        connected_road_ids = sorted({arm["source_road_id"] for arm in arms if arm["source_road_id"]})
-        records.append(
-            {
-                "junction_id": junction_id,
-                "junction_type": junction_type,
-                "junction_hierarchy": hierarchy,
-                "surface_strategy": selected_design.get("option_id", "clustered_rounded_conflict_area_with_clipped_approaches"),
-                "source_node_summary": design_profile["source_node_summary"],
-                "candidate_design_options": design_profile["candidate_design_options"],
-                "selected_design_option": selected_design,
-                "design_references": design_profile["design_references"],
-                "center_local": {
-                    "x": round(float(bucket["point"].x), 3),
-                    "y": round(float(bucket["point"].y), 3),
-                    "z": 0.0,
-                },
-                "connected_road_count": len(connected_road_ids),
-                "arm_count": len(arms),
-                "marked_approach_count": sum(1 for arm in arms if arm["marked_approach_fit"]),
-                "connected_road_ids": connected_road_ids,
-                "road_class_counts": dict(Counter(arm["road_class"] for arm in arms)),
-                "section_counts": dict(Counter(arm["modeled_section_code"] or "unknown" for arm in arms)),
-                "angular_gaps_deg": angular_gaps_deg([arm["direction_out"] for arm in arms]),
-                "max_drivable_width_m": round(max(float(arm["drivable_width_m"]) for arm in arms), 3),
-                "max_lane_count_estimate": max(int(arm["lane_count_estimate"]) for arm in arms),
-                "arms": arms,
-                "movements": movements,
-                "movement_summary": {
-                    "movement_count": len(movements),
-                    "allowed_movement_count": len(allowed_movements),
-                    "movement_type_counts": dict(type_counts),
-                },
-                "quality_flags": {
-                    "topology_complete": junction_type != "UNKNOWN" and len(arms) >= 2,
-                    "movement_semantic_complete": len(allowed_movements) > 0,
-                    "has_marked_approach": any(arm["marked_approach_fit"] for arm in arms),
-                    "has_major_minor_role": any(arm["role"] == "major" for arm in arms),
-                    "design_option_selected": bool(selected_design.get("option_id")),
-                    "design_review_required": bool(selected_design.get("review_required")),
-                },
-            }
-        )
-    return records
-
-
-def build_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
-    records = build_city_junction_semantic_records(prepared_roads)
-    for record in records:
-        local = record["center_local"]
-        record["center_global"] = {
-            "x": round(float(local["x"] + origin[0]), 3),
-            "y": round(float(local["y"] + origin[1]), 3),
-            "z": local["z"],
-        }
-    return {
-        "project": "cim_road_poc",
-        "model": "cim_city_junctions",
-        "unit": "meter",
-        "coordinate": {
-            "model_crs": TARGET_CRS,
-            "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
-        },
-        "semantic_level": "topology_node_with_arms_movements_and_scored_design_options",
-        "objects": records,
-        "summary": {
-            "junction_count": len(records),
-            "junction_type_counts": dict(Counter(record["junction_type"] for record in records)),
-            "junction_hierarchy_counts": dict(Counter(record["junction_hierarchy"] for record in records)),
-            "selected_design_option_counts": dict(
-                Counter(record.get("selected_design_option", {}).get("option_id", "unknown") for record in records)
-            ),
-            "design_review_required_count": sum(
-                1 for record in records if record.get("selected_design_option", {}).get("review_required")
-            ),
-            "total_arm_count": sum(int(record["arm_count"]) for record in records),
-            "total_allowed_movement_count": sum(int(record["movement_summary"]["allowed_movement_count"]) for record in records),
-        },
-    }
-
-
-def write_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
-    semantic = build_city_junction_semantic(prepared_roads, origin)
-    CITY_JUNCTION_SEMANTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_JUNCTION_SEMANTIC_PATH.open("w", encoding="utf-8") as f:
-        json.dump(semantic, f, ensure_ascii=False, indent=2)
-    return semantic
-
-
-def score_ratio(success_count: int, total_count: int) -> float:
-    if total_count <= 0:
-        return 1.0
-    return max(0.0, min(1.0, success_count / total_count))
-
-
-def model_quality_grade(score: float) -> str:
-    if score >= 90.0:
-        return "A"
-    if score >= 80.0:
-        return "B"
-    if score >= 70.0:
-        return "C"
-    return "D"
-
-
-def build_city_road_model_score(prepared_roads: gpd.GeoDataFrame, road_meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
-    records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
-    total = len(records)
-    symmetric_count = sum(1 for record in records if record["modeled_is_symmetric"])
-    width_match_count = sum(
-        1
-        for record in records
-        if record["width_error_m"] is None or abs(float(record["width_error_m"])) <= 0.1
-    )
-    section_fit_count = sum(1 for record in records if record["source_section_code"] and record["modeled_section_code"])
-    complete_count = sum(1 for record in records if not record["missing_required_components"])
-    semantic_complete_count = sum(
-        1
-        for record in records
-        if all(record.get(key) for key in ("source_road_id", "road_class", "source_section_code", "modeled_section_code"))
-        and bool(record.get("modeled_cross_section_components"))
-    )
-    transition_curve_count = sum(int(record.get("transition_curve_count", 0) or 0) for record in records)
-    roads_with_transition_curves = sum(1 for record in records if int(record.get("transition_curve_count", 0) or 0) > 0)
-    roads_with_junction_clearance = sum(1 for record in records if record.get("junction_distances_m"))
-
-    expected_layers = {
-        span["layer"]
-        for record in records
-        for span in record["component_spans"]
-    } | {"Curb", "Lane_Marking_White", "Lane_Marking_Yellow"}
-    if ENABLE_ROUNDED_JUNCTION_SURFACES and roads_with_junction_clearance:
-        expected_layers.add("Junction_Surface")
-    if roads_with_junction_clearance:
-        if GENERATE_JUNCTION_CROSSWALKS:
-            expected_layers.add("Crosswalk")
-        if GENERATE_JUNCTION_STOP_LINES:
-            expected_layers.add("Stop_Line")
-    present_layers = {
-        name[:-4] if name.endswith("_All") else name
-        for name, mesh in road_meshes.items()
-        if mesh is not None and len(mesh.vertices) > 0
-    }
-    layer_hit_count = sum(1 for layer in expected_layers if layer in present_layers)
-
-    geometry_ratio = 0.7 * score_ratio(symmetric_count, total) + 0.3 * score_ratio(width_match_count, total)
-    section_ratio = score_ratio(section_fit_count, total)
-    component_ratio = score_ratio(complete_count, total)
-    semantic_ratio = score_ratio(semantic_complete_count, total)
-    layer_ratio = score_ratio(layer_hit_count, len(expected_layers))
-    curve_ratio = 1.0 if transition_curve_count == 0 or ENABLE_TRANSITION_CURVES else 0.0
-    junction_ratio = 1.0 if roads_with_junction_clearance == 0 else (1.0 if "Junction_Surface" in present_layers else 0.0)
-    intersection_curve_ratio = 0.55 * curve_ratio + 0.45 * junction_ratio
-
-    category_scores = {
-        "geometry_symmetry_and_width": round(MODEL_SCORE_WEIGHTS["geometry_symmetry_and_width"] * geometry_ratio, 2),
-        "section_rule_fit": round(MODEL_SCORE_WEIGHTS["section_rule_fit"] * section_ratio, 2),
-        "component_completeness": round(MODEL_SCORE_WEIGHTS["component_completeness"] * component_ratio, 2),
-        "semantic_attribute_completeness": round(MODEL_SCORE_WEIGHTS["semantic_attribute_completeness"] * semantic_ratio, 2),
-        "visual_layer_material_separation": round(MODEL_SCORE_WEIGHTS["visual_layer_material_separation"] * layer_ratio, 2),
-        "intersection_curve_treatment": round(MODEL_SCORE_WEIGHTS["intersection_curve_treatment"] * intersection_curve_ratio, 2),
-    }
-    total_score = round(sum(category_scores.values()), 2)
-
-    source_section_counts = Counter(record["source_section_code"] or "unknown" for record in records)
-    modeled_section_counts = Counter(record["modeled_section_code"] or "unknown" for record in records)
-    normalized_records = [record for record in records if record["symmetry_normalized"]]
-    failed_symmetry = [record for record in records if not record["modeled_is_symmetric"]]
-    incomplete_records = [record for record in records if record["missing_required_components"]]
-
-    findings = []
-    if normalized_records:
-        findings.append(
-            f"{len(normalized_records)} road centerlines used symmetric fallback sections to remove one-sided cross-section artifacts."
-        )
-    if failed_symmetry:
-        findings.append(f"{len(failed_symmetry)} modeled road centerlines are still asymmetric.")
-    if incomplete_records:
-        findings.append(f"{len(incomplete_records)} road centerlines are missing required component types.")
-    if transition_curve_count:
-        findings.append(f"{transition_curve_count} sharp polyline corners were converted to transition curves.")
-    if roads_with_junction_clearance and "Junction_Surface" in present_layers:
-        findings.append("Nearby junction nodes are clustered into rounded surfaces, and road components are clipped back at the junction throat.")
-    if roads_with_junction_clearance and {"Crosswalk", "Stop_Line"} <= present_layers:
-        findings.append("Crosswalk and stop-line layers are generated for valid junction approaches.")
-    if not findings:
-        findings.append("All modeled road centerlines pass the current symmetry, width, component, semantic, and layer checks.")
-
-    return {
-        "project": "cim_road_poc",
-        "model": "cim_city_roads",
-        "score": total_score,
-        "grade": model_quality_grade(total_score),
-        "weights": MODEL_SCORE_WEIGHTS,
-        "category_scores": category_scores,
-        "criteria_basis": [
-            "Municipal road BIM delivery: geometry, position, direction, color, dimensions, and non-geometric information.",
-            "CIM platform guidance: standardized data resources, model cleaning/conversion, query and visualization support.",
-            "Data-quality dimensions: accuracy, completeness, consistency, uniqueness, validity, and monitoring.",
-        ],
-        "metrics": {
-            "road_centerline_count": total,
-            "symmetric_modeled_count": symmetric_count,
-            "width_match_count": width_match_count,
-            "section_fit_count": section_fit_count,
-            "component_complete_count": complete_count,
-            "semantic_complete_count": semantic_complete_count,
-            "transition_curve_count": transition_curve_count,
-            "roads_with_transition_curves": roads_with_transition_curves,
-            "roads_with_junction_marking_clearance": roads_with_junction_clearance,
-            "expected_layers": sorted(expected_layers),
-            "present_layers": sorted(present_layers),
-            "source_section_counts": dict(source_section_counts),
-            "modeled_section_counts": dict(modeled_section_counts),
-            "symmetry_normalized_count": len(normalized_records),
-        },
-        "findings": findings,
-        "failed_examples": {
-            "asymmetry": failed_symmetry[:10],
-            "component_completeness": incomplete_records[:10],
-        },
-    }
-
-
-def write_city_road_model_score(
-    prepared_roads: gpd.GeoDataFrame,
-    road_meshes: dict[str, trimesh.Trimesh],
-) -> dict[str, Any]:
-    report = build_city_road_model_score(prepared_roads, road_meshes)
-    CITY_ROAD_SCORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_ROAD_SCORE_PATH.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    return report
-
-
-def count_valid_junction_approaches(prepared_roads: gpd.GeoDataFrame) -> int:
-    rules = road_gen.load_rules()
-    count = 0
-    for _, row in prepared_roads.iterrows():
-        line = row.geometry
-        if line is None or line.is_empty or not isinstance(line, LineString):
-            continue
-        rule = road_gen.get_road_rule(row, rules)
-        crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
-        min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
-        for junction_distance in road_gen.row_junction_distances(row):
-            for side_sign in (-1.0, 1.0):
-                crosswalk_distance = float(junction_distance) + side_sign * crosswalk_offset
-                stop_line_distance = float(junction_distance) + side_sign * stop_line_offset
-                if (
-                    min_margin < crosswalk_distance < line.length - min_margin
-                    and min_margin < stop_line_distance < line.length - min_margin
-                ):
-                    count += 1
-    return count
-
-
-def mesh_area_m2(mesh: trimesh.Trimesh | None) -> float:
-    if mesh is None or len(mesh.vertices) == 0:
-        return 0.0
-    return float(mesh.area)
-
-
-def build_city_junction_score(
-    prepared_roads: gpd.GeoDataFrame,
-    road_meshes: dict[str, trimesh.Trimesh],
-    junction_semantic: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
-    junction_buckets = junction_point_buckets(prepared_roads)
-    junction_count = len(junction_buckets)
-    semantic_records = (junction_semantic or {}).get("objects") or build_city_junction_semantic_records(prepared_roads)
-    semantic_junction_count = len(semantic_records)
-    topology_complete_count = sum(
-        1
-        for record in semantic_records
-        if record.get("quality_flags", {}).get("topology_complete")
-    )
-    movement_complete_count = sum(
-        1
-        for record in semantic_records
-        if record.get("quality_flags", {}).get("movement_semantic_complete")
-    )
-    type_counts = Counter(record.get("junction_type", "UNKNOWN") for record in semantic_records)
-    hierarchy_counts = Counter(record.get("junction_hierarchy", "UNKNOWN") for record in semantic_records)
-    design_option_counts = Counter(
-        record.get("selected_design_option", {}).get("option_id", "unknown")
-        for record in semantic_records
-    )
-    avg_design_score = (
-        sum(float(record.get("selected_design_option", {}).get("score", 0.0) or 0.0) for record in semantic_records)
-        / len(semantic_records)
-        if semantic_records
-        else 0.0
-    )
-    design_review_required_count = sum(
-        1 for record in semantic_records if record.get("selected_design_option", {}).get("review_required")
-    )
-    total_arm_count = sum(int(record.get("arm_count", 0) or 0) for record in semantic_records)
-    total_allowed_movement_count = sum(
-        int(record.get("movement_summary", {}).get("allowed_movement_count", 0) or 0)
-        for record in semantic_records
-    )
-    roads_with_junctions = sum(1 for record in records if record.get("junction_distances_m"))
-    roads_with_clearance = sum(
-        1
-        for record in records
-        if record.get("junction_distances_m")
-        and float(record.get("junction_marking_clearance_m", 0.0)) >= JUNCTION_MARKING_CLEARANCE_M
-    )
-    source_expected_approaches = count_valid_junction_approaches(prepared_roads)
-
-    present_layers = {
-        name[:-4] if name.endswith("_All") else name
-        for name, mesh in road_meshes.items()
-        if mesh is not None and len(mesh.vertices) > 0
-    }
-    junction_mesh = road_meshes.get("Junction_Surface_All")
-    crosswalk_mesh = road_meshes.get("Crosswalk_All")
-    stop_line_mesh = road_meshes.get("Stop_Line_All")
-    junction_surface_count = int((junction_mesh.metadata or {}).get("part_count", 0)) if junction_mesh else 0
-    crosswalk_stripe_count = int(
-        (crosswalk_mesh.metadata or {}).get(
-            "junction_crosswalk_stripe_count",
-            (crosswalk_mesh.metadata or {}).get("part_count", 0),
-        )
-    ) if crosswalk_mesh else 0
-    stop_line_count = int(
-        (stop_line_mesh.metadata or {}).get(
-            "junction_stop_line_count",
-            (stop_line_mesh.metadata or {}).get("part_count", 0),
-        )
-    ) if stop_line_mesh else 0
-    mesh_expected_approaches = max(
-        int((crosswalk_mesh.metadata or {}).get("junction_candidate_approach_count", 0)) if crosswalk_mesh else 0,
-        int((stop_line_mesh.metadata or {}).get("junction_candidate_approach_count", 0)) if stop_line_mesh else 0,
-    )
-    expected_approaches = mesh_expected_approaches or source_expected_approaches
-
-    surface_ratio = score_ratio(junction_surface_count, junction_count)
-    clearance_ratio = score_ratio(roads_with_clearance, roads_with_junctions)
-    crossing_ratio = 1.0 if expected_approaches == 0 else min(1.0, crosswalk_stripe_count / max(1, expected_approaches * 3))
-    stop_ratio = score_ratio(stop_line_count, expected_approaches)
-    expected_layers = {"Junction_Surface", "Lane_Marking_White", "Lane_Marking_Yellow"}
-    if expected_approaches:
-        expected_layers |= {"Crosswalk", "Stop_Line"}
-    layer_ratio = score_ratio(sum(1 for layer in expected_layers if layer in present_layers), len(expected_layers))
-    light_present = any(layer.startswith("Street_Light") for layer in present_layers)
-    tree_present = any(layer.startswith("Tree") for layer in present_layers)
-    asset_ratio = 1.0 if not GENERATE_ROAD_ASSETS else (0.5 if light_present else 0.0) + (0.5 if tree_present else 0.0)
-    topology_ratio = (
-        score_ratio(semantic_junction_count, junction_count)
-        * score_ratio(topology_complete_count, semantic_junction_count)
-    )
-    movement_ratio = score_ratio(movement_complete_count, semantic_junction_count)
-    semantic_ratio = (
-        score_ratio(semantic_junction_count, junction_count)
-        if junction_count
-        else 1.0
-    )
-
-    category_ratios = {
-        "junction_surface_continuity": surface_ratio,
-        "approach_marking_clearance": clearance_ratio,
-        "pedestrian_crossing": crossing_ratio,
-        "stop_control_marking": stop_ratio,
-        "topology_semantic_completeness": topology_ratio,
-        "lane_movement_semantic": movement_ratio,
-        "asset_visibility_clearance": asset_ratio,
-        "layer_material_separation": layer_ratio,
-        "semantic_traceability": semantic_ratio,
-    }
-    category_scores = {
-        key: round(JUNCTION_SCORE_WEIGHTS[key] * value, 2)
-        for key, value in category_ratios.items()
-    }
-    total_score = round(sum(category_scores.values()), 2)
-
-    findings = [
-        f"Detected {junction_count} clustered junction nodes from centerline topology.",
-        f"Generated {junction_surface_count} rounded junction surface patches, {crosswalk_stripe_count} crosswalk stripes, and {stop_line_count} stop lines.",
-        f"{roads_with_clearance}/{roads_with_junctions} roads with junctions have lane-marking clearance zones.",
-        f"{semantic_junction_count} junction semantic nodes include {total_arm_count} arms and {total_allowed_movement_count} allowed movement records.",
-        f"Scored {len(design_option_counts)} junction design option families; average selected-option score is {avg_design_score:.2f}.",
-    ]
-    if expected_approaches and stop_line_count < expected_approaches:
-        findings.append(
-            f"{expected_approaches - stop_line_count} short or edge approaches could not fit a complete stop-line/crosswalk set."
-        )
-    if {"Junction_Surface", "Crosswalk", "Stop_Line"} <= present_layers:
-        findings.append("The visible junction model now includes clipped approach roads, conflict-area asphalt, pedestrian crossings, and stop control markings.")
-
-    return {
-        "project": "cim_road_poc",
-        "model": "cim_city_junctions",
-        "score": total_score,
-        "grade": model_quality_grade(total_score),
-        "weights": JUNCTION_SCORE_WEIGHTS,
-        "category_scores": category_scores,
-        "category_ratios": {key: round(value, 4) for key, value in category_ratios.items()},
-        "criteria_basis": [
-            {
-                "source": "CJJ 152 / urban road intersection practice",
-                "principle": "Treat intersections as dedicated conflict areas with approach throat control and clear pavement-marking organization.",
-            },
-            {
-                "source": "NACTO Urban Street Design Guide - Intersection Design Elements",
-                "url": "https://nacto.org/publication/urban-street-design-guide/intersection-design-elements/",
-                "principle": "Use compact intersections, visible crossings, and curb/asset placement that keeps conflicts legible.",
-            },
-            {
-                "source": "FHWA Signalized Intersections Informational Guide",
-                "url": "https://highways.dot.gov/safety/intersection-safety/intersection-types/signalized-intersections/signalized-intersections-informational-guide",
-                "principle": "Evaluate intersections through user safety, markings, channelization, and operational clarity.",
-            },
-            {
-                "source": "GB 51038 road traffic sign and marking practice",
-                "principle": "Use crosswalk and stop-line markings as independent pavement-marking elements at controlled approaches.",
-            },
-        ],
-        "metrics": {
-            "junction_count": junction_count,
-            "semantic_junction_count": semantic_junction_count,
-            "topology_complete_count": topology_complete_count,
-            "movement_complete_count": movement_complete_count,
-            "total_arm_count": total_arm_count,
-            "total_allowed_movement_count": total_allowed_movement_count,
-            "junction_type_counts": dict(type_counts),
-            "junction_hierarchy_counts": dict(hierarchy_counts),
-            "selected_design_option_counts": dict(design_option_counts),
-            "average_selected_design_score": round(float(avg_design_score), 3),
-            "design_review_required_count": int(design_review_required_count),
-            "road_centerline_count": len(records),
-            "roads_with_junction_distances": roads_with_junctions,
-            "roads_with_junction_marking_clearance": roads_with_clearance,
-            "expected_marked_approach_count": expected_approaches,
-            "source_expected_marked_approach_count": source_expected_approaches,
-            "junction_surface_count": junction_surface_count,
-            "junction_surface_area_m2": round(mesh_area_m2(junction_mesh), 3),
-            "crosswalk_stripe_count": crosswalk_stripe_count,
-            "crosswalk_area_m2": round(mesh_area_m2(crosswalk_mesh), 3),
-            "stop_line_count": stop_line_count,
-            "stop_line_area_m2": round(mesh_area_m2(stop_line_mesh), 3),
-            "expected_layers": sorted(expected_layers),
-            "present_layers": sorted(present_layers),
-            "asset_layers_present": {
-                "street_lights": light_present,
-                "trees": tree_present,
-            },
-            "settings": {
-                "rounded_junction_surfaces": ENABLE_ROUNDED_JUNCTION_SURFACES,
-                "crosswalk_generation": GENERATE_JUNCTION_CROSSWALKS,
-                "stop_line_generation": GENERATE_JUNCTION_STOP_LINES,
-                "crosswalk_band_length_m": CROSSWALK_BAND_LENGTH_M,
-                "crosswalk_stripe_width_m": CROSSWALK_STRIPE_WIDTH_M,
-                "crosswalk_stripe_gap_m": CROSSWALK_STRIPE_GAP_M,
-                "stop_line_width_m": STOP_LINE_WIDTH_M,
-                "stop_line_to_crosswalk_gap_m": STOP_LINE_TO_CROSSWALK_GAP_M,
-            },
-        },
-        "findings": findings,
-    }
-
-
-def write_city_junction_score(
-    prepared_roads: gpd.GeoDataFrame,
-    road_meshes: dict[str, trimesh.Trimesh],
-    junction_semantic: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    report = build_city_junction_score(prepared_roads, road_meshes, junction_semantic)
-    CITY_JUNCTION_SCORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_JUNCTION_SCORE_PATH.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    return report
-
-
-def record_marking_issue(
-    issues: list[dict[str, Any]],
-    issue_type: str,
-    road_idx: Any,
-    overhang_m: float,
-    detail: dict[str, Any],
-) -> None:
-    if overhang_m <= 1e-6:
-        return
-    issues.append(
-        {
-            "type": issue_type,
-            "road_index": str(road_idx),
-            "overhang_m": round(float(overhang_m), 3),
-            **detail,
-        }
-    )
-
-
-def max_span_segment_length(spans: list[tuple[float, float]]) -> float:
-    max_length = 0.0
-    for start, end in spans:
-        distances = marking_span_distances(start, end)
-        for a, b in zip(distances, distances[1:]):
-            max_length = max(max_length, float(b - a))
-    return max_length
-
-
-def build_city_marking_alignment_qc(prepared_roads: gpd.GeoDataFrame) -> dict[str, Any]:
-    rules = road_gen.load_rules()
-    checks: Counter[str] = Counter()
-    issues: list[dict[str, Any]] = []
-    max_overhang = 0.0
-    max_solid_segment = 0.0
-
-    for road_idx, row in prepared_roads.iterrows():
-        row = row.copy()
-        row.name = road_idx
-        rule = road_gen.get_road_rule(row, rules)
-        components = road_gen.cross_section_components_for_row(row)
-        spans = component_spans(components)
-        white_edge_suppression = carriageway_boundary_edge_suppression(spans)
-
-        for component_idx, (component, left_offset, right_offset) in enumerate(spans):
-            component_type = str(component.get("type", ""))
-            if component_type not in LANE_MARKING_COMPONENT_TYPES:
-                continue
-            width = right_offset - left_offset
-            if width < 3.2:
-                continue
-            marking_width = max(0.10, min(rule.lane_marking_width, 0.16))
-            junction_distances = road_gen.row_junction_distances(row)
-            junction_clearance = junction_marking_clearance_for_row(row, rule)
-            solid_spans = subtract_blocked_spans(
-                [(0.0, float(row.geometry.length))],
-                junction_distances,
-                junction_clearance,
-                float(row.geometry.length),
-            ) if row.geometry is not None and not row.geometry.is_empty else []
-            max_solid_segment = max(max_solid_segment, max_span_segment_length(solid_spans))
-            edge_specs = []
-            suppressed_edges = white_edge_suppression.get(component_idx, set())
-            if "left" in suppressed_edges:
-                checks["suppressed_white_edge_at_double_yellow"] += 1
-            else:
-                edge_specs.append((left_offset + min(0.35, width * 0.15), "left_edge"))
-            if "right" in suppressed_edges:
-                checks["suppressed_white_edge_at_double_yellow"] += 1
-            else:
-                edge_specs.append((right_offset - min(0.35, width * 0.15), "right_edge"))
-            for edge_offset, suffix in edge_specs:
-                checks["white_edge_marking"] += 1
-                overhang = max(
-                    left_offset - (edge_offset - marking_width / 2.0),
-                    (edge_offset + marking_width / 2.0) - right_offset,
-                    0.0,
-                )
-                max_overhang = max(max_overhang, overhang)
-                record_marking_issue(
-                    issues,
-                    "white_edge_outside_component",
-                    road_idx,
-                    overhang,
-                    {
-                        "edge": suffix,
-                        "component_type": component_type,
-                        "component_left_m": round(float(left_offset), 3),
-                        "component_right_m": round(float(right_offset), 3),
-                        "marking_center_offset_m": round(float(edge_offset), 3),
-                    },
-                )
-
-            lane_count = max(1, int(round(width / max(rule.lane_width, 2.8))))
-            if lane_count <= 1:
-                continue
-            lane_step = width / lane_count
-            for lane_idx in range(1, lane_count):
-                offset = left_offset + lane_step * lane_idx
-                checks["white_dash_marking"] += 1
-                overhang = max(
-                    left_offset - (offset - marking_width / 2.0),
-                    (offset + marking_width / 2.0) - right_offset,
-                    0.0,
-                )
-                max_overhang = max(max_overhang, overhang)
-                record_marking_issue(
-                    issues,
-                    "white_dash_outside_component",
-                    road_idx,
-                    overhang,
-                    {
-                        "lane_index": lane_idx,
-                        "component_type": component_type,
-                        "component_left_m": round(float(left_offset), 3),
-                        "component_right_m": round(float(right_offset), 3),
-                        "marking_center_offset_m": round(float(offset), 3),
-                    },
-                )
-
-        for idx in range(len(spans) - 1):
-            left_component, union_left, boundary = spans[idx]
-            right_component, next_left, union_right = spans[idx + 1]
-            if abs(boundary - next_left) > 0.01:
-                continue
-            if left_component.get("type") not in {"main_carriageway", "carriageway"}:
-                continue
-            if right_component.get("type") not in {"main_carriageway", "carriageway"}:
-                continue
-            marking_width = max(0.09, min(rule.lane_marking_width, 0.14))
-            junction_distances = road_gen.row_junction_distances(row)
-            junction_clearance = junction_marking_clearance_for_row(row, rule)
-            solid_spans = subtract_blocked_spans(
-                [(0.0, float(row.geometry.length))],
-                junction_distances,
-                junction_clearance,
-                float(row.geometry.length),
-            ) if row.geometry is not None and not row.geometry.is_empty else []
-            max_solid_segment = max(max_solid_segment, max_span_segment_length(solid_spans))
-            for offset in (boundary - 0.16, boundary + 0.16):
-                checks["yellow_center_marking"] += 1
-                overhang = max(
-                    union_left - (offset - marking_width / 2.0),
-                    (offset + marking_width / 2.0) - union_right,
-                    0.0,
-                )
-                max_overhang = max(max_overhang, overhang)
-                record_marking_issue(
-                    issues,
-                    "yellow_center_outside_carriageway_pair",
-                    road_idx,
-                    overhang,
-                    {
-                        "pair_left_m": round(float(union_left), 3),
-                        "pair_right_m": round(float(union_right), 3),
-                        "marking_center_offset_m": round(float(offset), 3),
-                    },
-                )
-
-        road_width = drivable_width_for_row(row, rule)
-        road_half_width = road_width / 2.0
-        stripe_count, lateral_start, stripe_step = crosswalk_stripe_layout_for_width(road_width)
-        if stripe_count <= 1:
-            crosswalk_extent = CROSSWALK_STRIPE_WIDTH_M / 2.0
-        else:
-            left_extent = abs(lateral_start) + CROSSWALK_STRIPE_WIDTH_M / 2.0
-            right_extent = abs(lateral_start + (stripe_count - 1) * stripe_step) + CROSSWALK_STRIPE_WIDTH_M / 2.0
-            crosswalk_extent = max(left_extent, right_extent)
-        stop_extent = junction_marking_across_width(road_width) / 2.0
-        for junction_idx, _ in enumerate(road_gen.row_junction_distances(row)):
-            for side_name in ("before", "after"):
-                checks["crosswalk_approach"] += 1
-                crosswalk_overhang = max(0.0, crosswalk_extent - road_half_width)
-                max_overhang = max(max_overhang, crosswalk_overhang)
-                record_marking_issue(
-                    issues,
-                    "crosswalk_outside_drivable_width",
-                    road_idx,
-                    crosswalk_overhang,
-                    {
-                        "junction_index": junction_idx,
-                        "side": side_name,
-                        "road_width_m": round(float(road_width), 3),
-                        "stripe_count": stripe_count,
-                    },
-                )
-
-                checks["stop_line_approach"] += 1
-                stop_overhang = max(0.0, stop_extent - road_half_width)
-                max_overhang = max(max_overhang, stop_overhang)
-                record_marking_issue(
-                    issues,
-                    "stop_line_outside_drivable_width",
-                    road_idx,
-                    stop_overhang,
-                    {
-                        "junction_index": junction_idx,
-                        "side": side_name,
-                        "road_width_m": round(float(road_width), 3),
-                    },
-                )
-
-    issue_type_counts = Counter(issue["type"] for issue in issues)
-    if max_solid_segment > MARKING_SWEEP_SAMPLE_INTERVAL_M * 1.5:
-        issues.append(
-            {
-                "type": "solid_marking_under_sampled",
-                "max_segment_length_m": round(float(max_solid_segment), 3),
-                "allowed_segment_length_m": round(float(MARKING_SWEEP_SAMPLE_INTERVAL_M * 1.5), 3),
-            }
-        )
-        issue_type_counts = Counter(issue["type"] for issue in issues)
-    score = 100.0 if not issues else round(max(0.0, 100.0 - min(100.0, len(issues) * 0.02 + max_overhang * 10.0)), 2)
-    return {
-        "project": "cim_road_poc",
-        "model": "cim_city_roads",
-        "score": score,
-        "grade": model_quality_grade(score),
-        "policy": "all pavement markings must stay within their own drivable/component lateral envelope",
-        "metrics": {
-            "checked_marking_count": int(sum(checks.values())),
-            "check_counts": dict(checks),
-            "issue_count": len(issues),
-            "issue_type_counts": dict(issue_type_counts),
-            "max_lateral_overhang_m": round(float(max_overhang), 3),
-            "junction_marking_lateral_inset_m": JUNCTION_MARKING_LATERAL_INSET_M,
-            "marking_sweep_sample_interval_m": MARKING_SWEEP_SAMPLE_INTERVAL_M,
-            "max_solid_marking_segment_m": round(float(max_solid_segment), 3),
-        },
-        "sample_issues": issues[:50],
-        "findings": [
-            "White lane markings and yellow center markings are checked against their source carriageway components.",
-            "Crosswalk and stop-line markings are checked against drivable road width after lateral inset.",
-            "No marking overhang was detected." if not issues else f"{len(issues)} marking overhang issues were detected.",
-        ],
-    }
-
-
-def write_city_marking_alignment_qc(prepared_roads: gpd.GeoDataFrame) -> dict[str, Any]:
-    report = build_city_marking_alignment_qc(prepared_roads)
-    CITY_MARKING_QC_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_MARKING_QC_PATH.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    return report
-
 
 def build_city_utility_pipe_semantic(
     utility_records: list[dict[str, Any]],
@@ -3736,7 +4372,7 @@ def export_module_scenes(modules: dict[str, dict[str, trimesh.Trimesh]]) -> dict
 
 
 def main() -> None:
-    print("[1/6] Loading data/Data layers...", flush=True)
+    print(f"[1/6] Loading raw layers from {RAW_DIR}...", flush=True)
     roads = load_layer(road_gen.RAW_ROADS)
     buildings = load_layer(BUILDINGS_PATH)
     bus_stops = load_layer(BUS_STOPS_PATH)

@@ -47,7 +47,8 @@ def first_existing_data_file(patterns: list[str], base_dir: Path) -> Path:
     return base_dir / patterns[0]
 
 
-RAW_SOURCE_DIR = ROOT / "data" / "Data"
+RAW_DATA_DIR_ENV = "CIM_ROAD_DATA_DIR"
+RAW_SOURCE_DIR = Path(os.environ.get(RAW_DATA_DIR_ENV, ROOT / "data" / "Data")).expanduser().resolve()
 RAW_ROADS = first_existing_data_file(
     [
         "road_centerline.geojson",
@@ -70,25 +71,26 @@ TARGET_CRS = "EPSG:4547" # 目标坐标系
 MIN_CONNECTOR_LENGTH_M = 0.05 # 最小连接长度
 BRIDGE_ELEVATION_GROUP_M = 3.0 # 桥梁高程分组
 SWEEP_SAMPLE_INTERVAL_M = 4.0 # 扫掠采样间隔
-JUNCTION_NODE_TOLERANCE_M = 3.0 # 路口节点容差
-JUNCTION_RADIUS_M = 8.0 # 路口半径
-JUNCTION_CLIP_EXTRA_M = 1.5 # 路口剪裁额外距离
-MIN_JUNCTION_CLIP_DISTANCE_M = 8.0 # 最小路口剪裁距离
-MAX_JUNCTION_CLIP_DISTANCE_M = 14.0 # 最大路口剪裁距离
-JUNCTION_ENDPOINT_SNAP_TOLERANCE_M = 3.5 # 路口端点捕捉容差
+JUNCTION_NODE_TOLERANCE_M = 4.0 # 路口节点容差
+JUNCTION_RADIUS_M = 10.0 # 路口半径
+JUNCTION_CLIP_EXTRA_M = 2.0 # 路口剪裁额外距离
+MIN_JUNCTION_CLIP_DISTANCE_M = 10.0 # 最小路口剪裁距离
+MAX_JUNCTION_CLIP_DISTANCE_M = 18.0 # 最大路口剪裁距离
+JUNCTION_ENDPOINT_SNAP_TOLERANCE_M = 5.0 # 路口端点捕捉容差
+JUNCTION_ENDPOINT_CORRIDOR_SNAP_FACTOR = 1.25 # 按道路半宽放大端点捕捉
 JUNCTION_LINE_INTERSECTION_TOLERANCE_M = 0.35 # 路口线交集容差
 ENABLE_CORRIDOR_JUNCTION_CLUSTERING = True # 启用路口聚类
-CORRIDOR_JUNCTION_CLUSTER_DISTANCE_M = 24.0 # 路口聚类距离
-CORRIDOR_JUNCTION_CONNECT_TOLERANCE_M = 18.0 # 路口聚类连接容差
+CORRIDOR_JUNCTION_CLUSTER_DISTANCE_M = 28.0 # 路口聚类距离
+CORRIDOR_JUNCTION_CONNECT_TOLERANCE_M = 22.0 # 路口聚类连接容差
 CORRIDOR_CROSSING_MIN_ANGLE_DEG = 25.0 # 路口交叉最小角度
 CORRIDOR_CROSSING_EXTRA_WIDTH_M = 1.5 # 路口交叉额外宽度
-ROAD_SURFACE_OVERLAP_MIN_AREA_M2 = 18.0 # 路面重叠最小面积
-ROAD_SURFACE_OVERLAP_MIN_COMPACTNESS = 0.015 # 路面重叠最小紧凑度
+ROAD_SURFACE_OVERLAP_MIN_AREA_M2 = 10.0 # 路面重叠最小面积
+ROAD_SURFACE_OVERLAP_MIN_COMPACTNESS = 0.01 # 路面重叠最小紧凑度
 JUNCTION_EDGE_MAX_INTERSECTION_FACTOR = 2.6 # 路口边缘最大交集因子
-JUNCTION_MIN_SURFACE_AREA_M2 = 4.0 # 路口最小表面面积
-JUNCTION_CLEAN_FILLET_M = 2.0 # 路口清洁圆角
-JUNCTION_SOCKET_OVERLAP_M = 1.2 # 路口socket重叠距离
-JUNCTION_CITYENGINE_SMOOTH_M = 1.1 # 路口城市引擎平滑距离
+JUNCTION_MIN_SURFACE_AREA_M2 = 3.0 # 路口最小表面面积
+JUNCTION_CLEAN_FILLET_M = 2.4 # 路口清洁圆角
+JUNCTION_SOCKET_OVERLAP_M = 1.8 # 路口socket重叠距离
+JUNCTION_CITYENGINE_SMOOTH_M = 1.6 # 路口城市引擎平滑距离
 LANE_CONNECTOR_SAMPLE_COUNT = 16 # 车道连接采样数量
 LANE_CONNECTOR_HANDLE_RATIO = 0.45 # 车道连接处理比例
 TRANSITION_MIN_ANGLE_DEG = 8.0 # 过渡最小角度
@@ -212,6 +214,16 @@ SYMMETRIC_DEFAULT_SECTION_BY_CATEGORY = {
     "secondary": "C5",
     "branch": "D3",
 }
+
+
+# ---------------------------------------------------------------------------
+# Road rule schema and normalized attributes
+# ---------------------------------------------------------------------------
+#
+# The city pipeline prepares raw centerlines, but this module owns the reusable
+# road schema: rule loading, road class normalization, engineering section
+# lookup, lane layout, elevation lookup, and the low-level geometry helpers used
+# by both road surfaces and junctions.
 
 
 @dataclass
@@ -567,6 +579,13 @@ def parse_road_width_m(val: Any) -> float | None:
 
 
 def road_section_requirements() -> dict[str, dict[str, Any]]:
+    """Load engineering road-section requirements and aliases.
+
+    `data/rules/road_section_requirements.json` may provide a detailed sequence
+    of sidewalk, green belt, carriageway, median, and service-lane components.
+    The in-code ROAD_SECTION_REQUIREMENTS table is the compact fallback for
+    section code, width, lane count, and lane width.
+    """
     global _SECTION_REQUIREMENTS_CACHE
     if _SECTION_REQUIREMENTS_CACHE is not None:
         return _SECTION_REQUIREMENTS_CACHE
@@ -766,6 +785,14 @@ def row_target_total_width(row: pd.Series, section_rule: dict[str, Any] | None =
 
 
 def cross_section_components_for_row(row: pd.Series) -> list[dict[str, Any]]:
+    """Return the modeled cross-section component sequence for one road.
+
+    The function keeps source engineering sections when they are already
+    symmetric. If the source section is one-sided, it applies the configured
+    symmetric fallback so the generated 3D road has balanced left/right visual
+    components. Components are then scaled to the target width when the source
+    row carries a usable width attribute.
+    """
     source_section_rule = row_section_requirement(row)
     section_rule = modeled_section_requirement(row, source_section_rule)
     raw_components = section_rule.get("components") if section_rule else None
@@ -894,7 +921,7 @@ def canonical_road_class(value: Any, rules: dict[str, RoadRule]) -> str:
 
 
 def get_road_rule(row: pd.Series, rules: dict[str, RoadRule]) -> RoadRule:
-    """依据原始道路属性（如车道数）动态计算并返回适用于该道路的规则与宽度配置。"""
+    """依据原始道路属性和断面规则动态计算道路宽度、车道和人行道配置。"""
     source_section_rule = row_section_requirement(row)
     section_rule = modeled_section_requirement(row, source_section_rule)
     declared_road_class = row_declared_road_class(row)
@@ -1111,6 +1138,17 @@ def acute_angle_between_vectors(a: tuple[float, float], b: tuple[float, float]) 
     return math.degrees(math.acos(dot))
 
 
+# ---------------------------------------------------------------------------
+# Junction detection and road-chainage preparation
+# ---------------------------------------------------------------------------
+#
+# Junction detection happens before any city mesh is built. It combines several
+# signals: snapped road endpoints, true line intersections, corridor crossings,
+# and small road-surface overlaps. The result is stored back on each road row as
+# `junction_distances_json`, so later mesh generation can clip road strips and
+# place approach markings using distance along the source centerline.
+
+
 def detection_road_half_width(row: pd.Series, rule: RoadRule | None = None) -> float:
     if rule is not None:
         return max(3.5, min(16.0, rule.road_width * 0.5 + CORRIDOR_CROSSING_EXTRA_WIDTH_M))
@@ -1126,6 +1164,29 @@ def detection_road_half_width(row: pd.Series, rule: RoadRule | None = None) -> f
         else:
             lanes = 2
     return max(3.5, min(12.0, lanes * 3.5 * 0.5 + CORRIDOR_CROSSING_EXTRA_WIDTH_M))
+
+
+def endpoint_snap_tolerance_for_roads(
+    row_a: pd.Series,
+    row_b: pd.Series,
+    rule_a: RoadRule | None = None,
+    rule_b: RoadRule | None = None,
+) -> float:
+    """Return a road-width-aware endpoint snap distance.
+
+    Centerlines from mixed road classes often stop at the visual edge of a
+    wider road instead of exactly on its centerline. A fixed small tolerance
+    misses those T-junctions, so endpoint snapping uses the wider corridor
+    half-width while still respecting the global connection cap.
+    """
+    width_based = max(
+        detection_road_half_width(row_a, rule_a),
+        detection_road_half_width(row_b, rule_b),
+    ) * JUNCTION_ENDPOINT_CORRIDOR_SNAP_FACTOR
+    return min(
+        CORRIDOR_JUNCTION_CONNECT_TOLERANCE_M,
+        max(JUNCTION_ENDPOINT_SNAP_TOLERANCE_M, width_based),
+    )
 
 
 def road_buffer_for_junction_detection(row: pd.Series, line: LineString, rule: RoadRule | None = None) -> Polygon | MultiPolygon:
@@ -1426,6 +1487,7 @@ def junction_connection_tolerance() -> float:
 
 
 def detect_junction_points(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule] | None = None) -> list[Point]:
+    """Detect candidate junction points from centerline topology and overlaps."""
     buckets: dict[tuple[int, int], dict[str, Any]] = {}
     entries: list[tuple[Any, pd.Series, LineString, RoadRule | None]] = []
     for idx, row in roads.iterrows():
@@ -1446,14 +1508,14 @@ def detect_junction_points(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule] |
 
     for i, (idx_a, row_a, line_a, rule_a) in enumerate(entries):
         for endpoint in road_endpoint_points(line_a):
-            for idx_b, row_b, line_b, _ in entries:
+            for idx_b, row_b, line_b, rule_b in entries:
                 if idx_a == idx_b or not rows_same_spatial_level(row_a, row_b):
                     continue
                 projected_distance = float(line_b.project(endpoint))
                 if projected_distance <= JUNCTION_NODE_TOLERANCE_M or projected_distance >= line_b.length - JUNCTION_NODE_TOLERANCE_M:
                     continue
                 projected = line_b.interpolate(projected_distance)
-                if endpoint.distance(projected) <= JUNCTION_ENDPOINT_SNAP_TOLERANCE_M:
+                if endpoint.distance(projected) <= endpoint_snap_tolerance_for_roads(row_a, row_b, rule_a, rule_b):
                     add_junction_candidate(
                         buckets,
                         projected,
@@ -1528,6 +1590,7 @@ def detect_junction_points(roads: gpd.GeoDataFrame, rules: dict[str, RoadRule] |
 
 
 def attach_junction_distances(roads: gpd.GeoDataFrame) -> None:
+    """Attach sorted junction chainages to each road row in-place."""
     junctions = detect_junction_points(roads)
     for idx, row in roads.iterrows():
         line = row.geometry
@@ -1585,6 +1648,18 @@ def sample_line_for_sweep(line: LineString, interval: float = SWEEP_SAMPLE_INTER
     return sorted(set(round(float(d), 3) for d in distances + vertex_distances if 0.0 <= d <= line.length))
 
 
+
+
+# ---------------------------------------------------------------------------
+# Junction sockets, lane connectors, and conflict-area surfaces
+# ---------------------------------------------------------------------------
+#
+# A JunctionNode is assembled from RoadSocket objects. Each socket records where
+# a road arm meets the node, its direction frame, width, lane layout, and clip
+# distance. LaneSocket and LaneConnector objects describe possible turning
+# movements. The city pipeline currently renders one clean junction surface, but
+# these sockets/connectors remain the traceable model behind semantic movements
+# and future detailed channelization.
 
 
 def lane_center_offsets(rule: RoadRule) -> list[float]:
@@ -1688,6 +1763,7 @@ def lane_connector_curve(from_lane: LaneSocket, to_lane: LaneSocket) -> LineStri
 
 
 def build_lane_connectors(node: JunctionNode) -> list[LaneConnector]:
+    """Build lane-to-lane connector curves and swept polygons for a junction."""
     ingress_lanes = [
         lane
         for socket in node.sockets
@@ -2046,6 +2122,14 @@ def build_junction_nodes(
     road_entries: list[tuple[pd.Series, LineString, RoadRule]],
     junction_points: list[Point],
 ) -> list[JunctionNode]:
+    """Build socket-rich junction nodes from detected junction points.
+
+    The output is intentionally more detailed than the final rendered surface:
+    every connected road arm becomes a RoadSocket, each socket gets LaneSockets,
+    and the node is classified by type/hierarchy. City-level mesh generation can
+    then render a compact rounded surface, connector detail, or semantic/QC
+    information without redetecting topology.
+    """
     nodes: list[JunctionNode] = []
     connection_tolerance = junction_connection_tolerance()
     for node_idx, point in enumerate(junction_points):
@@ -2258,6 +2342,7 @@ def enforce_socket_throat_coverage(
 
 
 def node_cityengine_surface_union(node: JunctionNode, include_sidewalk: bool = False):
+    """Return the preferred CityEngine-style junction surface for one node."""
     socket_polygon = socket_boundary_polygon(node, include_sidewalk=include_sidewalk)
     edge_polygon = edge_intersection_junction_polygon(node, include_sidewalk=include_sidewalk)
     throat_polygon = socket_throat_union(node, include_sidewalk=include_sidewalk)
@@ -2526,6 +2611,14 @@ def build_junction_detail_geometries(
     junction_points: list[Point],
     junction_nodes: list[JunctionNode] | None = None,
 ) -> tuple[list[Polygon], list[Polygon], list[Polygon], list[Polygon], list[Polygon], list[Polygon], list[Polygon], int, int, int, list[dict[str, Any]]]:
+    """Generate detailed junction geometry sets from socket-level topology.
+
+    This function is retained as the detailed road-only junction builder. The
+    city pipeline now uses its own rounded conflict-area pass, but this path
+    still documents the full socket-based model: drivable and total junction
+    surfaces, stop lines, crosswalks, lane guides, turn arrows, channelization
+    islands, movement counts, and semantic metadata.
+    """
     junction_surfaces: list[Polygon] = []
     junction_total_surfaces: list[Polygon] = []
     stop_lines: list[Polygon] = []

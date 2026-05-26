@@ -5,10 +5,12 @@ PYTHON_EXE="${PYTHON_EXE:-/d/ProgramData/miniconda3/envs/cim-road/python.exe}"
 if [ ! -x "$PYTHON_EXE" ]; then
   PYTHON_EXE="python"
 fi
-BLENDER_EXE="${BLENDER_EXE:-/d/ruanjian/Blender 5.1/blender.exe}"
+BLENDER_EXE="${BLENDER_EXE:-/c/Program Files/Blender Foundation/Blender 5.1/blender.exe}"
 
 if [ ! -x "$BLENDER_EXE" ]; then
-  if command -v blender >/dev/null 2>&1; then
+  if [ -x "/d/ruanjian/Blender 5.1/blender.exe" ]; then
+    BLENDER_EXE="/d/ruanjian/Blender 5.1/blender.exe"
+  elif command -v blender >/dev/null 2>&1; then
     BLENDER_EXE="blender"
   else
     echo "[ERROR] Blender executable not found: $BLENDER_EXE"

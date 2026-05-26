@@ -4,7 +4,15 @@ setlocal
 
 if not defined PYTHON_EXE set "PYTHON_EXE=D:\ProgramData\miniconda3\envs\cim-road\python.exe"
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=python"
-if not defined BLENDER_EXE set "BLENDER_EXE=D:\ruanjian\Blender 5.1\blender.exe"
+if not defined BLENDER_EXE set "BLENDER_EXE=C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
+if not exist "%BLENDER_EXE%" set "BLENDER_EXE=D:\ruanjian\Blender 5.1\blender.exe"
+if not exist "%BLENDER_EXE%" (
+    for /f "delims=" %%B in ('where blender 2^>nul') do (
+        set "BLENDER_EXE=%%B"
+        goto :found_blender
+    )
+)
+:found_blender
 
 if not exist "%BLENDER_EXE%" (
     echo [ERROR] Blender executable not found:

@@ -12,11 +12,14 @@ run_city_workflow.sh
 ```text
 05_generate_cim_city.py
   -> 06_export_cim_city_fbx_blender.py
+  -> 14_export_cim_city_fbx.py
 ```
 
 ### `05_generate_cim_city.py`
 
 职责：读取 `data/Data` 下的工程数据，生成完整 CIM 城市 OBJ 与分模块 OBJ。
+也可以通过环境变量 `CIM_ROAD_DATA_DIR` 指向同结构数据目录，例如裁剪后的
+`data/Data_clip_1_10`。
 
 主要输入：
 
@@ -37,6 +40,24 @@ output/semantic/*.json
 output/qc_report/*.json
 ```
 
+### `12_clip_raw_data_sample.py`
+
+职责：从 `data/Data` 裁剪出同目录结构的 1/10 快速测试数据，默认输出到
+`data/Data_clip_1_10`。
+
+```bash
+python scripts/12_clip_raw_data_sample.py --overwrite
+```
+
+### `13_generate_cim_city_test_data.py`
+
+职责：直接使用 `data/Data_clip_1_10` 运行城市级主流程，适合快速验证道路、
+路口、管线和 QC 报告。
+
+```bash
+python scripts/13_generate_cim_city_test_data.py
+```
+
 ### `06_export_cim_city_fbx_blender.py`
 
 职责：将 `cim_city.obj` 和各模块 OBJ 导入 Blender，按对象名前缀分配材质，并导出 FBX。
@@ -46,6 +67,21 @@ output/qc_report/*.json
 ```text
 output/fbx/cim_city.fbx
 output/fbx/modules/*.fbx
+```
+
+### `14_export_cim_city_fbx.py`
+
+职责：用普通 Python 查找并启动 Blender，调用 `06_export_cim_city_fbx_blender.py`
+导出带材质的总 FBX 和分模块 FBX。适合在 `cim-road` 环境或命令行中直接运行。
+
+```bash
+python scripts/14_export_cim_city_fbx.py
+```
+
+如果 Blender 不在 PATH 中，可以通过环境变量或参数指定：
+
+```bash
+python scripts/14_export_cim_city_fbx.py --blender "C:/Program Files/Blender Foundation/Blender 5.1/blender.exe"
 ```
 
 ### `01_generate_cim3_road.py`
