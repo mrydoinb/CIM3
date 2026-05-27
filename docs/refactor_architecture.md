@@ -25,9 +25,14 @@ src/
     render_cross_sections.py
     check_junction_stack.py
   city/
+    geodata.py
+    mesh_utils.py
     pipeline.py
+    utility_pipes.py
   road/
     generator.py
+    rules.py
+    schema.py
   blender/
     fbx_export.py
     fbx_inspect.py
@@ -42,7 +47,9 @@ src/
   data_io/
 ```
 
-`config/`、`geometry/`、`data_io/` 当前先作为包边界保留，后续会从 `road.generator` 和 `city.pipeline` 中继续拆入。
+`road.schema` 保存道路/路口数据结构，`road.rules` 保存道路规则、道路等级归一化和横断面组件逻辑。
+`city.geodata` 保存图层读取、坐标本地化和底图辅助函数，`city.mesh_utils` 保存通用 mesh/geometry 小工具，`city.utility_pipes` 保存地下管线建模、语义和 QC。
+`config/`、`geometry/`、`data_io/` 当前先作为包边界保留，后续会继续从 `road.generator` 和 `city.pipeline` 中拆入。
 
 ## 3. 入口映射
 
@@ -86,6 +93,7 @@ python -m cli.check_junction_stack
 ```text
 src/road/
   rules.py
+  schema.py
   cross_section.py
   preparation.py
   surfaces.py
@@ -104,6 +112,9 @@ src/junction/
   qc.py
 
 src/city/
+  geodata.py
+  mesh_utils.py
+  utility_pipes.py
   buildings.py
   transit.py
   utilities.py
