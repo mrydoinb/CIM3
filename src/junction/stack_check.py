@@ -179,7 +179,12 @@ def record_component_layers(
             for component_idx, (component, left, right) in enumerate(spans):
                 component_type = str(component.get("type", ""))
                 layer = city.component_layer_name_for_row(component_type, row)
-                profile = "drivable" if component_type in city.DRIVABLE_COMPONENT_TYPES else "roadside"
+                if component_type in city.JUNCTION_ASPHALT_COMPONENT_TYPES:
+                    profile = "drivable"
+                elif component_type in city.JUNCTION_DIVIDER_COMPONENT_TYPES:
+                    profile = "divider"
+                else:
+                    profile = "roadside"
                 for segment_idx, (segment, _) in enumerate(clipped_segments_for(profile)):
                     geom = band_polygon(city, segment, left, right)
                     if component_type in city.DRIVABLE_COMPONENT_TYPES and geom is not None and not geom.is_empty:
@@ -205,7 +210,12 @@ def record_component_layers(
                         core_mask,
                     )
 
-            for segment_idx, (segment, _) in enumerate(clipped_segments_for("roadside")):
+            def record_curbs_for_segment(
+                segment,
+                segment_idx: int,
+                include_boundary_component_types: set[str] | None = None,
+                exclude_boundary_component_types: set[str] | None = None,
+            ) -> None:
                 curb_width = max(0.18, min(float(rule.curb_width), 0.45))
                 for idx in range(len(spans) - 1):
                     left_component, _, boundary = spans[idx]
@@ -222,6 +232,11 @@ def record_component_layers(
                         and left_type in city.RAISED_COMPONENT_TYPES
                     ):
                         continue
+                    boundary_types = {left_type, right_type}
+                    if include_boundary_component_types is not None and not (boundary_types & include_boundary_component_types):
+                        continue
+                    if exclude_boundary_component_types is not None and boundary_types & exclude_boundary_component_types:
+                        continue
                     geom = band_polygon(city, segment, boundary - curb_width / 2.0, boundary + curb_width / 2.0)
                     remember_component_geom(road_idx, "Curb", "curb", f"curb_{idx}", geom)
                     record_overlap(
@@ -234,6 +249,19 @@ def record_component_layers(
                         core_union,
                         core_mask,
                     )
+
+            for segment_idx, (segment, _) in enumerate(clipped_segments_for("roadside")):
+                record_curbs_for_segment(
+                    segment,
+                    segment_idx,
+                    exclude_boundary_component_types=city.JUNCTION_DIVIDER_COMPONENT_TYPES,
+                )
+            for segment_idx, (segment, _) in enumerate(clipped_segments_for("divider")):
+                record_curbs_for_segment(
+                    segment,
+                    segment_idx,
+                    include_boundary_component_types=city.JUNCTION_DIVIDER_COMPONENT_TYPES,
+                )
 
 
 def record_marking_layers(
@@ -370,12 +398,16 @@ def summarize_junction_element_connectivity(
     junction_surfaces: list[dict[str, Any]],
     component_geoms_by_key: dict[tuple[Any, str, str, str], list[Any]],
     roadside_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
+    drivable_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
+    divider_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
 ) -> dict[str, Any]:
     connector_mesh_groups = city.build_junction_side_component_connector_meshes(
         prepared_roads,
         rules,
         junction_surfaces,
         roadside_clip_ranges,
+        drivable_clip_ranges,
+        divider_clip_ranges,
     )
     connector_parts: dict[tuple[int, str, str], list[Any]] = defaultdict(list)
     for meshes in connector_mesh_groups.values():
@@ -477,14 +509,41 @@ def summarize_junction_element_connectivity(
         arms = city.junction_arm_records(prepared_roads, rules, surface_point, members)
         connection_policy = city.junction_connection_level_policy_from_arms(arms)
         connectable_levels = connection_policy["connectable_levels"]
-        same_road_level_connection_levels = connection_policy["same_road_level_connection_levels"]
         member_distances: dict[Any, list[float]] = defaultdict(list)
         for road_idx, distance_hint in members:
             member_distances[road_idx].append(float(distance_hint))
 
+        adjacent_pairs: list[dict[str, Any]] = []
+        seen_pair_keys: set[tuple[str, str]] = set()
+
+        def add_arm_pair(arm_a: dict[str, Any], arm_b: dict[str, Any], pair_kind: str) -> None:
+            pair_key = (
+                pair_kind,
+                *tuple(sorted((str(arm_a.get("arm_id", "")), str(arm_b.get("arm_id", ""))))),
+            )
+            if pair_key[1] == pair_key[2] or pair_key in seen_pair_keys:
+                return
+            seen_pair_keys.add(pair_key)
+            adjacent_pairs.append({"arm_a": arm_a, "arm_b": arm_b, "kind": pair_kind})
+
+        if len(arms) >= 2:
+            for idx, arm_a in enumerate(arms):
+                arm_b = arms[(idx + 1) % len(arms)]
+                if city.junction_arms_corner_connectable(arm_a, arm_b):
+                    add_arm_pair(arm_a, arm_b, "corner")
+        if not adjacent_pairs:
+            continue
+        paired_arm_ids = {
+            str(arm.get("arm_id", ""))
+            for pair_record in adjacent_pairs
+            for arm in (pair_record["arm_a"], pair_record["arm_b"])
+        }
+
         side_records: list[dict[str, Any]] = []
-        match_level_roads: dict[tuple[str, str], set[Any]] = defaultdict(set)
         for arm in arms:
+            arm_id = str(arm.get("arm_id", ""))
+            if arm_id not in paired_arm_ids:
+                continue
             road_idx = arm.get("road_idx")
             if road_idx not in prepared_roads.index:
                 continue
@@ -500,81 +559,103 @@ def summarize_junction_element_connectivity(
             for component_idx, component, left_offset, right_offset in city.junction_side_connector_spans(spans, rule):
                 component_type = str(component.get("type", ""))
                 match_key = city.junction_side_component_match_key(component_type, left_offset, right_offset)
-                match_level_roads[(match_key, connection_level)].add(road_idx)
                 layer = "Curb" if component_type == "curb" else city.component_layer_name_for_row(component_type, row)
                 key = (road_idx, layer, component_type, str(component_idx))
+                geom = component_geom(key)
+                sign = float(arm.get("line_direction_sign", 1.0) or 1.0)
+                arm_lateral_center = ((float(left_offset) + float(right_offset)) * 0.5) * sign
                 side_records.append(
                     {
                         "record_id": len(side_records),
-                        "arm_id": str(arm.get("arm_id", "")),
+                        "arm_id": arm_id,
                         "road_idx": road_idx,
                         "connection_level": connection_level,
                         "component_type": component_type,
                         "component_match_key": match_key,
+                        "component_width_match_key": city.junction_side_component_width_match_key(
+                            component_type,
+                            left_offset,
+                            right_offset,
+                        ),
                         "component_key": str(component_idx),
                         "layer": layer,
-                        "geom": component_geom(key),
+                        "geom": geom,
+                        "center_point": geom.representative_point() if geom is not None and not geom.is_empty else None,
                         "lateral_center": (float(left_offset) + float(right_offset)) * 0.5,
+                        "arm_lateral_center": arm_lateral_center,
+                        "arm_side_sign": 1 if arm_lateral_center > 0.01 else (-1 if arm_lateral_center < -0.01 else 0),
                     }
                 )
-
-        expected_match_levels = {
-            key for key, roads in match_level_roads.items()
-            if key[1] in same_road_level_connection_levels or len(roads) >= 2
-        }
 
         side_records_by_arm: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in side_records:
             side_records_by_arm[record["arm_id"]].append(record)
-        adjacent_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        if len(arms) == 2:
-            adjacent_pairs.append((arms[0], arms[1]))
-        elif len(arms) > 2:
-            adjacent_pairs.extend((arms[idx], arms[(idx + 1) % len(arms)]) for idx in range(len(arms)))
 
         expected_side_record_ids: set[int] = set()
-        for arm_a, arm_b in adjacent_pairs:
+        expected_side_connector_keys: dict[int, str] = {}
+        for pair_record in adjacent_pairs:
+            arm_a = pair_record["arm_a"]
+            arm_b = pair_record["arm_b"]
+            pair_kind = str(pair_record["kind"])
+            if pair_kind != "corner":
+                continue
             level_a = city.junction_connection_level_key_for_record(arm_a.get("road_level", {}))
             level_b = city.junction_connection_level_key_for_record(arm_b.get("road_level", {}))
             if level_a != level_b or level_a not in connectable_levels:
                 continue
-            records_a = side_records_by_arm.get(str(arm_a.get("arm_id", "")), [])
-            records_b = side_records_by_arm.get(str(arm_b.get("arm_id", "")), [])
+            arm_a_id = str(arm_a.get("arm_id", ""))
+            arm_b_id = str(arm_b.get("arm_id", ""))
+            records_a = side_records_by_arm.get(arm_a_id, [])
+            records_b = side_records_by_arm.get(arm_b_id, [])
             if not records_a or not records_b:
                 continue
+            corner_side_sign_by_arm = {
+                arm_a_id: 1,
+                arm_b_id: -1,
+            }
 
-            def compatible_candidates(record: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-                match_key = str(record["component_match_key"])
-                if (match_key, level_a) not in expected_match_levels:
-                    return []
-                return [
-                    candidate
-                    for candidate in candidates
-                    if str(candidate["component_match_key"]) == match_key
-                    and str(candidate["connection_level"]) == level_a
-                    and str(candidate["layer"]) == str(record["layer"])
-                ]
+            records_by_key_a: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+            records_by_key_b: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+            for record, expected_sign, bucket in (
+                *[(record, corner_side_sign_by_arm[arm_a_id], records_by_key_a) for record in records_a],
+                *[(record, corner_side_sign_by_arm[arm_b_id], records_by_key_b) for record in records_b],
+            ):
+                component_type = str(record.get("component_type", ""))
+                if component_type not in city.JUNCTION_CORNER_COMPONENT_CONNECTOR_TYPES:
+                    continue
+                if int(record.get("arm_side_sign", 0)) != int(expected_sign):
+                    continue
+                bucket[city.corner_component_correspondence_key(record)].append(record)
 
-            for source_records, target_records in ((records_a, records_b), (records_b, records_a)):
-                for record in source_records:
-                    candidates = compatible_candidates(record, target_records)
-                    if not candidates:
+            correspondence_keys = sorted(
+                set(records_by_key_a) & set(records_by_key_b),
+                key=lambda key: (city.SIDE_COMPONENT_CONNECTOR_LAYER_PRIORITY.get(key[0], 50), key[1]),
+            )
+            for layer_name, component_type in correspondence_keys:
+                side_records_a = sorted(records_by_key_a[(layer_name, component_type)], key=city.corner_component_record_order_key)
+                side_records_b = sorted(records_by_key_b[(layer_name, component_type)], key=city.corner_component_record_order_key)
+                for ordinal, (record, nearest) in enumerate(zip(side_records_a, side_records_b)):
+                    center_point = record.get("center_point")
+                    if (
+                        center_point is not None
+                        and nearest.get("center_point") is not None
+                        and float(center_point.distance(nearest["center_point"])) > city.JUNCTION_SIDE_COMPONENT_CONNECTOR_MAX_PAIR_GAP_M
+                    ):
                         continue
-                    geom = record.get("geom")
-                    nearest = min(
-                        candidates,
-                        key=lambda candidate: (
-                            float(geom.distance(candidate["geom"]))
-                            if geom is not None
-                            and not geom.is_empty
-                            and candidate.get("geom") is not None
-                            and not candidate["geom"].is_empty
-                            else float("inf"),
-                            abs(float(record["lateral_center"]) - float(candidate["lateral_center"])),
-                        ),
+                    connector_key = city.junction_corner_component_connector_key(
+                        surface_idx,
+                        arm_a_id,
+                        arm_b_id,
+                        layer_name,
+                        component_type,
+                        ordinal,
                     )
-                    expected_side_record_ids.add(int(record["record_id"]))
-                    expected_side_record_ids.add(int(nearest["record_id"]))
+                    record_id = int(record["record_id"])
+                    nearest_id = int(nearest["record_id"])
+                    expected_side_record_ids.add(record_id)
+                    expected_side_record_ids.add(nearest_id)
+                    expected_side_connector_keys[record_id] = connector_key
+                    expected_side_connector_keys[nearest_id] = connector_key
 
         expected_side_keys = {
             (
@@ -607,7 +688,7 @@ def summarize_junction_element_connectivity(
                 key = (road_idx, layer, component_type, str(component_idx))
                 geom = component_geom(key)
                 gap = float(surface_geom.distance(geom)) if geom is not None and not geom.is_empty else None
-                if component_type in {"non_motor_lane", "parking_lane"} and geom is not None and not geom.is_empty:
+                if component_type in city.JUNCTION_SIDE_DRIVABLE_COMPONENT_TYPES and geom is not None and not geom.is_empty:
                     match_key = city.junction_side_component_match_key(component_type, left_offset, right_offset)
                     if (road_idx, layer, component_type, str(component_idx), connection_level) not in expected_side_keys:
                         continue
@@ -636,7 +717,11 @@ def summarize_junction_element_connectivity(
                 record["component_key"],
             )
             geom = component_geom(key)
-            connector = connector_geom((surface_idx, record["component_match_key"], record["connection_level"]))
+            connector_key = expected_side_connector_keys.get(
+                int(record["record_id"]),
+                record["component_match_key"],
+            )
+            connector = connector_geom((surface_idx, connector_key, record["connection_level"]))
             gap = (
                 float(connector.distance(geom))
                 if connector is not None
@@ -833,6 +918,8 @@ def main() -> None:
         junction_surfaces,
         component_geoms_by_key,
         clip_profiles.get("roadside", {}),
+        clip_profiles.get("drivable", {}),
+        clip_profiles.get("divider", {}),
     )
 
     report = {
@@ -846,7 +933,7 @@ def main() -> None:
             "deep_area_m2": f"Area that remains inside the junction surface after a {CORE_INSET_M} m inward buffer; this flags true stacking beyond seam blending.",
             "asset_inside_counts": "Street light and tree checks use asset XY center points.",
             "connectivity": "Each selected junction member road must have a drivable surface within the tolerance of its junction surface.",
-            "element_connectivity": "Drivable components must touch the junction surface; side components and curbs must touch generated same-plane connector patches.",
+            "element_connectivity": "Drivable components must touch the junction surface; side components must touch generated same-plane connector patches.",
         },
         "layers": {},
         "assets": assets,
