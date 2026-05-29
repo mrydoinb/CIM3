@@ -759,6 +759,7 @@ JUNCTION_SIDE_COMPONENT_TYPES = {
 }
 JUNCTION_SIDE_COMPONENT_TRANSITION_TYPES = {"sidewalk", "green_belt", "facility_belt"}
 JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_TYPES = {"sidewalk", "green_belt", "facility_belt"}
+JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES = {"sidewalk", "green_belt", "facility_belt"}
 JUNCTION_SIDE_DRIVABLE_COMPONENT_TYPES = DRIVABLE_COMPONENT_TYPES & JUNCTION_SIDE_COMPONENT_TYPES
 JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES = {"non_motor_lane", "parking_lane"}
 JUNCTION_CORNER_COMPONENT_CONNECTOR_TYPES = set(JUNCTION_SIDE_COMPONENT_TYPES) - {"service_lane"}
@@ -2350,6 +2351,19 @@ def mesh_center_inside_polygon(mesh: trimesh.Trimesh, geom) -> bool:
 
 
 def filter_meshes_outside_polygon(meshes: list[trimesh.Trimesh], geom) -> tuple[list[trimesh.Trimesh], int]:
+    if geom is None or geom.is_empty:
+        return meshes, 0
+    kept = []
+    removed = 0
+    for mesh in meshes:
+        if mesh_center_inside_polygon(mesh, geom):
+            removed += 1
+            continue
+        kept.append(mesh)
+    return kept, removed
+
+
+def filter_meshes_with_center_inside_polygon(meshes: list[trimesh.Trimesh], geom) -> tuple[list[trimesh.Trimesh], int]:
     if geom is None or geom.is_empty:
         return meshes, 0
     kept = []
@@ -4588,7 +4602,9 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                 for segment_idx, (segment, distance_offset) in enumerate(clipped_segments_for(profile)):
                     if segment is None or segment.is_empty:
                         continue
-                    if component_type in RAISED_COMPONENT_TYPES:
+                    if component_type in JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES:
+                        component_clip_mask = junction_side_component_edge_clip_geom
+                    elif component_type in RAISED_COMPONENT_TYPES:
                         component_clip_mask = side_component_conflict_clip_geom
                     elif component_type in JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES:
                         component_clip_mask = side_drivable_component_conflict_clip_geom
@@ -4729,23 +4745,21 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     for group_name, approach_parts in junction_approach_surface_mesh_groups.items():
         component_mesh_groups.setdefault(group_name, []).extend(approach_parts)
 
-    # Crosswalks and stop lines must overlap the junction approach zone but not
-    # sit inside the conflict-area core. These filters convert that rule into a
-    # simple center/footprint test before the layer meshes are merged.
+    # Stop lines stay outside the junction throat. Crosswalks may straddle the
+    # throat edge, so only remove them when the stripe center falls in the core;
+    # footprint-level clipping would delete individual zebra stripes and create
+    # broken crossings.
     if junction_mask_geom is not None:
         road_generation_log("Filtering crosswalk and stop-line meshes against junction masks.")
-        crosswalk_meshes, removed_crosswalks = filter_meshes_outside_polygon(
+        crosswalk_meshes, removed_crosswalks = filter_meshes_with_center_inside_polygon(
             crosswalk_meshes,
-            junction_marking_filter_geom,
+            junction_mask_geom,
         )
         stop_line_meshes, removed_stop_lines = filter_meshes_outside_polygon(
             stop_line_meshes,
             junction_marking_filter_geom,
         )
-        crosswalk_meshes, removed_crosswalk_overlaps = filter_meshes_without_polygon_overlap(
-            crosswalk_meshes,
-            junction_mask_geom,
-        )
+        removed_crosswalk_overlaps = 0
         stop_line_meshes, removed_stop_line_overlaps = filter_meshes_without_polygon_overlap(
             stop_line_meshes,
             junction_mask_geom,

@@ -2659,13 +2659,107 @@ def evenly_limit_asset_distances(distances: list[float], max_assets: int, side_m
     if max_assets <= 0 or not ordered:
         return []
     assets_per_distance = 2 if side_mode == "both" else 1
-    max_distance_count = max(1, int(math.ceil(max_assets / assets_per_distance)))
+    return evenly_limit_distance_slots(ordered, max(1, int(math.ceil(max_assets / assets_per_distance))))
+
+
+def evenly_limit_distance_slots(distances: list[float], max_distance_count: int) -> list[float]:
+    ordered = sorted(set(round(float(distance), 3) for distance in distances))
+    if max_distance_count <= 0 or not ordered:
+        return []
     if len(ordered) <= max_distance_count:
         return ordered
     if max_distance_count == 1:
         return [ordered[len(ordered) // 2]]
     indices = sorted({round(i * (len(ordered) - 1) / (max_distance_count - 1)) for i in range(max_distance_count)})
     return [ordered[int(index)] for index in indices]
+
+
+def component_lateral_spans_for_row(row: pd.Series) -> list[tuple[str, float, float, float]]:
+    spans: list[tuple[str, float, float, float]] = []
+    components = cross_section_components_for_row(row)
+    total_width = component_total_width(components)
+    cursor = -total_width / 2.0
+    for component in components:
+        width = float(component.get("width", 0.0) or 0.0)
+        if width <= 0.05:
+            cursor += max(width, 0.0)
+            continue
+        left = cursor
+        right = cursor + width
+        spans.append((str(component.get("type", "")).lower(), left, right, width))
+        cursor += width
+    return spans
+
+
+def green_belt_lateral_offsets_for_row(row: pd.Series) -> list[float]:
+    offsets: list[float] = []
+    for component_type, left, right, _ in component_lateral_spans_for_row(row):
+        if component_type == "green_belt":
+            offsets.append((left + right) * 0.5)
+    return offsets
+
+
+def tree_lateral_offsets_for_row(row: pd.Series) -> list[float]:
+    spans = component_lateral_spans_for_row(row)
+    green_belt_offsets = [
+        (left + right) * 0.5
+        for component_type, left, right, width in spans
+        if component_type == "green_belt" and width >= 1.2
+    ]
+    if green_belt_offsets:
+        return sorted(set(round(float(offset), 3) for offset in green_belt_offsets))
+
+    side_divider_offsets = [
+        (left + right) * 0.5
+        for component_type, left, right, width in spans
+        if component_type == "side_divider" and width >= 1.5
+    ]
+    return sorted(set(round(float(offset), 3) for offset in side_divider_offsets))
+
+
+def component_inner_edge_offset(left: float, right: float, width: float, inset: float) -> float:
+    center = (float(left) + float(right)) * 0.5
+    inset = min(max(float(inset), 0.0), max(float(width) * 0.5, 0.0))
+    if center < -0.05:
+        return float(right) - inset
+    if center > 0.05:
+        return float(left) + inset
+    return center
+
+
+def street_light_lateral_offsets_for_row(row: pd.Series, fallback_lateral: float) -> list[float]:
+    placement_priority = {
+        "side_divider": 0,
+        "facility_belt": 1,
+        "sidewalk": 2,
+        "green_belt": 3,
+    }
+    tree_offsets = set(tree_lateral_offsets_for_row(row))
+    best_by_side: dict[float, tuple[int, float]] = {}
+    for component_type, left, right, width in component_lateral_spans_for_row(row):
+        priority = placement_priority.get(component_type)
+        if priority is None:
+            continue
+        if component_type in {"side_divider", "facility_belt"}:
+            offset = (left + right) * 0.5
+        elif component_type == "green_belt":
+            offset = component_inner_edge_offset(left, right, width, max(0.8, width * 0.25))
+        else:
+            offset = component_inner_edge_offset(left, right, width, max(0.65, width * 0.25))
+        if component_type == "side_divider" and round(float(offset), 3) in tree_offsets:
+            continue
+        side = -1.0 if offset < -0.05 else 1.0 if offset > 0.05 else 0.0
+        previous = best_by_side.get(side)
+        if previous is None or priority < previous[0] or (
+            priority == previous[0] and abs(offset) < abs(previous[1])
+        ):
+            best_by_side[side] = (priority, offset)
+
+    offsets = [value for _, value in sorted(best_by_side.values(), key=lambda item: item[1])]
+    if offsets:
+        return offsets
+    fallback_lateral = abs(float(fallback_lateral))
+    return [-fallback_lateral, fallback_lateral]
 
 
 def asset_mesh_group_name(mesh: trimesh.Trimesh) -> str:
@@ -2702,9 +2796,15 @@ def build_street_light_meshes(
     meshes = []
     line: LineString = row.geometry
     profile = road_asset_profile(row, rule)
-    lateral = float(profile["street_light_lateral_m"])
+    lateral_offsets = street_light_lateral_offsets_for_row(row, float(profile["street_light_lateral_m"]))
+    if not lateral_offsets:
+        return meshes
+    corridor_width = max(
+        rule.road_width + 2.0 * rule.sidewalk_width + 2.4,
+        component_total_width(cross_section_components_for_row(row)) + 2.4,
+    )
     road_pavement = line_buffer(line, rule.road_width + STREET_LIGHT_POLE_ROAD_CLEARANCE_M)
-    total_corridor = line_buffer(line, rule.road_width + 2.0 * rule.sidewalk_width + 2.4)
+    total_corridor = line_buffer(line, corridor_width)
     junction_distances = row_junction_distances(row)
     spacing = float(profile["street_light_spacing_m"])
     candidate_distances = list(iter_line_distances(line, spacing, spacing / 2.0))
@@ -2727,10 +2827,9 @@ def build_street_light_meshes(
         if distance_in_ranges(distance, blocked_distance_ranges):
             continue
         filtered_distances.append(distance)
-    filtered_distances = evenly_limit_asset_distances(
+    filtered_distances = evenly_limit_distance_slots(
         filtered_distances,
-        MAX_STREET_LIGHTS_PER_ROAD,
-        str(profile["street_light_sides"]),
+        max(1, int(math.ceil(MAX_STREET_LIGHTS_PER_ROAD / max(1, len(lateral_offsets))))),
     )
 
     placed_idx = 0
@@ -2740,11 +2839,12 @@ def build_street_light_meshes(
         point, tangent, normal = line_frame_at_distance(line, distance)
         nx, ny = normal
 
-        for side in asset_sides(str(profile["street_light_sides"]), dist_idx):
+        for lateral_offset in lateral_offsets:
             if placed_idx >= MAX_STREET_LIGHTS_PER_ROAD:
                 break
-            x = point.x + nx * lateral * side
-            y = point.y + ny * lateral * side
+            side = 1.0 if lateral_offset >= 0.0 else -1.0
+            x = point.x + nx * lateral_offset
+            y = point.y + ny * lateral_offset
             pole_point = Point(x, y)
             if road_pavement.buffer(0.05).contains(pole_point):
                 continue
@@ -2813,7 +2913,10 @@ def build_tree_meshes(
     if line.length < spacing * 0.8:
         return meshes
 
-    lateral = float(profile["tree_lateral_m"])
+    tree_offsets = tree_lateral_offsets_for_row(row)
+    if not tree_offsets:
+        return meshes
+
     junction_distances = row_junction_distances(row)
     junction_clearance = max(
         TREE_JUNCTION_CLEARANCE_M,
@@ -2829,20 +2932,19 @@ def build_tree_meshes(
         if distance_in_ranges(distance, blocked_distance_ranges):
             continue
         filtered_distances.append(distance)
-    filtered_distances = evenly_limit_asset_distances(
+    filtered_distances = evenly_limit_distance_slots(
         filtered_distances,
-        MAX_TREES_PER_ROAD,
-        str(profile["tree_sides"]),
+        max(1, int(math.ceil(MAX_TREES_PER_ROAD / max(1, len(tree_offsets))))),
     )
 
     tree_idx = 0
-    for dist_idx, distance in enumerate(filtered_distances):
+    for distance in filtered_distances:
         if tree_idx >= MAX_TREES_PER_ROAD:
             break
-        for side in asset_sides(str(profile["tree_sides"]), dist_idx):
+        for lateral_offset in tree_offsets:
             if tree_idx >= MAX_TREES_PER_ROAD:
                 break
-            x, y = line_side_point(line, distance, lateral * side)
+            x, y = line_side_point(line, distance, lateral_offset)
             # Keep trees out of the entire junction throat, not only the centerline
             # point, so crowns do not appear in the middle of intersection surfaces.
             if any(Point(x, y).distance(line.interpolate(jd)) <= junction_clearance for jd in junction_distances):
