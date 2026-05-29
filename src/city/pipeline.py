@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 import shapely
 from shapely.geometry import LineString, MultiLineString, Point, MultiPoint, Polygon, MultiPolygon, GeometryCollection
-from shapely.ops import substring, unary_union
+from shapely.ops import nearest_points, substring, unary_union
 import trimesh
 
 from road import generator as road_gen
@@ -133,7 +133,17 @@ ENABLE_ROUNDED_JUNCTION_SURFACES = True
 GENERATE_JUNCTION_CROSSWALKS = True
 GENERATE_JUNCTION_STOP_LINES = True
 GENERATE_JUNCTION_SIDE_COMPONENT_CONNECTORS = True
+GENERATE_JUNCTION_APPROACH_SURFACES = False
 JUNCTION_MARKING_CLEARANCE_M = 11.0
+JUNCTION_MINOR_APPROACH_EXTRA_SETBACK_M = 6.0
+JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_GAP_M = 1.5
+JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_RATIO = 0.95
+JUNCTION_WIDE_THROUGH_MIN_WIDTH_M = 14.0
+JUNCTION_WIDE_THROUGH_CLEARANCE_M = 0.75
+JUNCTION_WIDE_THROUGH_MIN_CROSSING_SIN = 0.35
+JUNCTION_THROUGH_CORRIDOR_MIN_OPPOSING_DEG = 135.0
+JUNCTION_THROUGH_CORRIDOR_PRIORITY_BONUS_M = 3.0
+JUNCTION_THROUGH_CORRIDOR_WIDTH_MARGIN_M = 1.5
 JUNCTION_SURFACE_Z_OFFSET_M = 0.026
 JUNCTION_PATCH_SMOOTH_M = 2.8
 JUNCTION_PATCH_MIN_THROAT_M = 10.0
@@ -141,11 +151,20 @@ JUNCTION_PATCH_MAX_THROAT_M = 48.0
 JUNCTION_SIDE_COMPONENT_CONNECTOR_SMOOTH_M = 2.8
 JUNCTION_SIDE_COMPONENT_CONNECTOR_MIN_AREA_M2 = 0.12
 JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M = 6.0
-JUNCTION_SIDE_COMPONENT_CONNECTOR_BRIDGE_M = 0.0
+JUNCTION_SIDE_COMPONENT_CONNECTOR_BRIDGE_M = 0.30
 JUNCTION_SIDE_COMPONENT_CONNECTOR_ROAD_CLEARANCE_M = 0.0
-JUNCTION_SIDE_COMPONENT_CONNECTOR_SEAM_TOUCH_M = 0.0
+JUNCTION_SIDE_COMPONENT_CONNECTOR_SEAM_TOUCH_M = 0.08
 JUNCTION_SIDE_COMPONENT_CONNECTOR_APPROACH_OVERLAP_M = 6.0
 JUNCTION_SIDE_COMPONENT_CONNECTOR_MAX_PAIR_GAP_M = 60.0
+JUNCTION_SIDE_COMPONENT_TRANSITION_MAX_PAIR_GAP_M = 24.0
+JUNCTION_SIDE_COMPONENT_PERIMETER_MAX_PAIR_GAP_M = 18.0
+JUNCTION_SIDE_COMPONENT_PERIMETER_BRIDGE_M = 1.10
+JUNCTION_SIDE_DRIVABLE_PERIMETER_MAX_PAIR_GAP_M = 32.0
+JUNCTION_SIDE_DRIVABLE_PERIMETER_BRIDGE_M = 1.35
+JUNCTION_SIDE_COMPONENT_DIRECT_BRIDGE_EXTRA_M = 0.12
+JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_MAX_PAIR_GAP_M = 42.0
+JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_OUTSET_M = 4.0
+JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_WIDTH_FACTOR = 1.25
 JUNCTION_CORNER_COMPONENT_CONNECTOR_MIN_GAP_DEG = 25.0
 JUNCTION_CORNER_COMPONENT_CONNECTOR_MAX_GAP_DEG = 150.0
 JUNCTION_CORNER_COMPONENT_CONNECTOR_CURVE_SAMPLES = 10
@@ -161,6 +180,8 @@ JUNCTION_DRIVABLE_BLEND_OVERLAP_M = 0.0
 JUNCTION_ROADSIDE_SEAM_OVERLAP_M = 0.8
 JUNCTION_DRIVABLE_CORE_CLIP_INSET_M = 0.0
 JUNCTION_ROADSIDE_RETREAT_M = 0.0
+JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M = 0.0
+JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M = 0.0
 JUNCTION_MARKING_RETREAT_M = 0.35
 JUNCTION_COMPONENT_WIDTH_BUCKET_M = 0.05
 JUNCTION_CHAINAGE_EPSILON_M = 0.02
@@ -172,18 +193,23 @@ CROSSWALK_STRIPE_WIDTH_M = 0.45
 CROSSWALK_STRIPE_GAP_M = 0.60
 STOP_LINE_WIDTH_M = 0.45
 STOP_LINE_TO_CROSSWALK_GAP_M = 0.0
+JUNCTION_STOP_LINE_SETBACK_M = 2.0
 JUNCTION_SEMANTIC_SAMPLE_DISTANCE_M = 28.0
 JUNCTION_MARKING_LATERAL_INSET_M = 0.30
 JUNCTION_TRANSVERSE_MARKING_CENTER_GAP_M = 0.75
+JUNCTION_CROSSWALK_CENTER_GAP_M = 0.0
+JUNCTION_STOP_LINE_CENTER_GAP_M = 0.0
+JUNCTION_CROSSWALK_TOP_Z_OFFSET_M = 0.09
+JUNCTION_STOP_LINE_TOP_Z_OFFSET_M = 0.085
 MARKING_SWEEP_SAMPLE_INTERVAL_M = 8.0
 
 COLORS = {
     "gis_basemap": [88, 118, 94, 255],
     "gis_grid": [132, 150, 132, 255],
     "road_surface": [38, 40, 42, 255],
-    "road_surface_main": [36, 38, 40, 255],
-    "road_surface_service": [48, 50, 50, 255],
-    "road_surface_branch": [58, 60, 58, 255],
+    "road_surface_main": [38, 40, 42, 255],
+    "road_surface_service": [38, 40, 42, 255],
+    "road_surface_branch": [38, 40, 42, 255],
     "non_motor_lane": [54, 72, 66, 255],
     "parking_lane": [66, 68, 66, 255],
     "sidewalk": [188, 186, 174, 255],
@@ -360,6 +386,22 @@ def local_segment_clip_mask(
     radius = max(abs(float(left_offset)), abs(float(right_offset))) + max(float(margin), 0.0)
     try:
         envelope = line.buffer(max(radius, 0.1), cap_style=1, join_style=1, resolution=3)
+    except Exception:
+        return clip_mask
+    if envelope is None or envelope.is_empty or not clip_mask.intersects(envelope):
+        return None
+    try:
+        local = clip_mask.intersection(envelope)
+        return road_gen.clean_polygonal(local) if local is not None and not local.is_empty else None
+    except Exception:
+        return clip_mask
+
+
+def local_polygon_clip_mask(geom, clip_mask, margin: float = 0.35):
+    if clip_mask is None or clip_mask.is_empty or geom is None or geom.is_empty:
+        return None
+    try:
+        envelope = geom.envelope.buffer(max(float(margin), 0.0), resolution=2, join_style=1)
     except Exception:
         return clip_mask
     if envelope is None or envelope.is_empty or not clip_mask.intersects(envelope):
@@ -703,6 +745,7 @@ JUNCTION_ASPHALT_COMPONENT_TYPES = {"main_carriageway", "carriageway"}
 LANE_MARKING_COMPONENT_TYPES = set(VEHICULAR_ROAD_COMPONENT_TYPES)
 RAISED_COMPONENT_TYPES = {"sidewalk", "green_belt", "facility_belt", "side_divider", "divider", "median"}
 JUNCTION_DIVIDER_COMPONENT_TYPES = {"side_divider", "divider", "median"}
+JUNCTION_STOP_LINE_COMPONENT_TYPES = {"main_carriageway", "carriageway"}
 JUNCTION_APPROACH_CONTROL_COMPONENT_TYPES = DRIVABLE_COMPONENT_TYPES | JUNCTION_DIVIDER_COMPONENT_TYPES
 JUNCTION_SIDE_COMPONENT_TYPES = {
     "service_lane",
@@ -710,10 +753,13 @@ JUNCTION_SIDE_COMPONENT_TYPES = {
     "green_belt",
     "facility_belt",
     "non_motor_lane",
-    "parking_lane",
 }
+JUNCTION_SIDE_COMPONENT_TRANSITION_TYPES = {"sidewalk", "green_belt", "facility_belt"}
+JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_TYPES = {"sidewalk", "green_belt", "facility_belt"}
 JUNCTION_SIDE_DRIVABLE_COMPONENT_TYPES = DRIVABLE_COMPONENT_TYPES & JUNCTION_SIDE_COMPONENT_TYPES
-JUNCTION_CORNER_COMPONENT_CONNECTOR_TYPES = set(JUNCTION_SIDE_COMPONENT_TYPES)
+JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES = {"non_motor_lane", "parking_lane"}
+JUNCTION_CORNER_COMPONENT_CONNECTOR_TYPES = set(JUNCTION_SIDE_COMPONENT_TYPES) - {"service_lane"}
+JUNCTION_EDGE_CLIPPED_COMPONENT_TYPES = JUNCTION_SIDE_COMPONENT_TYPES | {"parking_lane"}
 OPPOSING_CARRIAGEWAY_TYPES = {"main_carriageway", "carriageway"}
 SIDE_COMPONENT_CONNECTOR_LAYER_PRIORITY = {
     "Road_Surface_Service": 1,
@@ -724,6 +770,13 @@ SIDE_COMPONENT_CONNECTOR_LAYER_PRIORITY = {
     "Green_Belt": 6,
     "Facility_Belt": 7,
     "Sidewalk": 8,
+}
+SIDE_COMPONENT_CONNECTOR_KIND_PRIORITY = {
+    "main_road_attach": 0,
+    "corner": 1,
+    "corner_transition": 1,
+    "perimeter": 2,
+    "approach": 3,
 }
 
 
@@ -1123,13 +1176,327 @@ def junction_approach_offsets_for_row(row: pd.Series, rule: Any) -> tuple[float,
         crosswalk_offset
         + CROSSWALK_BAND_LENGTH_M * 0.5
         + STOP_LINE_TO_CROSSWALK_GAP_M
+        + JUNCTION_STOP_LINE_SETBACK_M
         + STOP_LINE_WIDTH_M * 0.5
     )
     return crosswalk_offset, stop_line_offset
 
 
+def arm_direction_vector(arm: dict[str, Any]) -> tuple[float, float] | None:
+    direction = arm.get("direction_out")
+    if not direction or len(direction) < 2:
+        return None
+    try:
+        dx = float(direction[0])
+        dy = float(direction[1])
+    except Exception:
+        return None
+    length = math.hypot(dx, dy)
+    if length <= 1e-6:
+        return None
+    return (dx / length, dy / length)
+
+
+def arm_is_lower_order_than(arm: dict[str, Any], other: dict[str, Any]) -> bool:
+    priority = int(arm.get("road_priority", 0) or 0)
+    other_priority = int(other.get("road_priority", 0) or 0)
+    width = float(arm.get("drivable_width_m", 0.0) or 0.0)
+    other_width = float(other.get("drivable_width_m", 0.0) or 0.0)
+    if other_priority > priority:
+        return True
+    return (
+        other_width - width >= float(JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_GAP_M)
+        and width <= other_width * float(JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_RATIO)
+    )
+
+
+def arm_signed_separation_deg(arm_a: dict[str, Any], arm_b: dict[str, Any]) -> float | None:
+    direction_a = arm_direction_vector(arm_a)
+    direction_b = arm_direction_vector(arm_b)
+    if direction_a is None or direction_b is None:
+        return None
+    return abs(signed_angle_deg(direction_a, direction_b))
+
+
+def junction_opposing_arm_pairs(
+    arms: list[dict[str, Any]],
+    min_opposing_deg: float | None = None,
+) -> list[tuple[dict[str, Any], dict[str, Any], float]]:
+    threshold = float(JUNCTION_THROUGH_CORRIDOR_MIN_OPPOSING_DEG if min_opposing_deg is None else min_opposing_deg)
+    pairs: list[tuple[dict[str, Any], dict[str, Any], float]] = []
+    for idx, arm_a in enumerate(arms):
+        for arm_b in arms[idx + 1:]:
+            separation = arm_signed_separation_deg(arm_a, arm_b)
+            if separation is None or separation < threshold:
+                continue
+            pairs.append((arm_a, arm_b, separation))
+    pairs.sort(key=lambda item: corridor_pair_score(item[0], item[1], item[2]), reverse=True)
+    return pairs
+
+
+def corridor_pair_score(arm_a: dict[str, Any], arm_b: dict[str, Any], separation_deg: float) -> float:
+    priority = max(int(arm_a.get("road_priority", 0) or 0), int(arm_b.get("road_priority", 0) or 0))
+    width = max(float(arm_a.get("drivable_width_m", 0.0) or 0.0), float(arm_b.get("drivable_width_m", 0.0) or 0.0))
+    opposite_fit = max(0.0, min(1.0, float(separation_deg) / 180.0))
+    return width + priority * float(JUNCTION_THROUGH_CORRIDOR_PRIORITY_BONUS_M) + opposite_fit * 4.0
+
+
+def arm_in_corridor_pair(arm: dict[str, Any], corridor: tuple[dict[str, Any], dict[str, Any], float]) -> bool:
+    arm_id = str(arm.get("arm_id", ""))
+    return arm_id in {str(corridor[0].get("arm_id", "")), str(corridor[1].get("arm_id", ""))}
+
+
+def corridor_pair_direction(corridor: tuple[dict[str, Any], dict[str, Any], float]) -> tuple[float, float] | None:
+    direction_a = arm_direction_vector(corridor[0])
+    direction_b = arm_direction_vector(corridor[1])
+    if direction_a is None and direction_b is None:
+        return None
+    if direction_a is None:
+        return direction_b
+    if direction_b is None:
+        return direction_a
+    # Opposing arms should point away from the junction in opposite directions;
+    # flip one vector before averaging so the result follows the corridor axis.
+    dx = direction_a[0] - direction_b[0]
+    dy = direction_a[1] - direction_b[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-6:
+        return direction_a
+    return (dx / length, dy / length)
+
+
+def corridor_pair_priority(corridor: tuple[dict[str, Any], dict[str, Any], float]) -> int:
+    return max(int(corridor[0].get("road_priority", 0) or 0), int(corridor[1].get("road_priority", 0) or 0))
+
+
+def corridor_pair_width(corridor: tuple[dict[str, Any], dict[str, Any], float]) -> float:
+    return max(
+        float(corridor[0].get("drivable_width_m", 0.0) or 0.0),
+        float(corridor[1].get("drivable_width_m", 0.0) or 0.0),
+    )
+
+
+def arm_is_lower_order_than_corridor(
+    arm: dict[str, Any],
+    corridor: tuple[dict[str, Any], dict[str, Any], float],
+) -> bool:
+    priority = int(arm.get("road_priority", 0) or 0)
+    width = float(arm.get("drivable_width_m", 0.0) or 0.0)
+    corridor_priority = corridor_pair_priority(corridor)
+    corridor_width = corridor_pair_width(corridor)
+    if priority < corridor_priority:
+        return True
+    return corridor_width - width >= float(JUNCTION_THROUGH_CORRIDOR_WIDTH_MARGIN_M)
+
+
+def junction_type_from_arm_geometry(arms: list[dict[str, Any]]) -> str:
+    arm_count = len(arms)
+    if arm_count <= 1:
+        return "UNKNOWN"
+    if any("roundabout" in arm["road_class"].lower() or "circular" in arm["road_class"].lower() for arm in arms):
+        return "ROUNDABOUT_LIKE"
+    if any("link" in arm["road_class"].lower() or "ramp" in arm["road_class"].lower() for arm in arms):
+        return "RAMP_MERGE"
+    if arm_count <= 2:
+        return "TWO_ARM_CONNECTION"
+    opposing_pairs = junction_opposing_arm_pairs(arms)
+    gaps = angular_gaps_deg([arm["direction_out"] for arm in arms])
+    max_gap = max(gaps) if gaps else 0.0
+    min_gap = min(gaps) if gaps else 0.0
+    if arm_count == 3:
+        return "T_JUNCTION" if opposing_pairs or max_gap > 150.0 else "Y_JUNCTION"
+    if arm_count == 4:
+        if len(opposing_pairs) >= 2 and min_gap > 35.0 and max_gap < 160.0:
+            return "CROSS_JUNCTION"
+        return "SKEWED_CROSS_OR_MULTI_ARM"
+    return "MULTI_ARM_JUNCTION"
+
+
+def junction_corridor_required_crosswalk_offset_m(
+    arm: dict[str, Any],
+    arms: list[dict[str, Any]],
+) -> float:
+    junction_type = junction_type_from_arm_geometry(arms)
+    if junction_type not in {"T_JUNCTION", "CROSS_JUNCTION", "SKEWED_CROSS_OR_MULTI_ARM", "MULTI_ARM_JUNCTION"}:
+        return 0.0
+    direction = arm_direction_vector(arm)
+    if direction is None:
+        return 0.0
+    required = 0.0
+    min_crossing_sin = max(float(JUNCTION_WIDE_THROUGH_MIN_CROSSING_SIN), 0.05)
+    for corridor in junction_opposing_arm_pairs(arms):
+        if arm_in_corridor_pair(arm, corridor):
+            continue
+        corridor_width = corridor_pair_width(corridor)
+        if corridor_width < float(JUNCTION_WIDE_THROUGH_MIN_WIDTH_M):
+            continue
+        if not arm_is_lower_order_than_corridor(arm, corridor):
+            continue
+        corridor_direction = corridor_pair_direction(corridor)
+        if corridor_direction is None:
+            continue
+        crossing_sin = abs(direction[0] * corridor_direction[1] - direction[1] * corridor_direction[0])
+        if crossing_sin < min_crossing_sin:
+            continue
+        # T-junction source centerlines often terminate at the through-road
+        # edge, not at its centerline. Use the full through corridor for the
+        # minor stem so its stop line/crosswalk clears the main-road envelope.
+        corridor_extent = corridor_width if junction_type == "T_JUNCTION" else corridor_width * 0.5
+        required = max(
+            required,
+            corridor_extent / max(crossing_sin, min_crossing_sin)
+            + CROSSWALK_BAND_LENGTH_M * 0.5
+            + max(float(JUNCTION_WIDE_THROUGH_CLEARANCE_M), 0.0),
+        )
+    return required
+
+
+def junction_wide_through_required_crosswalk_offset_m(
+    arm: dict[str, Any],
+    arms: list[dict[str, Any]],
+) -> float:
+    """Required offset for an approach mark to clear a wider through road."""
+    direction = arm_direction_vector(arm)
+    if direction is None:
+        return 0.0
+    arm_id = str(arm.get("arm_id", ""))
+    max_required_offset = 0.0
+    min_crossing_sin = max(float(JUNCTION_WIDE_THROUGH_MIN_CROSSING_SIN), 0.05)
+    for other in arms:
+        if str(other.get("arm_id", "")) == arm_id:
+            continue
+        other_width = float(other.get("drivable_width_m", 0.0) or 0.0)
+        if other_width < float(JUNCTION_WIDE_THROUGH_MIN_WIDTH_M):
+            continue
+        if not arm_is_lower_order_than(arm, other):
+            continue
+        other_direction = arm_direction_vector(other)
+        if other_direction is None:
+            continue
+        crossing_sin = abs(direction[0] * other_direction[1] - direction[1] * other_direction[0])
+        if crossing_sin < min_crossing_sin:
+            continue
+        through_half_extent = (other_width * 0.5) / max(crossing_sin, min_crossing_sin)
+        max_required_offset = max(
+            max_required_offset,
+            through_half_extent
+            + CROSSWALK_BAND_LENGTH_M * 0.5
+            + max(float(JUNCTION_WIDE_THROUGH_CLEARANCE_M), 0.0),
+        )
+    return max(max_required_offset, junction_corridor_required_crosswalk_offset_m(arm, arms))
+
+
+def junction_arm_extra_setback_m(arm: dict[str, Any], arms: list[dict[str, Any]]) -> float:
+    if not arms:
+        return 0.0
+    priority = int(arm.get("road_priority", 0) or 0)
+    width = float(arm.get("drivable_width_m", 0.0) or 0.0)
+    max_priority = max((int(item.get("road_priority", 0) or 0) for item in arms), default=priority)
+    max_width = max((float(item.get("drivable_width_m", 0.0) or 0.0) for item in arms), default=width)
+    priority_is_minor = priority < max_priority
+    width_is_minor = (
+        max_width - width >= float(JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_GAP_M)
+        and width <= max_width * float(JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_RATIO)
+    )
+    if priority_is_minor or width_is_minor:
+        extra_setback = max(float(JUNCTION_MINOR_APPROACH_EXTRA_SETBACK_M), 0.0)
+    else:
+        extra_setback = 0.0
+
+    base_crosswalk_offset = float(arm.get("crosswalk_base_offset_m", 0.0) or 0.0)
+    required_crosswalk_offset = junction_wide_through_required_crosswalk_offset_m(arm, arms)
+    if base_crosswalk_offset > 0.0 and required_crosswalk_offset > 0.0:
+        extra_setback = max(extra_setback, required_crosswalk_offset - base_crosswalk_offset)
+    return max(extra_setback, 0.0)
+
+
+def junction_approach_extra_setbacks_by_road(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    surface_geometries: list[dict[str, Any]],
+) -> dict[Any, list[tuple[float, float, float]]]:
+    extra_by_road: dict[Any, list[tuple[float, float, float]]] = defaultdict(list)
+    for surface in surface_geometries:
+        point = surface.get("point")
+        if point is None or getattr(point, "is_empty", False):
+            continue
+        try:
+            arms = junction_arm_records(prepared_roads, rules, point, surface.get("members", []))
+        except Exception:
+            continue
+        for arm in arms:
+            extra = junction_arm_extra_setback_m(arm, arms)
+            if extra <= 0.0:
+                continue
+            road_idx = arm.get("road_idx")
+            if road_idx is None:
+                continue
+            try:
+                node_distance = float(arm.get("node_distance_m", 0.0) or 0.0)
+                sign = float(arm.get("line_direction_sign", 1.0) or 1.0)
+            except Exception:
+                continue
+            extra_by_road[road_idx].append((node_distance, sign, extra))
+    return dict(extra_by_road)
+
+
+def lookup_junction_approach_extra_setback(
+    extra_by_road: dict[Any, list[tuple[float, float, float]]] | None,
+    road_idx: Any,
+    junction_distance: float,
+    side_sign: float,
+) -> float:
+    if not extra_by_road:
+        return 0.0
+    candidates = list(extra_by_road.get(road_idx, []))
+    if not candidates:
+        candidates = list(extra_by_road.get(str(road_idx), []))
+    if not candidates:
+        return 0.0
+    best_extra = 0.0
+    best_gap = float("inf")
+    for node_distance, sign, extra in candidates:
+        if float(sign) * float(side_sign) <= 0.0:
+            continue
+        gap = abs(float(node_distance) - float(junction_distance))
+        if gap < best_gap:
+            best_gap = gap
+            best_extra = float(extra)
+    return best_extra if best_gap <= max(JUNCTION_BUCKET_CLUSTER_M, 1.0) else 0.0
+
+
 def junction_marking_across_width(road_width: float) -> float:
     return max(0.2, float(road_width) - 2.0 * JUNCTION_MARKING_LATERAL_INSET_M)
+
+
+def junction_stop_line_lateral_pieces_for_row(row: pd.Series, rule: Any) -> list[tuple[float, float]]:
+    components = road_gen.cross_section_components_for_row(row)
+    if not components:
+        components = fallback_cross_section_components(rule)
+    pieces: list[tuple[float, float]] = []
+    for component, left_offset, right_offset in component_spans(components):
+        if str(component.get("type", "")) not in JUNCTION_STOP_LINE_COMPONENT_TYPES:
+            continue
+        piece_left = min(float(left_offset), float(right_offset))
+        piece_right = max(float(left_offset), float(right_offset))
+        width = piece_right - piece_left
+        if width <= 0.05:
+            continue
+        inset = min(float(JUNCTION_MARKING_LATERAL_INSET_M), max((width - 0.2) * 0.5, 0.0))
+        piece_left += inset
+        piece_right -= inset
+        piece_width = piece_right - piece_left
+        if piece_width > 0.05:
+            pieces.append(((piece_left + piece_right) * 0.5, piece_width))
+    if pieces:
+        return pieces
+
+    fallback_width = junction_marking_across_width(vehicular_road_width_for_row(row, rule))
+    return marking_lateral_pieces_around_center_gap(
+        0.0,
+        fallback_width,
+        gap_width=JUNCTION_STOP_LINE_CENTER_GAP_M,
+    )
 
 
 def crosswalk_stripe_layout_for_width(road_width: float) -> tuple[int, float, float]:
@@ -1202,6 +1569,7 @@ def add_junction_crosswalks_and_stop_lines(
     rule: Any,
     crosswalk_meshes: list[trimesh.Trimesh],
     stop_line_meshes: list[trimesh.Trimesh],
+    approach_extra_setbacks_by_road: dict[Any, list[tuple[float, float, float]]] | None = None,
 ) -> Counter:
     """Generate crosswalk stripes and stop lines for every valid junction arm.
 
@@ -1221,7 +1589,7 @@ def add_junction_crosswalks_and_stop_lines(
 
     crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
     min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
-    marking_across_width = junction_marking_across_width(road_width)
+    stop_line_lateral_pieces = junction_stop_line_lateral_pieces_for_row(row, rule)
     stripe_count, lateral_start, stripe_step = crosswalk_stripe_layout_for_width(road_width)
     default_z = float(row.get("road_z_mean", row.get("elevation", 0.0)))
 
@@ -1231,8 +1599,16 @@ def add_junction_crosswalks_and_stop_lines(
             continue
         junction_distance = clamped_distance
         for side_sign, side_name in [(-1.0, "Before"), (1.0, "After")]:
-            crosswalk_distance = float(junction_distance) + side_sign * crosswalk_offset
-            stop_line_distance = float(junction_distance) + side_sign * stop_line_offset
+            extra_setback = lookup_junction_approach_extra_setback(
+                approach_extra_setbacks_by_road,
+                row.name,
+                junction_distance,
+                side_sign,
+            )
+            adjusted_crosswalk_offset = crosswalk_offset + extra_setback
+            adjusted_stop_line_offset = stop_line_offset + extra_setback
+            crosswalk_distance = float(junction_distance) + side_sign * adjusted_crosswalk_offset
+            stop_line_distance = float(junction_distance) + side_sign * adjusted_stop_line_offset
             if not (
                 min_margin < crosswalk_distance < line.length - min_margin
                 and min_margin < stop_line_distance < line.length - min_margin
@@ -1241,7 +1617,8 @@ def add_junction_crosswalks_and_stop_lines(
 
             stats["candidate_approach_count"] += 1
 
-            point, tangent, normal = road_gen.line_frame_at_distance(line, crosswalk_distance)
+            point, _, _ = road_gen.line_frame_at_distance(line, crosswalk_distance)
+            stop_point, marking_tangent, marking_normal = road_gen.line_frame_at_distance(line, stop_line_distance)
             crosswalk_z = road_gen.elevation_at_distance(row, crosswalk_distance, default_z=default_z)
             for stripe_idx in range(stripe_count):
                 lateral_offset = lateral_start + stripe_idx * stripe_step
@@ -1252,18 +1629,19 @@ def add_junction_crosswalks_and_stop_lines(
                 for piece_offset, piece_width in marking_lateral_pieces_around_center_gap(
                     lateral_offset,
                     CROSSWALK_STRIPE_WIDTH_M,
+                    gap_width=JUNCTION_CROSSWALK_CENTER_GAP_M,
                 ):
                     center = (
-                        point.x + normal[0] * piece_offset,
-                        point.y + normal[1] * piece_offset,
+                        point.x + marking_normal[0] * piece_offset,
+                        point.y + marking_normal[1] * piece_offset,
                     )
                     piece_mesh = oriented_rect_mesh(
                         center,
-                        tangent,
-                        normal,
+                        marking_tangent,
+                        marking_normal,
                         CROSSWALK_BAND_LENGTH_M,
                         piece_width,
-                        crosswalk_z + rule.lane_marking_z_offset + 0.026,
+                        crosswalk_z + rule.lane_marking_z_offset + JUNCTION_CROSSWALK_TOP_Z_OFFSET_M,
                         f"{mesh_name}_{round(piece_offset, 2)}",
                         COLORS["crosswalk"],
                     )
@@ -1276,25 +1654,21 @@ def add_junction_crosswalks_and_stop_lines(
 
             if not GENERATE_JUNCTION_STOP_LINES:
                 continue
-            stop_point, stop_tangent, stop_normal = road_gen.line_frame_at_distance(line, stop_line_distance)
             stop_z = road_gen.elevation_at_distance(row, stop_line_distance, default_z=default_z)
             stop_name = f"Stop_Line_{row.name}_{junction_idx}_{side_name}"
             stop_meshes = []
-            for piece_offset, piece_width in marking_lateral_pieces_around_center_gap(
-                0.0,
-                marking_across_width,
-            ):
+            for piece_offset, piece_width in stop_line_lateral_pieces:
                 center = (
-                    stop_point.x + stop_normal[0] * piece_offset,
-                    stop_point.y + stop_normal[1] * piece_offset,
+                    stop_point.x + marking_normal[0] * piece_offset,
+                    stop_point.y + marking_normal[1] * piece_offset,
                 )
                 piece_mesh = oriented_rect_mesh(
                     center,
-                    stop_tangent,
-                    stop_normal,
+                    marking_tangent,
+                    marking_normal,
                     STOP_LINE_WIDTH_M,
                     piece_width,
-                    stop_z + rule.lane_marking_z_offset + 0.024,
+                    stop_z + rule.lane_marking_z_offset + JUNCTION_STOP_LINE_TOP_Z_OFFSET_M,
                     f"{stop_name}_{round(piece_offset, 2)}",
                     COLORS["stop_line"],
                 )
@@ -1698,6 +2072,8 @@ def evaluate_junction_design_options(
         selected = dict(selected)
         selected["review_required"] = False
     return {
+        "junction_type": junction_type,
+        "junction_hierarchy": hierarchy,
         "source_node_summary": summary,
         "candidate_design_options": candidates,
         "selected_design_option": selected,
@@ -1714,6 +2090,8 @@ def selected_junction_design_for_bucket(
     arms = junction_arm_records(prepared_roads, rules, point, members)
     if len(arms) < 2:
         return {
+            "junction_type": "UNKNOWN",
+            "junction_hierarchy": "LOCAL_JUNCTION",
             "source_node_summary": {"arm_count": len(arms)},
             "candidate_design_options": [],
             "selected_design_option": {
@@ -1727,7 +2105,10 @@ def selected_junction_design_for_bucket(
         }
     junction_type = classify_city_junction_type(arms)
     hierarchy = classify_city_junction_hierarchy(arms, junction_type)
-    return evaluate_junction_design_options(arms, junction_type, hierarchy)
+    design = evaluate_junction_design_options(arms, junction_type, hierarchy)
+    design["junction_type"] = junction_type
+    design["junction_hierarchy"] = hierarchy
+    return design
 
 
 def build_rounded_junction_surface_geometries(
@@ -1764,6 +2145,8 @@ def build_rounded_junction_surface_geometries(
                 "geometry": geom,
                 "members": bucket["members"],
                 "point": bucket["point"],
+                "junction_type": design.get("junction_type", "UNKNOWN"),
+                "junction_hierarchy": design.get("junction_hierarchy", "LOCAL_JUNCTION"),
                 "design": design,
             }
         )
@@ -2121,9 +2504,27 @@ def junction_clip_range_profiles_by_road(
             node_distance = float(arm.get("node_distance_m", line.project(point)) or 0.0)
             node_distance = max(0.0, min(float(line.length), node_distance))
             sign = float(arm.get("line_direction_sign", 1.0) or 1.0)
-            _, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+            crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+            extra_setback = junction_arm_extra_setback_m(arm, arms)
+            crosswalk_offset += extra_setback
+            stop_line_offset += extra_setback
             divider_stop_offset = max(0.0, float(stop_line_offset) - STOP_LINE_WIDTH_M * 0.5)
             stop_edge_distance = node_distance + sign * divider_stop_offset
+            add_adjusted_clip_range(
+                raw_ranges["drivable"],
+                road_idx,
+                float(line.length),
+                node_distance,
+                stop_edge_distance,
+                edge_overlap=JUNCTION_DRIVABLE_BLEND_OVERLAP_M,
+            )
+            add_adjusted_clip_range(
+                raw_ranges["marking"],
+                road_idx,
+                float(line.length),
+                node_distance,
+                stop_edge_distance,
+            )
             add_adjusted_clip_range(
                 raw_ranges["divider"],
                 road_idx,
@@ -2209,11 +2610,138 @@ def clipped_component_existing_parts(
     return parts
 
 
+def build_component_conflict_clip_geom(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    clip_ranges_by_road: dict[Any, list[tuple[float, float]]],
+    component_types: set[str],
+    extra_geoms: Iterable[Any] | None = None,
+):
+    parts = [
+        geom
+        for geom in (extra_geoms or [])
+        if geom is not None and not geom.is_empty
+    ]
+    for road_idx, row in prepared_roads.iterrows():
+        line = row.geometry
+        if line is None or line.is_empty or not isinstance(line, LineString):
+            continue
+        rule = road_gen.get_road_rule(row, rules)
+        components = road_gen.cross_section_components_for_row(row)
+        if not components:
+            components = fallback_cross_section_components(rule)
+        spans = component_spans(components)
+        clip_ranges = clip_ranges_by_road.get(road_idx, [])
+        segments = (
+            road_gen.line_segments_outside_ranges(line, clip_ranges)
+            if clip_ranges
+            else [(line, 0.0)]
+        )
+        for segment, _ in segments:
+            if segment is None or segment.is_empty:
+                continue
+            for component, left_offset, right_offset in spans:
+                if str(component.get("type", "")) not in component_types:
+                    continue
+                geom = swept_band_polygon(segment, left_offset, right_offset)
+                if geom is not None and not geom.is_empty:
+                    parts.append(geom)
+    if not parts:
+        return None
+    try:
+        return road_gen.clean_polygonal(unary_union(parts))
+    except Exception:
+        return None
+
+
+def component_conflict_profile_for_type(component_type: str) -> str:
+    if component_type in JUNCTION_ASPHALT_COMPONENT_TYPES or component_type == "service_lane":
+        return "drivable"
+    if component_type in JUNCTION_DIVIDER_COMPONENT_TYPES:
+        return "divider"
+    return "roadside"
+
+
+def build_component_conflict_clip_geom_by_profile(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    clip_ranges_by_profile: dict[str, dict[Any, list[tuple[float, float]]]],
+    component_types: set[str],
+    extra_geoms: Iterable[Any] | None = None,
+):
+    parts = [
+        geom
+        for geom in (extra_geoms or [])
+        if geom is not None and not geom.is_empty
+    ]
+    for road_idx, row in prepared_roads.iterrows():
+        line = row.geometry
+        if line is None or line.is_empty or not isinstance(line, LineString):
+            continue
+        rule = road_gen.get_road_rule(row, rules)
+        components = road_gen.cross_section_components_for_row(row)
+        if not components:
+            components = fallback_cross_section_components(rule)
+        spans = component_spans(components)
+        for component, left_offset, right_offset in spans:
+            component_type = str(component.get("type", ""))
+            if component_type not in component_types:
+                continue
+            profile = component_conflict_profile_for_type(component_type)
+            clip_ranges = clip_ranges_by_profile.get(profile, {}).get(road_idx, [])
+            component_parts = clipped_component_existing_parts(
+                line,
+                left_offset,
+                right_offset,
+                clip_ranges,
+                None,
+            )
+            parts.extend(component_parts)
+    if not parts:
+        return None
+    try:
+        return road_gen.clean_polygonal(unary_union(parts))
+    except Exception:
+        return None
+
+
+def junction_side_component_edge_clear_mask(surface_geom):
+    if surface_geom is None or surface_geom.is_empty:
+        return None
+    clear_geom = surface_geom
+    try:
+        overlap = max(float(JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M), 0.0)
+        if overlap > 0.0:
+            inset = road_gen.clean_polygonal(
+                surface_geom.buffer(
+                    -overlap,
+                    resolution=4,
+                    join_style=1,
+                )
+            )
+            if inset is not None and not inset.is_empty:
+                clear_geom = inset
+        retreat = max(float(JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M), 0.0)
+        if retreat > 0.0:
+            clear_geom = road_gen.clean_polygonal(
+                clear_geom.buffer(
+                    retreat,
+                    resolution=4,
+                    join_style=1,
+                )
+            )
+    except Exception:
+        return surface_geom
+    return clear_geom
+
+
 def side_component_corner_curve_geom(
     record_a: dict[str, Any],
     record_b: dict[str, Any],
     surface_point: Point,
     surface_geom,
+    outward_extra_m: float = 0.0,
+    width_factor: float = 1.0,
 ):
     geom_a = record_a.get("geom")
     geom_b = record_b.get("geom")
@@ -2252,7 +2780,13 @@ def side_component_corner_curve_geom(
         abs(float(record_a.get("arm_lateral_center", 0.0) or 0.0)),
         abs(float(record_b.get("arm_lateral_center", 0.0) or 0.0)),
     )
-    control_radius = max(lateral_extent + component_width, component_width * 2.0, 1.0)
+    outward_extra_m = max(float(outward_extra_m), 0.0)
+    width_factor = max(float(width_factor), 0.1)
+    control_radius = max(
+        lateral_extent + component_width + outward_extra_m,
+        component_width * 2.0 + outward_extra_m,
+        1.0,
+    )
     control = (
         float(surface_point.x) + float(bisector[0]) * control_radius,
         float(surface_point.y) + float(bisector[1]) * control_radius,
@@ -2270,7 +2804,7 @@ def side_component_corner_curve_geom(
         return None
     try:
         patch = curve.buffer(
-            max(component_width * 0.5, 0.18),
+            max(component_width * 0.5 * width_factor, 0.18),
             cap_style=2,
             join_style=1,
             resolution=4,
@@ -2278,11 +2812,66 @@ def side_component_corner_curve_geom(
         curve_limit = surface_geom.buffer(
             lateral_extent
             + component_width
-            + JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M,
+            + JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M
+            + outward_extra_m,
             resolution=4,
             join_style=1,
         )
         return road_gen.clean_polygonal(patch.intersection(curve_limit))
+    except Exception:
+        return None
+
+
+def side_component_direct_bridge_geom(
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+    surface_geom,
+    max_gap_m: float | None = None,
+):
+    geom_a = record_a.get("geom")
+    geom_b = record_b.get("geom")
+    if geom_a is None or geom_b is None or geom_a.is_empty or geom_b.is_empty:
+        return None
+    try:
+        point_a, point_b = nearest_points(geom_a, geom_b)
+    except Exception:
+        return None
+    gap = float(point_a.distance(point_b))
+    max_gap = max(
+        float(JUNCTION_SIDE_COMPONENT_CONNECTOR_MAX_PAIR_GAP_M if max_gap_m is None else max_gap_m),
+        1.0,
+    )
+    if gap <= 0.02 or gap > max_gap:
+        return None
+
+    component_width = max(
+        float(record_a.get("component_width_m", 0.0) or 0.0),
+        float(record_b.get("component_width_m", 0.0) or 0.0),
+        0.35,
+    )
+    bridge_width = max(component_width * 0.5 + float(JUNCTION_SIDE_COMPONENT_DIRECT_BRIDGE_EXTRA_M), 0.22)
+    try:
+        bridge_line = LineString([(point_a.x, point_a.y), (point_b.x, point_b.y)])
+        if bridge_line.is_empty or bridge_line.length <= 0.02:
+            return None
+        bridge = bridge_line.buffer(
+            bridge_width,
+            cap_style=2,
+            join_style=1,
+            resolution=4,
+        )
+        lateral_extent = max(
+            abs(float(record_a.get("arm_lateral_center", 0.0) or 0.0)),
+            abs(float(record_b.get("arm_lateral_center", 0.0) or 0.0)),
+        )
+        bridge_limit = surface_geom.buffer(
+            lateral_extent
+            + component_width
+            + JUNCTION_SIDE_COMPONENT_CONNECTOR_LOCAL_MARGIN_M,
+            resolution=4,
+            join_style=1,
+        )
+        return road_gen.clean_polygonal(bridge.intersection(bridge_limit))
     except Exception:
         return None
 
@@ -2298,6 +2887,7 @@ def side_connector_candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, .
     )
     return (
         SIDE_COMPONENT_CONNECTOR_LAYER_PRIORITY.get(layer_name, 50),
+        SIDE_COMPONENT_CONNECTOR_KIND_PRIORITY.get(str(group.get("connection_kind", "")), 5),
         round(float(lateral_rank), 3),
         str(group.get("component_match_key", "")),
         str(group.get("layer_name", "")),
@@ -2311,6 +2901,144 @@ def corner_component_record_order_key(record: dict[str, Any]) -> tuple[Any, ...]
         str(record.get("component_key", "")),
         int(record.get("record_id", 0) or 0),
     )
+
+
+def corner_component_record_center_distance(record_a: dict[str, Any], record_b: dict[str, Any]) -> float:
+    point_a = record_a.get("center_point")
+    point_b = record_b.get("center_point")
+    if point_a is not None and point_b is not None:
+        try:
+            return float(point_a.distance(point_b))
+        except Exception:
+            pass
+    geom_a = record_a.get("geom")
+    geom_b = record_b.get("geom")
+    if geom_a is not None and geom_b is not None:
+        try:
+            return float(geom_a.distance(geom_b))
+        except Exception:
+            pass
+    return float("inf")
+
+
+def side_component_record_geom_distance(record_a: dict[str, Any], record_b: dict[str, Any]) -> float:
+    geom_a = record_a.get("geom")
+    geom_b = record_b.get("geom")
+    if geom_a is not None and geom_b is not None:
+        try:
+            return float(geom_a.distance(geom_b))
+        except Exception:
+            pass
+    return corner_component_record_center_distance(record_a, record_b)
+
+
+def corner_component_record_pair_score(record_a: dict[str, Any], record_b: dict[str, Any]) -> tuple[float, float, float, int]:
+    center_distance = corner_component_record_center_distance(record_a, record_b)
+    lateral_gap = abs(
+        abs(float(record_a.get("arm_lateral_center", 0.0) or 0.0))
+        - abs(float(record_b.get("arm_lateral_center", 0.0) or 0.0))
+    )
+    width_gap = abs(
+        float(record_a.get("component_width_m", 0.0) or 0.0)
+        - float(record_b.get("component_width_m", 0.0) or 0.0)
+    )
+    return (center_distance, lateral_gap, width_gap, int(record_b.get("record_id", 0) or 0))
+
+
+def corner_component_nearest_record_pairs(
+    records_a: list[dict[str, Any]],
+    records_b: list[dict[str, Any]],
+    max_pair_gap_m: float | None = None,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    available = list(records_b)
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    max_gap = float(JUNCTION_SIDE_COMPONENT_CONNECTOR_MAX_PAIR_GAP_M if max_pair_gap_m is None else max_pair_gap_m)
+    for record in sorted(records_a, key=corner_component_record_order_key):
+        if not available:
+            break
+        nearest = min(available, key=lambda candidate: corner_component_record_pair_score(record, candidate))
+        if corner_component_record_center_distance(record, nearest) > max_gap:
+            continue
+        available.remove(nearest)
+        pairs.append((record, nearest))
+    return pairs
+
+
+def side_component_transition_key(record: dict[str, Any]) -> str | None:
+    component_type = str(record.get("component_type", ""))
+    if component_type in JUNCTION_SIDE_COMPONENT_TRANSITION_TYPES:
+        return "raised_side"
+    return None
+
+
+def side_component_transition_group_record(
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+) -> dict[str, Any]:
+    def rank(record: dict[str, Any]) -> tuple[int, float, float]:
+        return (
+            int(record.get("road_priority", 0) or 0),
+            float(record.get("drivable_width_m", 0.0) or 0.0),
+            float(record.get("component_width_m", 0.0) or 0.0),
+        )
+
+    return record_a if rank(record_a) >= rank(record_b) else record_b
+
+
+def side_component_records_need_main_road_attach(
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+) -> bool:
+    component_type_a = str(record_a.get("component_type", ""))
+    component_type_b = str(record_b.get("component_type", ""))
+    if (
+        component_type_a not in JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_TYPES
+        or component_type_b not in JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_TYPES
+    ):
+        return False
+    priority_gap = abs(int(record_a.get("road_priority", 0) or 0) - int(record_b.get("road_priority", 0) or 0))
+    width_gap = abs(
+        float(record_a.get("drivable_width_m", 0.0) or 0.0)
+        - float(record_b.get("drivable_width_m", 0.0) or 0.0)
+    )
+    return priority_gap > 0 or width_gap >= float(JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_GAP_M)
+
+
+def side_component_nearest_group_pairs(
+    records: list[dict[str, Any]],
+    max_pair_gap_m: float,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    pairs: dict[tuple[int, int], tuple[dict[str, Any], dict[str, Any]]] = {}
+    max_gap = max(float(max_pair_gap_m), 0.05)
+    for record in records:
+        record_id = int(record.get("record_id", -1))
+        arm_id = str(record.get("arm_id", ""))
+        candidates = [
+            candidate
+            for candidate in records
+            if int(candidate.get("record_id", -1)) != record_id
+            and str(candidate.get("arm_id", "")) != arm_id
+        ]
+        if not candidates:
+            continue
+        nearest = min(
+            candidates,
+            key=lambda candidate: (
+                side_component_record_geom_distance(record, candidate),
+                abs(
+                    abs(float(record.get("arm_lateral_center", 0.0) or 0.0))
+                    - abs(float(candidate.get("arm_lateral_center", 0.0) or 0.0))
+                ),
+                int(candidate.get("record_id", 0) or 0),
+            ),
+        )
+        if side_component_record_geom_distance(record, nearest) > max_gap:
+            continue
+        pair_key = tuple(sorted((record_id, int(nearest.get("record_id", -1)))))
+        if pair_key[0] == pair_key[1]:
+            continue
+        pairs[pair_key] = (record, nearest)
+    return list(pairs.values())
 
 
 def corner_component_correspondence_key(record: dict[str, Any]) -> tuple[str, str]:
@@ -2329,6 +3057,19 @@ def junction_corner_component_connector_key(
     ordinal: int,
 ) -> str:
     return f"corner:{surface_idx}:{arm_a_id}->{arm_b_id}:{layer_name}:{component_type}:{int(ordinal)}"
+
+
+def junction_corner_component_transition_connector_key(
+    surface_idx: int,
+    arm_a_id: str,
+    arm_b_id: str,
+    layer_name: str,
+    component_type_a: str,
+    component_type_b: str,
+    ordinal: int,
+) -> str:
+    type_key = "+".join(sorted((str(component_type_a), str(component_type_b))))
+    return f"corner_transition:{surface_idx}:{arm_a_id}->{arm_b_id}:{layer_name}:{type_key}:{int(ordinal)}"
 
 
 def junction_arms_same_connection_level(arm_a: dict[str, Any], arm_b: dict[str, Any]) -> bool:
@@ -2398,14 +3139,9 @@ def build_junction_approach_surface_meshes(
     surface_geometries: list[dict[str, Any]],
     drivable_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
 ) -> dict[str, list[trimesh.Trimesh]]:
-    """Extend incoming road surfaces into the junction outer apron.
-
-    These meshes keep the outer part of a junction faithful to each approach's
-    own road class and modeled cross-section. The remaining unclaimed center is
-    later filled by the generic junction asphalt surface.
-    """
+    """Optionally extend incoming road surfaces into the junction outer apron."""
     mesh_groups: dict[str, list[trimesh.Trimesh]] = {}
-    if prepared_roads.empty or not surface_geometries:
+    if not GENERATE_JUNCTION_APPROACH_SURFACES or prepared_roads.empty or not surface_geometries:
         return mesh_groups
     if drivable_clip_ranges is None:
         drivable_clip_ranges = junction_clip_range_profiles_by_road(
@@ -2599,6 +3335,7 @@ def junction_stop_line_control_zone_geom(
     prepared_roads: gpd.GeoDataFrame,
     rules: dict[str, Any],
     surface: dict[str, Any],
+    include_minor_extra_setback: bool = False,
 ):
     surface_geom = surface.get("geometry")
     surface_point = surface.get("point")
@@ -2630,20 +3367,19 @@ def junction_stop_line_control_zone_geom(
         if not spans:
             continue
         control_spans = [
-            (left, right)
+            (min(float(left), float(right)), max(float(left), float(right)))
             for component, left, right in spans
             if str(component.get("type", "")) in JUNCTION_APPROACH_CONTROL_COMPONENT_TYPES
+            and abs(float(right) - float(left)) > 0.05
         ]
         if not control_spans:
-            continue
-        left_extent = min(float(left) for left, _ in control_spans)
-        right_extent = max(float(right) for _, right in control_spans)
-        if right_extent - left_extent <= 0.05:
             continue
         node_distance = float(arm.get("node_distance_m", line.project(surface_point)) or 0.0)
         node_distance = max(0.0, min(float(line.length), node_distance))
         sign = float(arm.get("line_direction_sign", 1.0) or 1.0)
         _, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+        if include_minor_extra_setback:
+            stop_line_offset += junction_arm_extra_setback_m(arm, arms)
         control_offset = max(
             0.0,
             float(stop_line_offset)
@@ -2661,15 +3397,16 @@ def junction_stop_line_control_zone_geom(
             continue
         if segment is None or segment.is_empty:
             continue
-        geom = swept_band_polygon(segment, left_extent, right_extent)
-        if geom is None or geom.is_empty:
-            continue
-        try:
-            geom = road_gen.clean_polygonal(geom)
-        except Exception:
-            pass
-        if geom is not None and not geom.is_empty:
-            parts.append(geom)
+        for left_extent, right_extent in control_spans:
+            geom = swept_band_polygon(segment, left_extent, right_extent)
+            if geom is None or geom.is_empty:
+                continue
+            try:
+                geom = road_gen.clean_polygonal(geom)
+            except Exception:
+                pass
+            if geom is not None and not geom.is_empty:
+                parts.append(geom)
     if not parts:
         return None
     try:
@@ -2682,12 +3419,18 @@ def junction_stop_line_control_zones_by_surface(
     prepared_roads: gpd.GeoDataFrame,
     rules: dict[str, Any],
     surface_geometries: list[dict[str, Any]],
+    include_minor_extra_setback: bool = False,
 ) -> dict[int, list[Any]]:
     zones: dict[int, list[Any]] = defaultdict(list)
     for surface in surface_geometries:
         try:
             surface_idx = int(surface.get("index", -1))
-            geom = junction_stop_line_control_zone_geom(prepared_roads, rules, surface)
+            geom = junction_stop_line_control_zone_geom(
+                prepared_roads,
+                rules,
+                surface,
+                include_minor_extra_setback=include_minor_extra_setback,
+            )
         except Exception:
             continue
         if surface_idx >= 0 and geom is not None and not geom.is_empty:
@@ -2702,6 +3445,8 @@ def build_junction_side_component_connector_meshes(
     roadside_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
     drivable_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
     divider_clip_ranges: dict[Any, list[tuple[float, float]]] | None = None,
+    side_component_conflict_clip_geom=None,
+    side_drivable_component_conflict_clip_geom=None,
 ) -> dict[str, list[trimesh.Trimesh]]:
     """Build same-plane roadside component patches at junctions.
 
@@ -2774,10 +3519,12 @@ def build_junction_side_component_connector_meshes(
             surface,
             scale=JUNCTION_NON_ASPHALT_CENTER_CLEAR_SCALE,
         )
+        side_component_edge_clear_geom = junction_side_component_edge_clear_mask(surface_geom)
         stop_line_control_zone_geom = junction_stop_line_control_zone_geom(
             prepared_roads,
             rules,
             surface,
+            include_minor_extra_setback=True,
         )
         members = surface.get("members", [])
         arms = junction_arm_records(prepared_roads, rules, surface_point, members)
@@ -2951,6 +3698,8 @@ def build_junction_side_component_connector_meshes(
                     "level_key": level_key,
                     "connection_level_key": connection_level_key,
                     "same_road_level_connection": same_road_level_connection,
+                    "road_priority": int(arm.get("road_priority", level_record.get("priority", 0)) or 0),
+                    "drivable_width_m": float(arm.get("drivable_width_m", total_width) or total_width),
                     "lateral_center": (float(left_offset) + float(right_offset)) * 0.5,
                     "arm_lateral_center": arm_lateral_center,
                     "arm_side_sign": 1 if arm_lateral_center > 0.01 else (-1 if arm_lateral_center < -0.01 else 0),
@@ -3001,17 +3750,27 @@ def build_junction_side_component_connector_meshes(
             for layer_name, component_type in correspondence_keys:
                 side_records_a = sorted(records_by_key_a[(layer_name, component_type)], key=corner_component_record_order_key)
                 side_records_b = sorted(records_by_key_b[(layer_name, component_type)], key=corner_component_record_order_key)
-                for ordinal, (record, nearest) in enumerate(zip(side_records_a, side_records_b)):
+                for ordinal, (record, nearest) in enumerate(corner_component_nearest_record_pairs(side_records_a, side_records_b)):
                     record_center = record.get("center_point")
                     if (
                         record_center is not None
                         and nearest.get("center_point") is not None
-                        and float(record_center.distance(nearest["center_point"])) > JUNCTION_SIDE_COMPONENT_CONNECTOR_MAX_PAIR_GAP_M
+                        and float(record_center.distance(nearest["center_point"]))
+                        > (
+                            JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_MAX_PAIR_GAP_M
+                            if side_component_records_need_main_road_attach(record, nearest)
+                            else JUNCTION_SIDE_COMPONENT_CONNECTOR_MAX_PAIR_GAP_M
+                        )
                     ):
                         continue
                     pair = tuple(sorted((int(record["record_id"]), int(nearest["record_id"]))))
+                    connector_kind = (
+                        "main_road_attach"
+                        if side_component_records_need_main_road_attach(record, nearest)
+                        else pair_kind
+                    )
                     paired_records[pair] = {
-                        "kind": pair_kind,
+                        "kind": connector_kind,
                         "connector_key": junction_corner_component_connector_key(
                             surface_idx,
                             arm_a_id,
@@ -3021,6 +3780,138 @@ def build_junction_side_component_connector_meshes(
                             ordinal,
                         ),
                     }
+
+            paired_record_ids_for_transition = {
+                record_id
+                for pair in paired_records
+                for record_id in pair
+            }
+            transition_records_by_key_a: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            transition_records_by_key_b: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for record, expected_sign, bucket in (
+                *[(record, corner_side_sign_by_arm[arm_a_id], transition_records_by_key_a) for record in records_a],
+                *[(record, corner_side_sign_by_arm[arm_b_id], transition_records_by_key_b) for record in records_b],
+            ):
+                if int(record.get("record_id", -1)) in paired_record_ids_for_transition:
+                    continue
+                if int(record.get("arm_side_sign", 0)) != int(expected_sign):
+                    continue
+                transition_key = side_component_transition_key(record)
+                if transition_key is None:
+                    continue
+                bucket[transition_key].append(record)
+
+            for transition_key in sorted(set(transition_records_by_key_a) & set(transition_records_by_key_b)):
+                side_records_a = sorted(transition_records_by_key_a[transition_key], key=corner_component_record_order_key)
+                side_records_b = sorted(transition_records_by_key_b[transition_key], key=corner_component_record_order_key)
+                transition_max_pair_gap_m = (
+                    JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_MAX_PAIR_GAP_M
+                    if int(arm_a.get("road_priority", 0) or 0) != int(arm_b.get("road_priority", 0) or 0)
+                    else JUNCTION_SIDE_COMPONENT_TRANSITION_MAX_PAIR_GAP_M
+                )
+                transition_pairs = corner_component_nearest_record_pairs(
+                    side_records_a,
+                    side_records_b,
+                    max_pair_gap_m=transition_max_pair_gap_m,
+                )
+                for ordinal, (record, nearest) in enumerate(transition_pairs):
+                    pair = tuple(sorted((int(record["record_id"]), int(nearest["record_id"]))))
+                    if pair in paired_records:
+                        continue
+                    group_record = side_component_transition_group_record(record, nearest)
+                    connector_kind = (
+                        "main_road_attach"
+                        if side_component_records_need_main_road_attach(record, nearest)
+                        else "corner_transition"
+                    )
+                    paired_records[pair] = {
+                        "kind": connector_kind,
+                        "group_record_id": int(group_record["record_id"]),
+                        "connector_key": junction_corner_component_transition_connector_key(
+                            surface_idx,
+                            arm_a_id,
+                            arm_b_id,
+                            str(group_record["layer_name"]),
+                            str(record["component_type"]),
+                            str(nearest["component_type"]),
+                            ordinal,
+                        ),
+                    }
+
+        perimeter_records_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+        for record in component_records:
+            component_type = str(record.get("component_type", ""))
+            if component_type not in JUNCTION_CORNER_COMPONENT_CONNECTOR_TYPES:
+                continue
+            perimeter_records_by_key[
+                (
+                    str(record["connection_level_key"]),
+                    str(record["layer_name"]),
+                    component_type,
+                )
+            ].append(record)
+
+        for (connection_level_key, layer_name, component_type), records in sorted(perimeter_records_by_key.items()):
+            arm_ids = {str(record.get("arm_id", "")) for record in records}
+            if len(arm_ids) < 2:
+                continue
+            perimeter_pair_gap_m = (
+                JUNCTION_SIDE_DRIVABLE_PERIMETER_MAX_PAIR_GAP_M
+                if component_type in JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES
+                else JUNCTION_SIDE_COMPONENT_PERIMETER_MAX_PAIR_GAP_M
+            )
+            perimeter_bridge_m = (
+                JUNCTION_SIDE_DRIVABLE_PERIMETER_BRIDGE_M
+                if component_type in JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES
+                else JUNCTION_SIDE_COMPONENT_PERIMETER_BRIDGE_M
+            )
+            representative = side_component_transition_group_record(records[0], max(records, key=lambda item: float(item.get("component_width_m", 0.0) or 0.0)))
+            group_match_key = f"perimeter:{surface_idx}:{connection_level_key}:{layer_name}:{component_type}"
+            group_key = (
+                surface_idx,
+                group_match_key,
+                connection_level_key,
+                layer_name,
+                "perimeter",
+            )
+            group = connector_groups.setdefault(
+                group_key,
+                {
+                    "geoms": [],
+                    "z_values": [],
+                    "layer_name": layer_name,
+                    "color": representative["color"],
+                    "component_type": component_type,
+                    "component_match_key": group_match_key,
+                    "component_width_m": max(float(record.get("component_width_m", 0.0) or 0.0) for record in records),
+                    "level_key": representative["level_key"],
+                    "connection_level_key": connection_level_key,
+                    "same_road_level_connection": all(bool(record["same_road_level_connection"]) for record in records),
+                    "road_level_keys": set(),
+                    "adjacent_arm_ids": set(),
+                    "lateral_centers": [],
+                    "connection_kind": "perimeter",
+                    "bridge_m": float(perimeter_bridge_m),
+                },
+            )
+            for record in records:
+                group["adjacent_arm_ids"].add(record["arm_id"])
+                group["geoms"].append(record["geom"])
+                group["z_values"].append(record["z"])
+                group["road_level_keys"].add(record["level_key"])
+                group["lateral_centers"].append(record["lateral_center"])
+            for record_a, record_b in side_component_nearest_group_pairs(
+                records,
+                perimeter_pair_gap_m,
+            ):
+                bridge_geom = side_component_direct_bridge_geom(
+                    record_a,
+                    record_b,
+                    surface_geom,
+                    max_gap_m=perimeter_pair_gap_m,
+                )
+                if bridge_geom is not None and not bridge_geom.is_empty:
+                    group["geoms"].append(bridge_geom)
 
         paired_record_ids = {
             record_id
@@ -3070,12 +3961,14 @@ def build_junction_side_component_connector_meshes(
             pair_kind = str(pair_info.get("kind", "corner"))
             record_a = component_records[pair[0]]
             record_b = component_records[pair[1]]
-            group_match_key = str(pair_info.get("connector_key", record_a["component_match_key"]))
+            group_record_id = int(pair_info.get("group_record_id", record_a["record_id"]) or record_a["record_id"])
+            group_record = component_records[group_record_id] if 0 <= group_record_id < len(component_records) else record_a
+            group_match_key = str(pair_info.get("connector_key", group_record["component_match_key"]))
             group_key = (
                 surface_idx,
                 group_match_key,
-                record_a["connection_level_key"],
-                record_a["layer_name"],
+                group_record["connection_level_key"],
+                group_record["layer_name"],
                 pair_kind,
             )
             group = connector_groups.setdefault(
@@ -3083,13 +3976,16 @@ def build_junction_side_component_connector_meshes(
                 {
                     "geoms": [],
                     "z_values": [],
-                    "layer_name": record_a["layer_name"],
-                    "color": record_a["color"],
-                    "component_type": record_a["component_type"],
+                    "layer_name": group_record["layer_name"],
+                    "color": group_record["color"],
+                    "component_type": group_record["component_type"],
                     "component_match_key": group_match_key,
-                    "component_width_m": record_a["component_width_m"],
-                    "level_key": record_a["level_key"],
-                    "connection_level_key": record_a["connection_level_key"],
+                    "component_width_m": max(
+                        float(record_a["component_width_m"]),
+                        float(record_b["component_width_m"]),
+                    ),
+                    "level_key": group_record["level_key"],
+                    "connection_level_key": group_record["connection_level_key"],
                     "same_road_level_connection": bool(
                         record_a["same_road_level_connection"] and record_b["same_road_level_connection"]
                     ),
@@ -3108,6 +4004,20 @@ def build_junction_side_component_connector_meshes(
             bridge_geom = side_component_corner_curve_geom(record_a, record_b, surface_point, surface_geom)
             if bridge_geom is not None and not bridge_geom.is_empty:
                 group["geoms"].append(bridge_geom)
+            if pair_kind == "main_road_attach":
+                main_attach_bridge_geom = side_component_corner_curve_geom(
+                    record_a,
+                    record_b,
+                    surface_point,
+                    surface_geom,
+                    outward_extra_m=JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_OUTSET_M,
+                    width_factor=JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_WIDTH_FACTOR,
+                )
+                if main_attach_bridge_geom is not None and not main_attach_bridge_geom.is_empty:
+                    group["geoms"].append(main_attach_bridge_geom)
+            direct_bridge_geom = side_component_direct_bridge_geom(record_a, record_b, surface_geom)
+            if direct_bridge_geom is not None and not direct_bridge_geom.is_empty:
+                group["geoms"].append(direct_bridge_geom)
 
         if not connector_groups:
             continue
@@ -3219,7 +4129,11 @@ def build_junction_side_component_connector_meshes(
             if merged is None or merged.is_empty:
                 continue
             base_merged = merged
-            bridge_m = max(float(JUNCTION_SIDE_COMPONENT_CONNECTOR_BRIDGE_M), 0.0)
+            bridge_m = max(
+                float(JUNCTION_SIDE_COMPONENT_CONNECTOR_BRIDGE_M),
+                float(group.get("bridge_m", 0.0) or 0.0),
+                0.0,
+            )
             if bridge_m > 0.0:
                 try:
                     lateral_extent = max(
@@ -3269,9 +4183,29 @@ def build_junction_side_component_connector_meshes(
                 pass
             if merged is None or merged.is_empty:
                 continue
+            component_type = str(group.get("component_type", ""))
+            conflict_clip_source = None
+            if component_type in RAISED_COMPONENT_TYPES:
+                conflict_clip_source = side_component_conflict_clip_geom
+            elif component_type in JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES:
+                conflict_clip_source = side_drivable_component_conflict_clip_geom
+            if conflict_clip_source is not None and not conflict_clip_source.is_empty:
+                try:
+                    conflict_clip = local_polygon_clip_mask(merged, conflict_clip_source)
+                    if conflict_clip is not None and not conflict_clip.is_empty:
+                        merged = road_gen.clean_polygonal(merged.difference(conflict_clip))
+                except Exception:
+                    pass
+            if merged is None or merged.is_empty:
+                continue
             if subtract_geom_for_difference is not None and not subtract_geom_for_difference.is_empty:
                 try:
                     merged = road_gen.clean_polygonal(merged.difference(subtract_geom_for_difference))
+                except Exception:
+                    pass
+            if side_component_edge_clear_geom is not None and not side_component_edge_clear_geom.is_empty:
+                try:
+                    merged = road_gen.clean_polygonal(merged.difference(side_component_edge_clear_geom))
                 except Exception:
                     pass
             if center_non_asphalt_clear_geom is not None and not center_non_asphalt_clear_geom.is_empty:
@@ -3381,10 +4315,13 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     Curb_All, lane markings, trees, and street lights.
     """
     if roads.empty:
+        road_generation_log("No road records; skipping road mesh generation.")
         return {}
 
+    road_generation_log(f"Preparing {len(roads)} source road records for surface generation.")
     prepared_roads = roads.copy() if roads_are_prepared_for_surfaces(roads) else prepare_roads_for_surfaces(roads)
     if prepared_roads.empty:
+        road_generation_log("No valid prepared roads; skipping road mesh generation.")
         return {}
 
     rules = road_gen.load_rules()
@@ -3412,8 +4349,12 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     junction_marking_stats: Counter[str] = Counter()
     # First resolve intersections as dedicated surfaces. All road strips and
     # markings generated later use these surfaces as clipping masks.
+    road_generation_log("Detecting junction buckets from road topology.")
     junction_buckets = junction_point_buckets(prepared_roads)
+    road_generation_log(f"Detected {len(junction_buckets)} junction buckets.")
+    road_generation_log("Building rounded junction surface geometries.")
     junction_surface_geometries = build_rounded_junction_surface_geometries(prepared_roads, rules, junction_buckets)
+    road_generation_log(f"Built {len(junction_surface_geometries)} junction surface geometries.")
     junction_mask_geom = junction_surface_union(junction_surface_geometries)
     junction_marking_filter_geom = junction_surface_union(
         junction_surface_geometries,
@@ -3421,10 +4362,15 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     )
     junction_asset_filter_geom = junction_surface_union(junction_surface_geometries, clearance=1.0)
     junction_drivable_core_clip_geom = None
+    junction_side_component_edge_clip_geom = None
     if junction_mask_geom is not None and not junction_mask_geom.is_empty:
         junction_drivable_core_clip_geom = road_gen.clean_polygonal(junction_mask_geom)
+        junction_side_component_edge_clip_geom = junction_side_component_edge_clear_mask(junction_mask_geom)
+        if junction_side_component_edge_clip_geom is None or junction_side_component_edge_clip_geom.is_empty:
+            junction_side_component_edge_clip_geom = junction_drivable_core_clip_geom
     # Convert the 2D junction polygons into chainage ranges per road so each
     # layer can choose the correct retreat profile.
+    road_generation_log("Calculating road, roadside, divider, and marking clip ranges.")
     junction_clip_profiles = junction_clip_range_profiles_by_road(
         prepared_roads,
         rules,
@@ -3434,6 +4380,49 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     roadside_clip_ranges = junction_clip_profiles.get("roadside", {})
     divider_clip_ranges = junction_clip_profiles.get("divider", {})
     marking_clip_ranges = junction_clip_profiles.get("marking", {})
+    junction_stop_line_control_zones = junction_stop_line_control_zones_by_surface(
+        prepared_roads,
+        rules,
+        junction_surface_geometries,
+        include_minor_extra_setback=True,
+    )
+    junction_stop_line_control_zone_parts = [
+        geom
+        for zones in junction_stop_line_control_zones.values()
+        for geom in zones
+        if geom is not None and not geom.is_empty
+    ]
+    road_generation_log("Building side-element conflict mask from final drivable and junction surfaces.")
+    side_conflict_extra_geoms = [
+        geom
+        for geom in [junction_mask_geom, *junction_stop_line_control_zone_parts]
+        if geom is not None and not geom.is_empty
+    ]
+    side_component_conflict_clip_geom = build_component_conflict_clip_geom(
+        prepared_roads,
+        rules,
+        drivable_clip_ranges,
+        DRIVABLE_COMPONENT_TYPES,
+        extra_geoms=side_conflict_extra_geoms,
+    )
+    road_generation_log("Building side-drivable retreat mask for non-motor and parking lanes.")
+    side_drivable_component_conflict_clip_geom = build_component_conflict_clip_geom_by_profile(
+        prepared_roads,
+        rules,
+        {
+            "drivable": drivable_clip_ranges,
+            "roadside": roadside_clip_ranges,
+            "divider": divider_clip_ranges,
+        },
+        (JUNCTION_ASPHALT_COMPONENT_TYPES | RAISED_COMPONENT_TYPES | {"service_lane"}),
+        extra_geoms=side_conflict_extra_geoms,
+    )
+    approach_extra_setbacks_by_road = junction_approach_extra_setbacks_by_road(
+        prepared_roads,
+        rules,
+        junction_surface_geometries,
+    )
+    road_generation_log("Building junction approach and side-component connector meshes.")
     junction_approach_surface_mesh_groups = build_junction_approach_surface_meshes(
         prepared_roads,
         rules,
@@ -3447,6 +4436,13 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         roadside_clip_ranges,
         drivable_clip_ranges,
         divider_clip_ranges,
+        side_component_conflict_clip_geom,
+        side_drivable_component_conflict_clip_geom,
+    )
+    road_generation_log(
+        "Built "
+        f"{sum(len(parts) for parts in junction_approach_surface_mesh_groups.values())} approach connector meshes "
+        f"and {sum(len(parts) for parts in junction_side_component_mesh_groups.values())} side-component connector meshes."
     )
     junction_surface_meshes = build_rounded_junction_surface_meshes(
         junction_surface_geometries,
@@ -3454,14 +4450,16 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
             junction_approach_surface_mesh_groups,
             junction_side_component_mesh_groups,
         ),
-        junction_stop_line_control_zones_by_surface(
-            prepared_roads,
-            rules,
-            junction_surface_geometries,
-        ),
+        junction_stop_line_control_zones,
     )
     asset_mesh_groups: dict[str, list[trimesh.Trimesh]] = {}
-    for road_idx, row in prepared_roads.iterrows():
+    total_roads = len(prepared_roads)
+    road_generation_log(
+        "Sweeping cross-section components, lane markings, curbs, crosswalks, stop lines, and roadside assets."
+    )
+    for road_counter, (road_idx, row) in enumerate(prepared_roads.iterrows(), start=1):
+        if road_counter == 1 or road_counter % 25 == 0 or road_counter == total_roads:
+            road_generation_log(f"Processing road {road_counter}/{total_roads}.")
         row = row.copy()
         row.name = road_idx
         rule = road_gen.get_road_rule(row, rules)
@@ -3505,6 +4503,18 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                 for segment_idx, (segment, distance_offset) in enumerate(clipped_segments_for(profile)):
                     if segment is None or segment.is_empty:
                         continue
+                    if component_type in RAISED_COMPONENT_TYPES:
+                        component_clip_mask = side_component_conflict_clip_geom
+                    elif component_type in JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES:
+                        component_clip_mask = side_drivable_component_conflict_clip_geom
+                    elif component_type in JUNCTION_EDGE_CLIPPED_COMPONENT_TYPES:
+                        component_clip_mask = junction_side_component_edge_clip_geom
+                    elif component_type in JUNCTION_DIVIDER_COMPONENT_TYPES:
+                        component_clip_mask = junction_drivable_core_clip_geom
+                    elif component_type in DRIVABLE_COMPONENT_TYPES:
+                        component_clip_mask = junction_drivable_core_clip_geom
+                    else:
+                        component_clip_mask = None
                     mesh = swept_band_mesh(
                         row,
                         segment,
@@ -3514,9 +4524,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                         color,
                         z_offset=component_z_offset(component_type, rule),
                         distance_offset=distance_offset,
-                        clip_mask=junction_drivable_core_clip_geom
-                        if component_type in DRIVABLE_COMPONENT_TYPES
-                        else None,
+                        clip_mask=component_clip_mask,
                     )
                     if len(mesh.vertices) > 0:
                         component_mesh_groups.setdefault(layer_name, []).append(mesh)
@@ -3563,6 +4571,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     line_spans,
                     curb_meshes,
                     distance_offset=distance_offset,
+                    clip_mask=junction_side_component_edge_clip_geom,
                     exclude_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
                 )
             for segment, distance_offset in clipped_segments_for("divider"):
@@ -3575,6 +4584,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     line_spans,
                     curb_meshes,
                     distance_offset=distance_offset,
+                    clip_mask=junction_drivable_core_clip_geom,
                     include_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
                 )
             # 4. Crosswalks and stop lines are generated from the original
@@ -3587,6 +4597,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     rule,
                     crosswalk_meshes,
                     stop_line_meshes,
+                    approach_extra_setbacks_by_road,
                 )
             )
 
@@ -3615,6 +4626,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     # sit inside the conflict-area core. These filters convert that rule into a
     # simple center/footprint test before the layer meshes are merged.
     if junction_mask_geom is not None:
+        road_generation_log("Filtering crosswalk and stop-line meshes against junction masks.")
         crosswalk_meshes, removed_crosswalks = filter_meshes_outside_polygon(
             crosswalk_meshes,
             junction_marking_filter_geom,
@@ -3647,6 +4659,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         junction_marking_stats["filtered_stop_line_overlap_count"] = removed_stop_line_overlaps
 
     combined_meshes = {}
+    road_generation_log("Merging road mesh parts by output layer.")
     for group_name, parts in component_mesh_groups.items():
         mesh = combine_mesh_list(f"{group_name}_All", parts, COMPONENT_COLORS.get(group_name, COLORS["road_surface"]))
         if mesh is not None:
@@ -3671,6 +4684,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         mesh = combine_mesh_list(mesh_name, parts, road_gen.asset_group_color(group_name) or COLORS["road_surface"])
         if mesh is not None:
             combined_meshes[mesh_name] = mesh
+    road_generation_log(f"Finished road mesh generation with {len(combined_meshes)} merged output layers.")
     return combined_meshes
 
 
@@ -3847,27 +4861,14 @@ def angular_gaps_deg(vectors: list[tuple[float, float]]) -> list[float]:
 
 
 def classify_city_junction_type(arms: list[dict[str, Any]]) -> str:
+    base_type = junction_type_from_arm_geometry(arms)
+    if base_type in {"UNKNOWN", "ROUNDABOUT_LIKE", "RAMP_MERGE", "TWO_ARM_CONNECTION"}:
+        return base_type
     arm_count = len(arms)
-    if arm_count <= 1:
-        return "UNKNOWN"
-    if any("roundabout" in arm["road_class"].lower() or "circular" in arm["road_class"].lower() for arm in arms):
-        return "ROUNDABOUT_LIKE"
-    if any("link" in arm["road_class"].lower() or "ramp" in arm["road_class"].lower() for arm in arms):
-        return "RAMP_MERGE"
     priorities = [int(arm["road_priority"]) for arm in arms]
-    if arm_count <= 2:
-        return "TWO_ARM_CONNECTION"
     if arm_count == 3 and max(priorities, default=0) - min(priorities, default=0) >= 3:
         return "RAMP_MERGE"
-
-    gaps = angular_gaps_deg([arm["direction_out"] for arm in arms])
-    max_gap = max(gaps) if gaps else 0.0
-    min_gap = min(gaps) if gaps else 0.0
-    if arm_count == 3:
-        return "T_JUNCTION" if max_gap > 150.0 else "Y_JUNCTION"
-    if arm_count == 4:
-        return "CROSS_JUNCTION" if min_gap > 45.0 and max_gap < 145.0 else "SKEWED_CROSS_OR_MULTI_ARM"
-    return "MULTI_ARM_JUNCTION"
+    return base_type
 
 
 def classify_city_junction_hierarchy(arms: list[dict[str, Any]], junction_type: str) -> str:
@@ -3961,6 +4962,7 @@ def junction_arm_records(
         lane_count_estimate = max(1, int(round(drivable_width / max(float(rule.lane_width), 2.8))))
         crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
         min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
+        line_length = float(line.length)
         sample_step = max(JUNCTION_SEMANTIC_SAMPLE_DISTANCE_M, drivable_width * 0.65, 8.0)
         for sign in signs:
             sample_distance = max(0.0, min(float(line.length), node_distance + sign * sample_step))
@@ -3996,6 +4998,7 @@ def junction_arm_records(
                     "road_priority": int(level_record["priority"]),
                     "node_distance_m": round(float(node_distance), 3),
                     "line_direction_sign": round(float(sign), 3),
+                    "line_length_m": round(float(line_length), 3),
                     "position_ratio": round(float(node_distance / line.length), 4) if line.length > 0 else 0.0,
                     "approach_side": side,
                     "direction_out": (round(float(direction[0]), 6), round(float(direction[1]), 6)),
@@ -4005,12 +5008,38 @@ def junction_arm_records(
                     "drivable_width_m": round(float(drivable_width), 3),
                     "lane_count_estimate": lane_count_estimate,
                     "lane_width_m": round(float(rule.lane_width), 3),
+                    "crosswalk_base_offset_m": round(float(crosswalk_offset), 3),
+                    "stop_line_base_offset_m": round(float(stop_line_offset), 3),
+                    "approach_extra_setback_m": 0.0,
+                    "wide_through_required_crosswalk_offset_m": 0.0,
                     "marked_approach_fit": bool(marking_fit),
                     "crosswalk_distance_m": round(float(crosswalk_distance), 3) if marking_fit else None,
                     "stop_line_distance_m": round(float(stop_line_distance), 3) if marking_fit else None,
                 }
             )
     arms.sort(key=lambda item: item["bearing_out_deg"])
+    for arm in arms:
+        try:
+            extra_setback = junction_arm_extra_setback_m(arm, arms)
+            required_offset = junction_wide_through_required_crosswalk_offset_m(arm, arms)
+            crosswalk_distance = float(arm["node_distance_m"]) + float(arm["line_direction_sign"]) * (
+                float(arm["crosswalk_base_offset_m"]) + extra_setback
+            )
+            stop_line_distance = float(arm["node_distance_m"]) + float(arm["line_direction_sign"]) * (
+                float(arm["stop_line_base_offset_m"]) + extra_setback
+            )
+            line_length = float(arm.get("line_length_m", 0.0) or 0.0)
+            marking_fit = (
+                min_margin < crosswalk_distance < line_length - min_margin
+                and min_margin < stop_line_distance < line_length - min_margin
+            )
+            arm["approach_extra_setback_m"] = round(float(extra_setback), 3)
+            arm["wide_through_required_crosswalk_offset_m"] = round(float(required_offset), 3)
+            arm["marked_approach_fit"] = bool(marking_fit)
+            arm["crosswalk_distance_m"] = round(float(crosswalk_distance), 3) if marking_fit else None
+            arm["stop_line_distance_m"] = round(float(stop_line_distance), 3) if marking_fit else None
+        except Exception:
+            continue
     return arms
 
 
@@ -4359,10 +5388,15 @@ def write_city_road_model_score(
     return report
 
 
-def count_valid_junction_approaches(prepared_roads: gpd.GeoDataFrame) -> int:
+def count_valid_junction_approaches(
+    prepared_roads: gpd.GeoDataFrame,
+    approach_extra_setbacks_by_road: dict[Any, list[tuple[float, float, float]]] | None = None,
+) -> int:
     rules = road_gen.load_rules()
     count = 0
-    for _, row in prepared_roads.iterrows():
+    for road_idx, row in prepared_roads.iterrows():
+        row = row.copy()
+        row.name = road_idx
         line = row.geometry
         if line is None or line.is_empty or not isinstance(line, LineString):
             continue
@@ -4370,9 +5404,18 @@ def count_valid_junction_approaches(prepared_roads: gpd.GeoDataFrame) -> int:
         crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
         min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
         for junction_distance in road_gen.row_junction_distances(row):
+            clamped_distance = clamp_junction_chainage(line, junction_distance)
+            if clamped_distance is None:
+                continue
             for side_sign in (-1.0, 1.0):
-                crosswalk_distance = float(junction_distance) + side_sign * crosswalk_offset
-                stop_line_distance = float(junction_distance) + side_sign * stop_line_offset
+                extra_setback = lookup_junction_approach_extra_setback(
+                    approach_extra_setbacks_by_road,
+                    road_idx,
+                    clamped_distance,
+                    side_sign,
+                )
+                crosswalk_distance = float(clamped_distance) + side_sign * (crosswalk_offset + extra_setback)
+                stop_line_distance = float(clamped_distance) + side_sign * (stop_line_offset + extra_setback)
                 if (
                     min_margin < crosswalk_distance < line.length - min_margin
                     and min_margin < stop_line_distance < line.length - min_margin
@@ -4396,6 +5439,13 @@ def build_city_junction_score(
     records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
     junction_buckets = junction_point_buckets(prepared_roads)
     junction_count = len(junction_buckets)
+    rules = road_gen.load_rules()
+    junction_surface_geometries = build_rounded_junction_surface_geometries(prepared_roads, rules, junction_buckets)
+    approach_extra_setbacks_by_road = junction_approach_extra_setbacks_by_road(
+        prepared_roads,
+        rules,
+        junction_surface_geometries,
+    )
     semantic_records = (junction_semantic or {}).get("objects") or build_city_junction_semantic_records(prepared_roads)
     semantic_junction_count = len(semantic_records)
     topology_complete_count = sum(
@@ -4435,7 +5485,7 @@ def build_city_junction_score(
         if record.get("junction_distances_m")
         and float(record.get("junction_marking_clearance_m", 0.0)) >= JUNCTION_MARKING_CLEARANCE_M
     )
-    source_expected_approaches = count_valid_junction_approaches(prepared_roads)
+    source_expected_approaches = count_valid_junction_approaches(prepared_roads, approach_extra_setbacks_by_road)
 
     present_layers = {
         name[:-4] if name.endswith("_All") else name
@@ -4775,7 +5825,11 @@ def build_city_marking_alignment_qc(prepared_roads: gpd.GeoDataFrame) -> dict[st
             left_extent = abs(lateral_start) + CROSSWALK_STRIPE_WIDTH_M / 2.0
             right_extent = abs(lateral_start + (stripe_count - 1) * stripe_step) + CROSSWALK_STRIPE_WIDTH_M / 2.0
             crosswalk_extent = max(left_extent, right_extent)
-        stop_extent = junction_marking_across_width(road_width) / 2.0
+        stop_line_lateral_pieces = junction_stop_line_lateral_pieces_for_row(row, rule)
+        stop_extent = max(
+            [abs(float(offset)) + float(width) / 2.0 for offset, width in stop_line_lateral_pieces],
+            default=0.0,
+        )
         for junction_idx, _ in enumerate(road_gen.row_junction_distances(row)):
             for side_name in ("before", "after"):
                 checks["crosswalk_approach"] += 1
@@ -4976,6 +6030,56 @@ def export_module_scenes(modules: dict[str, dict[str, trimesh.Trimesh]]) -> dict
         scene_from_meshes(meshes).export(path)
         exported[module_name] = path
     return exported
+
+
+def road_generation_log(message: str) -> None:
+    print(f"[roads] {message}", flush=True)
+
+
+def generate_roads_only() -> dict[str, Any]:
+    print(f"[1/5] Loading road layer from {road_gen.RAW_ROADS}...", flush=True)
+    roads = load_layer(road_gen.RAW_ROADS)
+    print(f"[2/5] Localizing {len(roads)} road records...", flush=True)
+    origin = compute_origin(roads)
+    roads = localize(roads, origin)
+
+    print("[3/5] Preparing road topology and junction distances...", flush=True)
+    prepared_roads_for_qc = prepare_roads_for_surfaces(roads)
+
+    print("[4/5] Building road, junction, marking, and roadside meshes...", flush=True)
+    road_meshes = build_road_surface_meshes(prepared_roads_for_qc)
+
+    print("[5/5] Exporting road OBJ, semantics, and QC reports...", flush=True)
+    MODULE_OBJ_DIR.mkdir(parents=True, exist_ok=True)
+    road_obj_path = MODULE_OBJ_PATHS["roads"]
+    if road_meshes:
+        scene_from_meshes(road_meshes).export(road_obj_path)
+    elif road_obj_path.exists():
+        road_obj_path.unlink()
+
+    road_semantic = write_city_road_semantic(prepared_roads_for_qc, origin)
+    junction_semantic = write_city_junction_semantic(prepared_roads_for_qc, origin)
+    road_score = write_city_road_model_score(prepared_roads_for_qc, road_meshes)
+    junction_score = write_city_junction_score(prepared_roads_for_qc, road_meshes, junction_semantic)
+    marking_qc = write_city_marking_alignment_qc(prepared_roads_for_qc)
+
+    print("CIM road OBJ generated:")
+    print(f"- roads OBJ: {road_obj_path if road_meshes else 'skipped (no geometry)'}")
+    print(f"- road mesh layers: {len(road_meshes)}")
+    print(f"- road semantic objects: {len(road_semantic['objects'])} -> {CITY_ROAD_SEMANTIC_PATH}")
+    print(f"- junction semantic objects: {len(junction_semantic['objects'])} -> {CITY_JUNCTION_SEMANTIC_PATH}")
+    print(f"- road model score: {road_score['score']} ({road_score['grade']}) -> {CITY_ROAD_SCORE_PATH}")
+    print(f"- junction score: {junction_score['score']} ({junction_score['grade']}) -> {CITY_JUNCTION_SCORE_PATH}")
+    print(f"- marking alignment qc: {marking_qc['score']} ({marking_qc['grade']}) -> {CITY_MARKING_QC_PATH}")
+    return {
+        "road_obj_path": road_obj_path if road_meshes else None,
+        "road_meshes": road_meshes,
+        "road_semantic": road_semantic,
+        "junction_semantic": junction_semantic,
+        "road_score": road_score,
+        "junction_score": junction_score,
+        "marking_qc": marking_qc,
+    }
 
 
 def main() -> None:

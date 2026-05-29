@@ -269,6 +269,7 @@ def record_marking_layers(
     prepared_roads,
     rules: dict[str, Any],
     clip_profiles: dict[str, dict[Any, list[tuple[float, float]]]],
+    approach_extra_setbacks_by_road: dict[Any, list[tuple[float, float, float]]] | None,
     stats: dict[str, dict[str, Any]],
     junction_union,
     junction_mask,
@@ -321,7 +322,14 @@ def record_marking_layers(
                     yellow_markings,
                     distance_offset=distance_offset,
                 )
-            city.add_junction_crosswalks_and_stop_lines(row, line, rule, crosswalks, stop_lines)
+            city.add_junction_crosswalks_and_stop_lines(
+                row,
+                line,
+                rule,
+                crosswalks,
+                stop_lines,
+                approach_extra_setbacks_by_road,
+            )
 
     crosswalks, _ = city.filter_meshes_outside_polygon(crosswalks, marking_filter)
     stop_lines, _ = city.filter_meshes_outside_polygon(stop_lines, marking_filter)
@@ -880,6 +888,11 @@ def main() -> None:
     core_mask = prep(core_union) if core_union is not None and not core_union.is_empty else None
     drivable_core_clip_geom = clean_polygonal(city, junction_union)
     clip_profiles = city.junction_clip_range_profiles_by_road(prepared_roads, rules, junction_surfaces)
+    approach_extra_setbacks_by_road = city.junction_approach_extra_setbacks_by_road(
+        prepared_roads,
+        rules,
+        junction_surfaces,
+    )
 
     stats: dict[str, dict[str, Any]] = defaultdict(new_layer_stats)
     drivable_geoms_by_road: dict[Any, list[Any]] = defaultdict(list)
@@ -903,6 +916,7 @@ def main() -> None:
         prepared_roads,
         rules,
         clip_profiles,
+        approach_extra_setbacks_by_road,
         stats,
         junction_union,
         junction_mask,
