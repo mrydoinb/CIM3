@@ -839,6 +839,20 @@ def is_near_any_distance(distance: float, blocked: list[float], radius: float) -
     return any(abs(float(distance) - d) <= radius for d in blocked)
 
 
+def distance_in_ranges(distance: float, ranges: list[tuple[float, float]] | None) -> bool:
+    if not ranges:
+        return False
+    value = float(distance)
+    for start, end in ranges:
+        start = float(start)
+        end = float(end)
+        if end < start:
+            start, end = end, start
+        if start <= value <= end:
+            return True
+    return False
+
+
 
 
 
@@ -2680,7 +2694,11 @@ def asset_group_color(group: str) -> list[int] | None:
 
 
 
-def build_street_light_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Trimesh]:
+def build_street_light_meshes(
+    row: pd.Series,
+    rule: RoadRule,
+    blocked_distance_ranges: list[tuple[float, float]] | None = None,
+) -> list[trimesh.Trimesh]:
     meshes = []
     line: LineString = row.geometry
     profile = road_asset_profile(row, rule)
@@ -2705,6 +2723,8 @@ def build_street_light_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Tr
     )
     for distance in sorted(set(round(float(d), 3) for d in candidate_distances)):
         if is_near_any_distance(distance, junction_distances, junction_clearance):
+            continue
+        if distance_in_ranges(distance, blocked_distance_ranges):
             continue
         filtered_distances.append(distance)
     filtered_distances = evenly_limit_asset_distances(
@@ -2781,7 +2801,11 @@ def build_street_light_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Tr
     return meshes
 
 
-def build_tree_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Trimesh]:
+def build_tree_meshes(
+    row: pd.Series,
+    rule: RoadRule,
+    blocked_distance_ranges: list[tuple[float, float]] | None = None,
+) -> list[trimesh.Trimesh]:
     meshes = []
     line: LineString = row.geometry
     profile = road_asset_profile(row, rule)
@@ -2801,6 +2825,8 @@ def build_tree_meshes(row: pd.Series, rule: RoadRule) -> list[trimesh.Trimesh]:
     filtered_distances = []
     for distance in sorted(set(round(float(d), 3) for d in candidate_distances)):
         if is_near_any_distance(distance, junction_distances, junction_clearance):
+            continue
+        if distance_in_ranges(distance, blocked_distance_ranges):
             continue
         filtered_distances.append(distance)
     filtered_distances = evenly_limit_asset_distances(

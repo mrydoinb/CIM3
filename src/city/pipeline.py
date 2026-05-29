@@ -182,6 +182,7 @@ JUNCTION_DRIVABLE_CORE_CLIP_INSET_M = 0.0
 JUNCTION_ROADSIDE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M = 0.0
+JUNCTION_SIDE_COMPONENT_CONNECTOR_EDGE_OVERLAP_M = 1.2
 JUNCTION_MARKING_RETREAT_M = 0.35
 JUNCTION_COMPONENT_WIDTH_BUCKET_M = 0.05
 JUNCTION_CHAINAGE_EPSILON_M = 0.02
@@ -194,6 +195,8 @@ CROSSWALK_STRIPE_GAP_M = 0.60
 STOP_LINE_WIDTH_M = 0.45
 STOP_LINE_TO_CROSSWALK_GAP_M = 0.0
 JUNCTION_STOP_LINE_SETBACK_M = 2.0
+STREET_LIGHT_STOP_LINE_MARGIN_M = 1.2
+TREE_STOP_LINE_MARGIN_M = 4.8
 JUNCTION_SEMANTIC_SAMPLE_DISTANCE_M = 28.0
 JUNCTION_MARKING_LATERAL_INSET_M = 0.30
 JUNCTION_TRANSVERSE_MARKING_CENTER_GAP_M = 0.75
@@ -1111,8 +1114,8 @@ def add_component_curbs(
 ) -> None:
     curb_width = max(0.18, min(float(rule.curb_width), 0.45))
     for idx in range(len(spans) - 1):
-        left_component, _, boundary = spans[idx]
-        right_component, next_left, _ = spans[idx + 1]
+        left_component, left_span_start, boundary = spans[idx]
+        right_component, next_left, right_span_end = spans[idx + 1]
         if abs(boundary - next_left) > 0.01:
             continue
         left_type = str(left_component.get("type", ""))
@@ -1127,11 +1130,22 @@ def add_component_curbs(
             continue
         if exclude_boundary_component_types is not None and boundary_types & exclude_boundary_component_types:
             continue
+        if left_type in DRIVABLE_COMPONENT_TYPES and right_type in RAISED_COMPONENT_TYPES:
+            curb_left = boundary
+            curb_right = min(right_span_end, boundary + curb_width)
+        elif right_type in DRIVABLE_COMPONENT_TYPES and left_type in RAISED_COMPONENT_TYPES:
+            curb_left = max(left_span_start, boundary - curb_width)
+            curb_right = boundary
+        else:
+            continue
+        if curb_right - curb_left <= 0.03:
+            continue
+
         curb_mesh = swept_band_mesh(
             row,
             line,
-            boundary - curb_width / 2.0,
-            boundary + curb_width / 2.0,
+            curb_left,
+            curb_right,
             f"Curb_{row.name}_{idx}",
             COLORS["curb"],
             z_offset=max(0.055, rule.curb_height * 0.45),
@@ -1463,6 +1477,61 @@ def lookup_junction_approach_extra_setback(
             best_gap = gap
             best_extra = float(extra)
     return best_extra if best_gap <= max(JUNCTION_BUCKET_CLUSTER_M, 1.0) else 0.0
+
+
+def junction_stop_line_asset_exclusion_ranges_for_row(
+    row: pd.Series,
+    line: LineString,
+    rule: Any,
+    approach_extra_setbacks_by_road: dict[Any, list[tuple[float, float, float]]] | None = None,
+    asset_margin_m: float = 0.0,
+) -> list[tuple[float, float]]:
+    """Return chainage ranges where roadside assets would pass the stop line."""
+    if line is None or line.is_empty or line.length <= 1.0:
+        return []
+
+    crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+    min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
+    edge_margin = STOP_LINE_WIDTH_M * 0.5 + max(float(asset_margin_m), 0.0)
+    ranges: list[tuple[float, float]] = []
+
+    for junction_distance in road_gen.row_junction_distances(row):
+        clamped_distance = clamp_junction_chainage(line, junction_distance)
+        if clamped_distance is None:
+            continue
+        for side_sign in (-1.0, 1.0):
+            extra_setback = lookup_junction_approach_extra_setback(
+                approach_extra_setbacks_by_road,
+                row.name,
+                clamped_distance,
+                side_sign,
+            )
+            crosswalk_distance = clamped_distance + side_sign * (crosswalk_offset + extra_setback)
+            stop_line_distance = clamped_distance + side_sign * (stop_line_offset + extra_setback)
+            if not (
+                min_margin < crosswalk_distance < line.length - min_margin
+                and min_margin < stop_line_distance < line.length - min_margin
+            ):
+                continue
+
+            far_stop_line_edge = stop_line_distance + side_sign * edge_margin
+            start = max(0.0, min(float(line.length), min(clamped_distance, far_stop_line_edge)))
+            end = max(0.0, min(float(line.length), max(clamped_distance, far_stop_line_edge)))
+            if end - start > 0.05:
+                ranges.append((start, end))
+
+    if not ranges:
+        return []
+
+    ranges.sort()
+    merged: list[tuple[float, float]] = [ranges[0]]
+    for start, end in ranges[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 0.25:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def junction_marking_across_width(road_width: float) -> float:
@@ -2705,12 +2774,15 @@ def build_component_conflict_clip_geom_by_profile(
         return None
 
 
-def junction_side_component_edge_clear_mask(surface_geom):
+def junction_side_component_edge_clear_mask(surface_geom, overlap_m: float | None = None, retreat_m: float | None = None):
     if surface_geom is None or surface_geom.is_empty:
         return None
     clear_geom = surface_geom
     try:
-        overlap = max(float(JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M), 0.0)
+        overlap = max(
+            float(JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M if overlap_m is None else overlap_m),
+            0.0,
+        )
         if overlap > 0.0:
             inset = road_gen.clean_polygonal(
                 surface_geom.buffer(
@@ -2721,7 +2793,10 @@ def junction_side_component_edge_clear_mask(surface_geom):
             )
             if inset is not None and not inset.is_empty:
                 clear_geom = inset
-        retreat = max(float(JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M), 0.0)
+        retreat = max(
+            float(JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M if retreat_m is None else retreat_m),
+            0.0,
+        )
         if retreat > 0.0:
             clear_geom = road_gen.clean_polygonal(
                 clear_geom.buffer(
@@ -3519,7 +3594,10 @@ def build_junction_side_component_connector_meshes(
             surface,
             scale=JUNCTION_NON_ASPHALT_CENTER_CLEAR_SCALE,
         )
-        side_component_edge_clear_geom = junction_side_component_edge_clear_mask(surface_geom)
+        side_component_edge_clear_geom = junction_side_component_edge_clear_mask(
+            surface_geom,
+            overlap_m=JUNCTION_SIDE_COMPONENT_CONNECTOR_EDGE_OVERLAP_M,
+        )
         stop_line_control_zone_geom = junction_stop_line_control_zone_geom(
             prepared_roads,
             rules,
@@ -4405,6 +4483,13 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         DRIVABLE_COMPONENT_TYPES,
         extra_geoms=side_conflict_extra_geoms,
     )
+    side_component_connector_conflict_clip_geom = build_component_conflict_clip_geom(
+        prepared_roads,
+        rules,
+        drivable_clip_ranges,
+        DRIVABLE_COMPONENT_TYPES,
+        extra_geoms=junction_stop_line_control_zone_parts,
+    )
     road_generation_log("Building side-drivable retreat mask for non-motor and parking lanes.")
     side_drivable_component_conflict_clip_geom = build_component_conflict_clip_geom_by_profile(
         prepared_roads,
@@ -4436,7 +4521,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         roadside_clip_ranges,
         drivable_clip_ranges,
         divider_clip_ranges,
-        side_component_conflict_clip_geom,
+        side_component_connector_conflict_clip_geom,
         side_drivable_component_conflict_clip_geom,
     )
     road_generation_log(
@@ -4571,7 +4656,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     line_spans,
                     curb_meshes,
                     distance_offset=distance_offset,
-                    clip_mask=junction_side_component_edge_clip_geom,
+                    clip_mask=side_component_conflict_clip_geom,
                     exclude_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
                 )
             for segment, distance_offset in clipped_segments_for("divider"):
@@ -4584,7 +4669,7 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     line_spans,
                     curb_meshes,
                     distance_offset=distance_offset,
-                    clip_mask=junction_drivable_core_clip_geom,
+                    clip_mask=side_component_conflict_clip_geom,
                     include_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
                 )
             # 4. Crosswalks and stop lines are generated from the original
@@ -4602,15 +4687,37 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
             )
 
             # 5. Roadside assets are omitted when their footprint would land in
-            # or immediately beside a junction surface.
+            # or immediately beside a junction surface, or pass a stop line.
             if GENERATE_ROAD_ASSETS:
-                for mesh in road_gen.build_street_light_meshes(row, rule):
+                street_light_stop_line_ranges = junction_stop_line_asset_exclusion_ranges_for_row(
+                    row,
+                    line,
+                    rule,
+                    approach_extra_setbacks_by_road,
+                    STREET_LIGHT_STOP_LINE_MARGIN_M,
+                )
+                tree_stop_line_ranges = junction_stop_line_asset_exclusion_ranges_for_row(
+                    row,
+                    line,
+                    rule,
+                    approach_extra_setbacks_by_road,
+                    TREE_STOP_LINE_MARGIN_M,
+                )
+                for mesh in road_gen.build_street_light_meshes(
+                    row,
+                    rule,
+                    blocked_distance_ranges=street_light_stop_line_ranges,
+                ):
                     if mesh_center_inside_polygon(mesh, junction_asset_filter_geom):
                         continue
                     name = f"{mesh.metadata.get('name', 'Street_Light')}_{road_idx}_{line_idx}"
                     mesh.metadata["name"] = name
                     asset_mesh_groups.setdefault(road_gen.asset_mesh_group_name(mesh), []).append(mesh)
-                for mesh in road_gen.build_tree_meshes(row, rule):
+                for mesh in road_gen.build_tree_meshes(
+                    row,
+                    rule,
+                    blocked_distance_ranges=tree_stop_line_ranges,
+                ):
                     if mesh_center_inside_polygon(mesh, junction_asset_filter_geom):
                         continue
                     name = f"{mesh.metadata.get('name', 'Tree')}_{road_idx}_{line_idx}"
