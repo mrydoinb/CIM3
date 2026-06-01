@@ -163,6 +163,7 @@ JUNCTION_SIDE_DRIVABLE_PERIMETER_MAX_PAIR_GAP_M = 32.0
 JUNCTION_SIDE_DRIVABLE_PERIMETER_BRIDGE_M = 1.35
 JUNCTION_SIDE_COMPONENT_DIRECT_BRIDGE_EXTRA_M = 0.12
 JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_MAX_PAIR_GAP_M = 42.0
+JUNCTION_EXPRESSWAY_SIDE_COMPONENT_ATTACH_MAX_PAIR_GAP_M = 95.0
 JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_OUTSET_M = 4.0
 JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_WIDTH_FACTOR = 1.25
 JUNCTION_CORNER_COMPONENT_CONNECTOR_MIN_GAP_DEG = 25.0
@@ -202,8 +203,8 @@ JUNCTION_MARKING_LATERAL_INSET_M = 0.30
 JUNCTION_TRANSVERSE_MARKING_CENTER_GAP_M = 0.75
 JUNCTION_CROSSWALK_CENTER_GAP_M = 0.0
 JUNCTION_STOP_LINE_CENTER_GAP_M = 0.0
-JUNCTION_CROSSWALK_TOP_Z_OFFSET_M = 0.09
-JUNCTION_STOP_LINE_TOP_Z_OFFSET_M = 0.085
+JUNCTION_CROSSWALK_TOP_Z_OFFSET_M = 0.07
+JUNCTION_STOP_LINE_TOP_Z_OFFSET_M = 0.07
 MARKING_SWEEP_SAMPLE_INTERVAL_M = 8.0
 
 COLORS = {
@@ -757,12 +758,18 @@ JUNCTION_SIDE_COMPONENT_TYPES = {
     "facility_belt",
     "non_motor_lane",
 }
-JUNCTION_SIDE_COMPONENT_TRANSITION_TYPES = {"sidewalk", "green_belt", "facility_belt"}
-JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_TYPES = {"sidewalk", "green_belt", "facility_belt"}
+JUNCTION_SIDE_COMPONENT_TRANSITION_TYPES = {"sidewalk", "facility_belt"}
+JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_TYPES = {"sidewalk", "facility_belt"}
+JUNCTION_EXPRESSWAY_SIDE_COMPONENT_ATTACH_TYPES = {"sidewalk", "facility_belt"}
 JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES = {"sidewalk", "green_belt", "facility_belt"}
+JUNCTION_FORWARD_FILL_COMPONENT_TYPES = {"green_belt"}
 JUNCTION_SIDE_DRIVABLE_COMPONENT_TYPES = DRIVABLE_COMPONENT_TYPES & JUNCTION_SIDE_COMPONENT_TYPES
 JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES = {"non_motor_lane", "parking_lane"}
-JUNCTION_CORNER_COMPONENT_CONNECTOR_TYPES = set(JUNCTION_SIDE_COMPONENT_TYPES) - {"service_lane"}
+JUNCTION_CORNER_COMPONENT_CONNECTOR_TYPES = (
+    set(JUNCTION_SIDE_COMPONENT_TYPES)
+    - {"service_lane"}
+    - JUNCTION_FORWARD_FILL_COMPONENT_TYPES
+)
 JUNCTION_EDGE_CLIPPED_COMPONENT_TYPES = JUNCTION_SIDE_COMPONENT_TYPES | {"parking_lane"}
 OPPOSING_CARRIAGEWAY_TYPES = {"main_carriageway", "carriageway"}
 SIDE_COMPONENT_CONNECTOR_LAYER_PRIORITY = {
@@ -781,6 +788,7 @@ SIDE_COMPONENT_CONNECTOR_KIND_PRIORITY = {
     "corner_transition": 1,
     "perimeter": 2,
     "approach": 3,
+    "forward_fill": 3,
 }
 
 
@@ -1719,6 +1727,13 @@ def add_junction_crosswalks_and_stop_lines(
                         stripe_meshes.append(piece_mesh)
                 mesh = road_gen.merge_named_meshes(mesh_name, stripe_meshes, COLORS["crosswalk"])
                 if len(mesh.vertices) > 0:
+                    mesh.metadata.update(
+                        {
+                            "road_idx": str(row.name),
+                            "road_category": road_section_category(row),
+                            "junction_marking_type": "crosswalk",
+                        }
+                    )
                     crosswalk_meshes.append(mesh)
                     stats["crosswalk_stripe_count"] += 1
 
@@ -1746,6 +1761,13 @@ def add_junction_crosswalks_and_stop_lines(
                     stop_meshes.append(piece_mesh)
             mesh = road_gen.merge_named_meshes(stop_name, stop_meshes, COLORS["stop_line"])
             if len(mesh.vertices) > 0:
+                mesh.metadata.update(
+                    {
+                        "road_idx": str(row.name),
+                        "road_category": road_section_category(row),
+                        "junction_marking_type": "stop_line",
+                    }
+                )
                 stop_line_meshes.append(mesh)
                 stats["stop_line_count"] += 1
 
@@ -2390,6 +2412,26 @@ def filter_meshes_without_polygon_overlap(meshes: list[trimesh.Trimesh], geom) -
     return kept, removed
 
 
+def filter_non_expressway_meshes_without_polygon_overlap(
+    meshes: list[trimesh.Trimesh],
+    geom,
+) -> tuple[list[trimesh.Trimesh], int]:
+    if geom is None or geom.is_empty:
+        return meshes, 0
+    kept = []
+    removed = 0
+    for mesh in meshes:
+        if (mesh.metadata or {}).get("road_category") == "expressway":
+            kept.append(mesh)
+            continue
+        footprint = mesh_xy_footprint(mesh)
+        if footprint is not None and geom.intersects(footprint):
+            removed += 1
+            continue
+        kept.append(mesh)
+    return kept, removed
+
+
 def line_intersection_distance_ranges(line: LineString, geom) -> list[tuple[float, float]]:
     if line is None or line.is_empty or geom is None or geom.is_empty or not line.intersects(geom):
         return []
@@ -2788,6 +2830,48 @@ def build_component_conflict_clip_geom_by_profile(
         return None
 
 
+def build_road_category_component_conflict_clip_geom(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    categories: set[str],
+    component_types: set[str] | None = None,
+):
+    parts = []
+    for _, row in prepared_roads.iterrows():
+        line = row.geometry
+        if line is None or line.is_empty or not isinstance(line, LineString):
+            continue
+        if road_section_category(row) not in categories:
+            continue
+        rule = road_gen.get_road_rule(row, rules)
+        components = road_gen.cross_section_components_for_row(row)
+        if not components:
+            components = fallback_cross_section_components(rule)
+        for component, left_offset, right_offset in component_spans(components):
+            component_type = str(component.get("type", ""))
+            if component_types is not None and component_type not in component_types:
+                continue
+            geom = swept_band_polygon(line, left_offset, right_offset)
+            if geom is not None and not geom.is_empty:
+                parts.append(geom)
+    if not parts:
+        return None
+    try:
+        return road_gen.clean_polygonal(unary_union(parts))
+    except Exception:
+        return None
+
+
+def union_optional_geometries(*geoms):
+    parts = [geom for geom in geoms if geom is not None and not geom.is_empty]
+    if not parts:
+        return None
+    try:
+        return road_gen.clean_polygonal(unary_union(parts))
+    except Exception:
+        return parts[0]
+
+
 def junction_side_component_edge_clear_mask(surface_geom, overlap_m: float | None = None, retreat_m: float | None = None):
     if surface_geom is None or surface_geom.is_empty:
         return None
@@ -3091,6 +3175,39 @@ def side_component_records_need_main_road_attach(
         - float(record_b.get("drivable_width_m", 0.0) or 0.0)
     )
     return priority_gap > 0 or width_gap >= float(JUNCTION_MINOR_APPROACH_EXTRA_WIDTH_GAP_M)
+
+
+def side_component_records_include_expressway_attach(
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+) -> bool:
+    component_types = {
+        str(record_a.get("component_type", "")),
+        str(record_b.get("component_type", "")),
+    }
+    if not component_types <= JUNCTION_EXPRESSWAY_SIDE_COMPONENT_ATTACH_TYPES:
+        return False
+    level_keys = [
+        str(record_a.get("level_key", "")),
+        str(record_b.get("level_key", "")),
+    ]
+    return any(level_key.startswith("expressway:") for level_key in level_keys)
+
+
+def side_component_main_attach_max_pair_gap_m(
+    record_a: dict[str, Any],
+    record_b: dict[str, Any],
+) -> float:
+    if side_component_records_include_expressway_attach(record_a, record_b):
+        return float(JUNCTION_EXPRESSWAY_SIDE_COMPONENT_ATTACH_MAX_PAIR_GAP_M)
+    return float(JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_MAX_PAIR_GAP_M)
+
+
+def side_component_record_is_expressway_facility_belt(record: dict[str, Any]) -> bool:
+    return (
+        str(record.get("component_type", "")) == "facility_belt"
+        and str(record.get("level_key", "")).startswith("expressway:")
+    )
 
 
 def side_component_nearest_group_pairs(
@@ -3849,7 +3966,7 @@ def build_junction_side_component_connector_meshes(
                         and nearest.get("center_point") is not None
                         and float(record_center.distance(nearest["center_point"]))
                         > (
-                            JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_MAX_PAIR_GAP_M
+                            side_component_main_attach_max_pair_gap_m(record, nearest)
                             if side_component_records_need_main_road_attach(record, nearest)
                             else JUNCTION_SIDE_COMPONENT_CONNECTOR_MAX_PAIR_GAP_M
                         )
@@ -3897,7 +4014,11 @@ def build_junction_side_component_connector_meshes(
                 side_records_a = sorted(transition_records_by_key_a[transition_key], key=corner_component_record_order_key)
                 side_records_b = sorted(transition_records_by_key_b[transition_key], key=corner_component_record_order_key)
                 transition_max_pair_gap_m = (
-                    JUNCTION_SIDE_COMPONENT_MAIN_ROAD_ATTACH_MAX_PAIR_GAP_M
+                    max(
+                        side_component_main_attach_max_pair_gap_m(record, nearest)
+                        for record in side_records_a
+                        for nearest in side_records_b
+                    )
                     if int(arm_a.get("road_priority", 0) or 0) != int(arm_b.get("road_priority", 0) or 0)
                     else JUNCTION_SIDE_COMPONENT_TRANSITION_MAX_PAIR_GAP_M
                 )
@@ -3929,6 +4050,57 @@ def build_junction_side_component_connector_meshes(
                             ordinal,
                         ),
                     }
+
+            expressway_facility_candidates: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+            for source_records, target_records in ((records_a, records_b), (records_b, records_a)):
+                source_side = [
+                    record
+                    for record in source_records
+                    if int(record.get("arm_side_sign", 0))
+                    == int(corner_side_sign_by_arm[str(record.get("arm_id", ""))])
+                ]
+                target_side = [
+                    record
+                    for record in target_records
+                    if int(record.get("arm_side_sign", 0))
+                    == int(corner_side_sign_by_arm[str(record.get("arm_id", ""))])
+                    and str(record.get("component_type", "")) in JUNCTION_EXPRESSWAY_SIDE_COMPONENT_ATTACH_TYPES
+                    and not str(record.get("level_key", "")).startswith("expressway:")
+                ]
+                for record in source_side:
+                    if side_component_record_is_expressway_facility_belt(record) and target_side:
+                        expressway_facility_candidates.append((record, target_side))
+
+            for ordinal, (record, targets) in enumerate(expressway_facility_candidates):
+                nearest = min(
+                    targets,
+                    key=lambda candidate: (
+                        side_component_record_geom_distance(record, candidate),
+                        0 if str(candidate.get("component_type", "")) == "facility_belt" else 1,
+                        int(candidate.get("record_id", 0) or 0),
+                    ),
+                )
+                if (
+                    side_component_record_geom_distance(record, nearest)
+                    > side_component_main_attach_max_pair_gap_m(record, nearest)
+                ):
+                    continue
+                pair = tuple(sorted((int(record["record_id"]), int(nearest["record_id"]))))
+                if pair in paired_records:
+                    continue
+                paired_records[pair] = {
+                    "kind": "main_road_attach",
+                    "group_record_id": int(record["record_id"]),
+                    "connector_key": junction_corner_component_transition_connector_key(
+                        surface_idx,
+                        arm_a_id,
+                        arm_b_id,
+                        str(record["layer_name"]),
+                        str(record["component_type"]),
+                        str(nearest["component_type"]),
+                        ordinal,
+                    ),
+                }
 
         perimeter_records_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
         for record in component_records:
@@ -4013,8 +4185,13 @@ def build_junction_side_component_connector_meshes(
         for record in component_records:
             if int(record["record_id"]) in paired_record_ids:
                 continue
+            connection_kind = (
+                "forward_fill"
+                if str(record.get("component_type", "")) in JUNCTION_FORWARD_FILL_COMPONENT_TYPES
+                else "approach"
+            )
             group_match_key = (
-                f"approach:{surface_idx}:{record['arm_id']}:"
+                f"{connection_kind}:{surface_idx}:{record['arm_id']}:"
                 f"{record['record_id']}:{record['component_match_key']}"
             )
             group_key = (
@@ -4022,7 +4199,7 @@ def build_junction_side_component_connector_meshes(
                 group_match_key,
                 record["connection_level_key"],
                 record["layer_name"],
-                "approach",
+                connection_kind,
             )
             group = connector_groups.setdefault(
                 group_key,
@@ -4040,7 +4217,7 @@ def build_junction_side_component_connector_meshes(
                     "road_level_keys": set(),
                     "adjacent_arm_ids": set(),
                     "lateral_centers": [],
-                    "connection_kind": "approach",
+                    "connection_kind": connection_kind,
                 },
             )
             group["adjacent_arm_ids"].add(record["arm_id"])
@@ -4516,6 +4693,15 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         (JUNCTION_ASPHALT_COMPONENT_TYPES | RAISED_COMPONENT_TYPES | {"service_lane"}),
         extra_geoms=side_conflict_extra_geoms,
     )
+    expressway_component_conflict_clip_geom = build_road_category_component_conflict_clip_geom(
+        prepared_roads,
+        rules,
+        {"expressway"},
+    )
+    non_expressway_side_component_conflict_clip_geom = union_optional_geometries(
+        side_component_conflict_clip_geom,
+        expressway_component_conflict_clip_geom,
+    )
     approach_extra_setbacks_by_road = junction_approach_extra_setbacks_by_road(
         prepared_roads,
         rules,
@@ -4603,7 +4789,11 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     if segment is None or segment.is_empty:
                         continue
                     if component_type in JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES:
-                        component_clip_mask = junction_side_component_edge_clip_geom
+                        component_clip_mask = (
+                            non_expressway_side_component_conflict_clip_geom
+                            if road_section_category(row) != "expressway"
+                            else junction_side_component_edge_clip_geom
+                        )
                     elif component_type in RAISED_COMPONENT_TYPES:
                         component_clip_mask = side_component_conflict_clip_geom
                     elif component_type in JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES:
@@ -4764,6 +4954,24 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
             stop_line_meshes,
             junction_mask_geom,
         )
+        if expressway_component_conflict_clip_geom is not None and not expressway_component_conflict_clip_geom.is_empty:
+            crosswalk_meshes, removed_crosswalk_expressway_overlaps = (
+                filter_non_expressway_meshes_without_polygon_overlap(
+                    crosswalk_meshes,
+                    expressway_component_conflict_clip_geom,
+                )
+            )
+            stop_line_meshes, removed_stop_line_expressway_overlaps = (
+                filter_non_expressway_meshes_without_polygon_overlap(
+                    stop_line_meshes,
+                    expressway_component_conflict_clip_geom,
+                )
+            )
+        else:
+            removed_crosswalk_expressway_overlaps = 0
+            removed_stop_line_expressway_overlaps = 0
+        removed_crosswalks += removed_crosswalk_expressway_overlaps
+        removed_stop_lines += removed_stop_line_expressway_overlaps
         removed_crosswalks += removed_crosswalk_overlaps
         removed_stop_lines += removed_stop_line_overlaps
         junction_marking_stats["crosswalk_stripe_count"] = max(
@@ -4778,6 +4986,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         junction_marking_stats["filtered_stop_line_inside_junction_count"] = removed_stop_lines
         junction_marking_stats["filtered_crosswalk_overlap_count"] = removed_crosswalk_overlaps
         junction_marking_stats["filtered_stop_line_overlap_count"] = removed_stop_line_overlaps
+        junction_marking_stats["filtered_crosswalk_expressway_overlap_count"] = removed_crosswalk_expressway_overlaps
+        junction_marking_stats["filtered_stop_line_expressway_overlap_count"] = removed_stop_line_expressway_overlaps
 
     combined_meshes = {}
     road_generation_log("Merging road mesh parts by output layer.")
