@@ -3021,7 +3021,7 @@ def main() -> None:
     """Deprecated road-only entry; use the city pipeline instead."""
     raise SystemExit(
         "road-only road_test generation has been retired. "
-        "Use scripts/05_generate_cim_city.py or python -m cli.generate_city."
+        "Use scripts/02_generate_cim_roads.py."
     )
 
 

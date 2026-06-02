@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Create a clipped raw-data copy for fast CIM city test runs.
+"""Create a clipped raw-data copy for fast CIM road iteration.
 
 The script does not modify ``data/Data``. It writes a new folder with the same
 relative vector-file layout, clipped to a center window whose area is roughly

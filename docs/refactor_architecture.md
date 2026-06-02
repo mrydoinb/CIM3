@@ -1,132 +1,57 @@
-﻿# CIM Road POC 重构结构说明
+# CIM Road POC Architecture
 
-本文档记录当前代码重构的目标结构、已完成内容和下一步拆分方向。
+## Goal
 
-## 1. 目标
+The active workflow is optimized for fast road and junction iteration:
 
-重构目标是把原先集中在 `scripts/` 中的大脚本逐步拆成可复用的 Python 包：
+- `scripts/` contains only four ordered command-line entry points.
+- `src/` contains reusable modeling and export logic.
+- Junction debugging is exported as an independent side path, without adding
+  patch logic to the main road geometry pipeline.
+- Expensive QC is opt-in through `CIM_ROAD_RUN_QC=1`.
 
-- `scripts/` 只保留命令行兼容入口。
-- `src/` 保存核心业务逻辑。
-- 道路、路口、城市对象、Blender 导出、质检和渲染分别归属不同模块。
-- 主生成逻辑和检查逻辑复用同一套函数，减少复制和漂移。
+## Active Scripts
 
-## 2. 当前结构
+| Step | Script | Responsibility |
+|---|---|---|
+| 01 | `scripts/01_clip_raw_data_sample.py` | Rebuild the clipped test dataset when needed. |
+| 02 | `scripts/02_generate_cim_roads.py` | Generate road OBJ, semantics, classifications, and separate junction OBJ models. |
+| 03 | `scripts/03_export_cim_roads_fbx.py` | Launch Blender and export road and junction-debug FBX files. |
+| 04 | `scripts/04_export_cim_roads_fbx_blender.py` | Blender-side helper called by step 03. |
 
-当前已经完成第一轮包化迁移：
+## Core Modules
 
 ```text
 src/
-  cli/
-    generate_city.py
-    export_fbx.py
-    inspect_fbx.py
-    render_road_qc.py
-    render_cross_sections.py
-    check_junction_stack.py
-  city/
-    geodata.py
-    mesh_utils.py
-    pipeline.py
-    utility_pipes.py
-  road/
-    generator.py
-    rules.py
-    schema.py
-  blender/
-    fbx_export.py
-    fbx_inspect.py
-    road_quality_render.py
-    road_fbx_preview.py
-  render/
-    cross_section_svg.py
-  junction/
-    stack_check.py
-  config/
-  geometry/
-  data_io/
+  road/generator.py
+  city/pipeline.py
+  city/junction_debug.py
+  city/mesh_utils.py
+  blender/fbx_export.py
 ```
 
-`road.schema` 保存道路/路口数据结构，`road.rules` 保存道路规则、道路等级归一化和横断面组件逻辑。
-`city.geodata` 保存图层读取、坐标本地化和底图辅助函数，`city.mesh_utils` 保存通用 mesh/geometry 小工具，`city.utility_pipes` 保存地下管线建模、语义和 QC。
-`config/`、`geometry/`、`data_io/` 当前先作为包边界保留，后续会继续从 `road.generator` 和 `city.pipeline` 中拆入。
+`src/city/pipeline.py` owns road generation. `src/city/junction_debug.py`
+crops finalized meshes into independently inspectable `Jxxxx` models.
 
-## 3. 入口映射
-
-| 兼容脚本入口 | 当前实现模块 |
-|---|---|
-| `scripts/01_generate_cim3_road.py` | `src/road/generator.py` |
-| `scripts/05_generate_cim_city.py` | `src/city/pipeline.py` |
-| `scripts/06_export_cim_city_fbx_blender.py` | `src/blender/fbx_export.py` |
-| `scripts/07_inspect_fbx_materials_blender.py` | `src/blender/fbx_inspect.py` |
-| `scripts/08_render_road_quality_views_blender.py` | `src/blender/road_quality_render.py` |
-| `scripts/09_render_cross_section_diagrams.py` | `src/render/cross_section_svg.py` |
-| `scripts/10_render_road_fbx_preview_blender.py` | `src/blender/road_fbx_preview.py` |
-| `scripts/11_check_junction_stack.py` | `src/junction/stack_check.py` |
-
-## 4. 运行兼容性
-
-原有命令仍保持可用：
+## Run
 
 ```bash
-python scripts/05_generate_cim_city.py
-python scripts/09_render_cross_section_diagrams.py
-python scripts/11_check_junction_stack.py
-blender --background --python scripts/06_export_cim_city_fbx_blender.py
-blender --background --python scripts/07_inspect_fbx_materials_blender.py
+python scripts/02_generate_cim_roads.py
+python scripts/03_export_cim_roads_fbx.py
 ```
 
-也可以从包模块直接调用：
+Regenerate clipped data only when the source dataset changes:
 
 ```bash
-python -m cli.generate_city
-python -m cli.render_cross_sections
-python -m cli.check_junction_stack
+python scripts/01_clip_raw_data_sample.py --overwrite
 ```
 
-直接 `python -m` 运行时需要确保 `src/` 在 `PYTHONPATH` 中，或先以 editable 方式安装项目。
-
-## 5. 后续拆分计划
-
-下一阶段建议从 `src/city/pipeline.py` 和 `src/road/generator.py` 中继续拆：
+## Outputs
 
 ```text
-src/road/
-  rules.py
-  schema.py
-  cross_section.py
-  preparation.py
-  surfaces.py
-  markings.py
-  assets.py
-  scoring.py
-
-src/junction/
-  detection.py
-  clustering.py
-  design_options.py
-  surfaces.py
-  clipping.py
-  markings.py
-  semantics.py
-  qc.py
-
-src/city/
-  geodata.py
-  mesh_utils.py
-  utility_pipes.py
-  buildings.py
-  transit.py
-  utilities.py
-  scene.py
-  semantics.py
-  scoring.py
-
-src/data_io/
-  geodata.py
-  obj_export.py
-  semantic_json.py
-  qc_json.py
+output/obj/modules/cim_city_roads.obj
+output/obj/junctions/J0000.obj
+output/fbx/modules/cim_city_roads.fbx
+output/fbx/modules/cim_city_junctions_debug.fbx
+output/semantic/cim_city_junctions_debug_manifest.json
 ```
-
-其中路口部分优先级最高，因为当前路口生成、裁剪、标线、语义和 QC 都围绕同一组几何函数展开。

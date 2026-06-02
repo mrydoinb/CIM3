@@ -1,5 +1,8 @@
 # CIM 城市道路建模技术文档
 
+> 当前可执行脚本已收敛为 `scripts/01` 到 `scripts/04` 的道路快速迭代流程。
+> 请以 `scripts/README.md` 为准。下文提及的旧城市、渲染和 QC 包装脚本仅作为历史记录保留。
+
 本文档对应当前重构后的代码结构。当前项目已经去掉 `src/cim_road/` 这一层，核心模块直接位于 `src/` 下，例如 `src/city/`、`src/road/`、`src/junction/`、`src/blender/`。
 
 ## 1. 项目定位
@@ -330,9 +333,15 @@ output/fbx/modules/cim_city_utility_pipes.fbx
 
 ```text
 output/semantic/cim_city_roads_semantic.json
+output/semantic/cim_city_roads_classification.json
 output/semantic/cim_city_junctions_semantic.json
 output/semantic/cim_city_utility_pipes_semantic.json
 ```
+
+道路 OBJ / FBX 中的道路组件会按道路类型分组导出，例如
+`Sidewalk_RoadType_Branch_All`、`Road_Surface_Main_RoadType_Arterial_All`。
+跨道路类型的路口连接补片使用 `RoadType_Shared`，路口面使用
+`Junction_Surface_Shared_All`。
 
 QC 报告：
 

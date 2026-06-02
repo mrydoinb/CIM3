@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Run the city workflow against the clipped 1/10 test dataset."""
+"""Generate the CIM road OBJ, semantics, and separate junction debug models."""
 
 from __future__ import annotations
 
-from pathlib import Path
 import os
+from pathlib import Path
 import sys
 
 
@@ -17,10 +17,10 @@ TEST_DATA_DIR = ROOT / "data" / "Data_clip_1_10"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-os.environ.setdefault("CIM_ROAD_DATA_DIR", str(TEST_DATA_DIR))
+os.environ["CIM_ROAD_DATA_DIR"] = str(TEST_DATA_DIR)
 
-from city.pipeline import main
+from city.pipeline import generate_roads_only
 
 
 if __name__ == "__main__":
-    main()
+    generate_roads_only()

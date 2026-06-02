@@ -21,16 +21,17 @@ if [ ! -x "$BLENDER_EXE" ]; then
 fi
 
 echo "==================================================="
-echo "       CIM city automatic modeling workflow"
+echo "       CIM road iteration workflow"
 echo "==================================================="
 
-echo "[1/2] Generating CIM city OBJ with roads, buildings, subway, bus stops, and utilities..."
-"$PYTHON_EXE" scripts/05_generate_cim_city.py
+echo "[1/2] Generating road OBJ and separate junction debug models..."
+"$PYTHON_EXE" scripts/02_generate_cim_roads.py
 
-echo "[2/2] Exporting materialized CIM city FBX..."
-"$BLENDER_EXE" --background --python scripts/06_export_cim_city_fbx_blender.py
+echo "[2/2] Exporting road and junction debug FBX..."
+"$PYTHON_EXE" scripts/03_export_cim_roads_fbx.py --blender "$BLENDER_EXE"
 
 echo "==================================================="
-echo "City workflow finished."
-echo "OBJ: output/obj/cim_city.obj"
-echo "FBX: output/fbx/cim_city.fbx"
+echo "Road workflow finished."
+echo "OBJ: output/obj/modules/cim_city_roads.obj"
+echo "FBX: output/fbx/modules/cim_city_roads.fbx"
+echo "Junction debug FBX: output/fbx/modules/cim_city_junctions_debug.fbx"

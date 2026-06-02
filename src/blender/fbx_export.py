@@ -35,6 +35,10 @@ MODULE_EXPORTS = {
         MODULE_OBJ_DIR / "cim_city_roads.obj",
         MODULE_FBX_DIR / "cim_city_roads.fbx",
     ),
+    "junctions_debug": (
+        MODULE_OBJ_DIR / "cim_city_junctions_debug.obj",
+        MODULE_FBX_DIR / "cim_city_junctions_debug.fbx",
+    ),
     "buildings": (
         MODULE_OBJ_DIR / "cim_city_buildings.obj",
         MODULE_FBX_DIR / "cim_city_buildings.fbx",
