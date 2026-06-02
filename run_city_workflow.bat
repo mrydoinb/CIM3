@@ -40,7 +40,7 @@ echo ===================================================
 echo Road workflow finished.
 echo OBJ: output\obj\modules\cim_city_roads.obj
 echo FBX: output\fbx\modules\cim_city_roads.fbx
-echo Junction debug FBX: output\fbx\modules\cim_city_junctions_debug.fbx
+echo Junction debug FBX directory: output\fbx\junctions
 pause
 exit /b 0
 

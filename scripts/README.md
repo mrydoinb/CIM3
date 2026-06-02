@@ -45,6 +45,12 @@ python scripts/03_export_cim_roads_fbx.py --blender "C:/Program Files/Blender Fo
 output/obj/modules/cim_city_roads.obj
 output/obj/junctions/J0000.obj
 output/fbx/modules/cim_city_roads.fbx
-output/fbx/modules/cim_city_junctions_debug.fbx
+output/fbx/junctions/J0000.fbx
 output/semantic/cim_city_junctions_debug_manifest.json
 ```
+
+## Junction Issue Location
+
+每个调试路口都有稳定编号，例如 `J0055`。在 Blender 中直接加载
+`output/fbx/junctions/J0055.fbx`；反馈问题时提供该编号即可。文件内的对象名称也会
+保留同样的编号后缀，例如 `Sidewalk_J0055`。

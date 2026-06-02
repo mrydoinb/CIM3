@@ -16,7 +16,7 @@ The active workflow is optimized for fast road and junction iteration:
 |---|---|---|
 | 01 | `scripts/01_clip_raw_data_sample.py` | Rebuild the clipped test dataset when needed. |
 | 02 | `scripts/02_generate_cim_roads.py` | Generate road OBJ, semantics, classifications, and separate junction OBJ models. |
-| 03 | `scripts/03_export_cim_roads_fbx.py` | Launch Blender and export road and junction-debug FBX files. |
+| 03 | `scripts/03_export_cim_roads_fbx.py` | Launch Blender and export the road FBX plus one debug FBX per junction. |
 | 04 | `scripts/04_export_cim_roads_fbx_blender.py` | Blender-side helper called by step 03. |
 
 ## Core Modules
@@ -52,6 +52,6 @@ python scripts/01_clip_raw_data_sample.py --overwrite
 output/obj/modules/cim_city_roads.obj
 output/obj/junctions/J0000.obj
 output/fbx/modules/cim_city_roads.fbx
-output/fbx/modules/cim_city_junctions_debug.fbx
+output/fbx/junctions/J0000.fbx
 output/semantic/cim_city_junctions_debug_manifest.json
 ```

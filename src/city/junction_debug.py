@@ -20,11 +20,69 @@ from city.mesh_utils import combine_mesh_list, json_safe_value, scene_from_meshe
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
 CITY_JUNCTION_DEBUG_OBJ_DIR = ROOT / "output" / "obj" / "junctions"
-CITY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH = MODULE_OBJ_DIR / "cim_city_junctions_debug.obj"
+CITY_JUNCTION_DEBUG_FBX_DIR = ROOT / "output" / "fbx" / "junctions"
+LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH = ROOT / "output" / "obj" / "modules" / "cim_city_junctions_debug.obj"
 CITY_JUNCTION_DEBUG_MANIFEST_PATH = ROOT / "output" / "semantic" / "cim_city_junctions_debug_manifest.json"
 JUNCTION_DEBUG_CONTEXT_RADIUS_M = 72.0
+
+
+def clip_polygon_to_axis_bound(
+    vertices: list[np.ndarray],
+    axis: int,
+    bound: float,
+    keep_greater: bool,
+) -> list[np.ndarray]:
+    """Clip one 3D polygon against an XY-aligned vertical plane."""
+    if not vertices:
+        return []
+
+    def inside(vertex: np.ndarray) -> bool:
+        value = float(vertex[axis])
+        return value >= bound - 1e-9 if keep_greater else value <= bound + 1e-9
+
+    def intersection(start: np.ndarray, end: np.ndarray) -> np.ndarray:
+        delta = float(end[axis] - start[axis])
+        if abs(delta) <= 1e-12:
+            return start.copy()
+        ratio = (bound - float(start[axis])) / delta
+        return start + (end - start) * ratio
+
+    clipped = []
+    previous = vertices[-1]
+    previous_inside = inside(previous)
+    for current in vertices:
+        current_inside = inside(current)
+        if current_inside:
+            if not previous_inside:
+                clipped.append(intersection(previous, current))
+            clipped.append(current)
+        elif previous_inside:
+            clipped.append(intersection(previous, current))
+        previous = current
+        previous_inside = current_inside
+    return clipped
+
+
+def clip_triangle_to_junction_window(
+    triangle: np.ndarray,
+    min_x: float,
+    max_x: float,
+    min_y: float,
+    max_y: float,
+) -> list[np.ndarray]:
+    """Return a triangle clipped exactly to the square debug context window."""
+    polygon = [np.asarray(vertex, dtype=float) for vertex in triangle]
+    for axis, bound, keep_greater in (
+        (0, min_x, True),
+        (0, max_x, False),
+        (1, min_y, True),
+        (1, max_y, False),
+    ):
+        polygon = clip_polygon_to_axis_bound(polygon, axis, bound, keep_greater)
+        if len(polygon) < 3:
+            return []
+    return polygon
 
 
 def crop_mesh_to_junction_window(
@@ -32,7 +90,7 @@ def crop_mesh_to_junction_window(
     point: Point,
     radius_m: float,
 ) -> trimesh.Trimesh | None:
-    """Keep finalized mesh faces whose XY bounds intersect a junction window."""
+    """Clip finalized mesh faces exactly to a junction debug context window."""
     if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
         return None
     radius = max(float(radius_m), 1.0)
@@ -48,21 +106,44 @@ def crop_mesh_to_junction_window(
         or float(bounds[0][1]) > max_y
     ):
         return None
-    vertices_xy = np.asarray(mesh.vertices, dtype=float)[:, :2]
+    vertices = np.asarray(mesh.vertices, dtype=float)
     faces = np.asarray(mesh.faces, dtype=int)
-    face_xy = vertices_xy[faces]
-    keep = (
-        (face_xy[:, :, 0].max(axis=1) >= min_x)
-        & (face_xy[:, :, 0].min(axis=1) <= max_x)
-        & (face_xy[:, :, 1].max(axis=1) >= min_y)
-        & (face_xy[:, :, 1].min(axis=1) <= max_y)
-    )
-    face_indices = np.flatnonzero(keep)
-    if len(face_indices) == 0:
+    face_colors = np.asarray(mesh.visual.face_colors)
+    preserve_face_colors = len(face_colors) == len(faces)
+    clipped_vertices = []
+    clipped_faces = []
+    clipped_face_colors = []
+    for face_idx, face in enumerate(faces):
+        polygon = clip_triangle_to_junction_window(
+            vertices[face],
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        )
+        if len(polygon) < 3:
+            continue
+        polygon_start = len(clipped_vertices)
+        clipped_vertices.extend(polygon)
+        for vertex_idx in range(1, len(polygon) - 1):
+            triangle = [polygon_start, polygon_start + vertex_idx, polygon_start + vertex_idx + 1]
+            triangle_vertices = np.asarray([clipped_vertices[index] for index in triangle])
+            if np.linalg.norm(np.cross(triangle_vertices[1] - triangle_vertices[0], triangle_vertices[2] - triangle_vertices[0])) <= 1e-10:
+                continue
+            clipped_faces.append(triangle)
+            if preserve_face_colors:
+                clipped_face_colors.append(face_colors[face_idx])
+    if not clipped_faces:
         return None
-    cropped = mesh.submesh([face_indices], append=True, repair=False)
+    cropped = trimesh.Trimesh(
+        vertices=np.asarray(clipped_vertices),
+        faces=np.asarray(clipped_faces),
+        process=False,
+    )
     if cropped is None or len(cropped.vertices) == 0:
         return None
+    if preserve_face_colors:
+        cropped.visual.face_colors = np.asarray(clipped_face_colors)
     cropped.metadata.update(dict(mesh.metadata or {}))
     return cropped
 
@@ -97,12 +178,13 @@ def write_junction_debug_models(
     surface_geometries: list[dict[str, Any]],
     source_mesh_groups: dict[str, list[trimesh.Trimesh]],
 ) -> dict[str, Any]:
-    """Export one finalized-geometry OBJ per topology bucket plus a bundle."""
+    """Export one finalized-geometry OBJ per topology bucket."""
     CITY_JUNCTION_DEBUG_OBJ_DIR.mkdir(parents=True, exist_ok=True)
-    MODULE_OBJ_DIR.mkdir(parents=True, exist_ok=True)
     for pattern in ("J*.obj", "J*.mtl"):
         for old_path in CITY_JUNCTION_DEBUG_OBJ_DIR.glob(pattern):
             old_path.unlink()
+    if LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH.exists():
+        LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH.unlink()
 
     source_parts = [
         (layer_name, mesh)
@@ -110,7 +192,6 @@ def write_junction_debug_models(
         for mesh in meshes
         if mesh is not None and len(mesh.vertices) > 0 and len(mesh.faces) > 0
     ]
-    bundle_meshes: dict[str, trimesh.Trimesh] = {}
     records = []
     for surface in surface_geometries:
         point = surface.get("point")
@@ -140,11 +221,11 @@ def write_junction_debug_models(
                 }
             )
             exported_meshes[name] = combined
-            bundle_meshes[name] = combined
         if not exported_meshes:
             continue
 
         obj_path = CITY_JUNCTION_DEBUG_OBJ_DIR / f"{junction_id}.obj"
+        fbx_path = CITY_JUNCTION_DEBUG_FBX_DIR / f"{junction_id}.fbx"
         scene_from_meshes(exported_meshes).export(obj_path)
         records.append(
             {
@@ -162,23 +243,19 @@ def write_junction_debug_models(
                 "layer_names": sorted(model_meshes),
                 "mesh_count": len(exported_meshes),
                 "obj_path": obj_path.relative_to(ROOT).as_posix(),
+                "fbx_path": fbx_path.relative_to(ROOT).as_posix(),
             }
         )
-
-    if bundle_meshes:
-        scene_from_meshes(bundle_meshes).export(CITY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH)
-    elif CITY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH.exists():
-        CITY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH.unlink()
 
     manifest = {
         "project": "cim_road_poc",
         "model": "cim_city_junctions_debug",
-        "policy": "one independently inspectable finalized-geometry model per junction topology bucket",
-        "bundle_obj_path": CITY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH.relative_to(ROOT).as_posix(),
+        "policy": "one independently inspectable finalized-geometry OBJ and FBX per junction topology bucket",
         "junction_obj_dir": CITY_JUNCTION_DEBUG_OBJ_DIR.relative_to(ROOT).as_posix(),
+        "junction_fbx_dir": CITY_JUNCTION_DEBUG_FBX_DIR.relative_to(ROOT).as_posix(),
         "summary": {
             "junction_model_count": len(records),
-            "bundle_mesh_count": len(bundle_meshes),
+            "mesh_count": sum(record["mesh_count"] for record in records),
             "context_radius_m": float(JUNCTION_DEBUG_CONTEXT_RADIUS_M),
         },
         "objects": records,

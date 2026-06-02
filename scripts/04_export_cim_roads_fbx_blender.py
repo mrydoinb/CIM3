@@ -14,13 +14,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from blender.fbx_export import MODULE_EXPORTS, export_obj_to_fbx
+from blender.fbx_export import MODULE_EXPORTS, export_junction_debug_fbxs, export_obj_to_fbx
 
 
 def main() -> None:
-    for module_name in ("roads", "junctions_debug"):
-        obj_path, fbx_path = MODULE_EXPORTS[module_name]
-        export_obj_to_fbx(obj_path, fbx_path)
+    obj_path, fbx_path = MODULE_EXPORTS["roads"]
+    export_obj_to_fbx(obj_path, fbx_path)
+    export_junction_debug_fbxs()
 
 
 if __name__ == "__main__":

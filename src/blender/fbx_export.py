@@ -18,6 +18,7 @@ Output:
 """
 
 from __future__ import annotations
+import json
 from pathlib import Path
 
 import bpy
@@ -28,16 +29,17 @@ OBJ_PATH = ROOT / "output" / "obj" / "cim_city.obj"
 FBX_PATH = ROOT / "output" / "fbx" / "cim_city.fbx"
 MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
 MODULE_FBX_DIR = ROOT / "output" / "fbx" / "modules"
+JUNCTION_DEBUG_OBJ_DIR = ROOT / "output" / "obj" / "junctions"
+JUNCTION_DEBUG_FBX_DIR = ROOT / "output" / "fbx" / "junctions"
+JUNCTION_DEBUG_MANIFEST_PATH = ROOT / "output" / "semantic" / "cim_city_junctions_debug_manifest.json"
+LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH = MODULE_OBJ_DIR / "cim_city_junctions_debug.obj"
+LEGACY_JUNCTION_DEBUG_BUNDLE_FBX_PATH = MODULE_FBX_DIR / "cim_city_junctions_debug.fbx"
 GOOGLE_MAP_TEXTURE_PATH = ROOT / "output" / "textures" / "google_static_map.png"
 WORLD_IMAGERY_TEXTURE_PATH = ROOT / "output" / "textures" / "world_imagery_basemap.png"
 MODULE_EXPORTS = {
     "roads": (
         MODULE_OBJ_DIR / "cim_city_roads.obj",
         MODULE_FBX_DIR / "cim_city_roads.fbx",
-    ),
-    "junctions_debug": (
-        MODULE_OBJ_DIR / "cim_city_junctions_debug.obj",
-        MODULE_FBX_DIR / "cim_city_junctions_debug.fbx",
     ),
     "buildings": (
         MODULE_OBJ_DIR / "cim_city_buildings.obj",
@@ -301,11 +303,53 @@ def export_obj_to_fbx(obj_path: Path, fbx_path: Path) -> bool:
     return True
 
 
+def export_junction_debug_fbxs() -> int:
+    JUNCTION_DEBUG_FBX_DIR.mkdir(parents=True, exist_ok=True)
+    obj_paths = sorted(JUNCTION_DEBUG_OBJ_DIR.glob("J*.obj"))
+    expected_names = {f"{obj_path.stem}.fbx" for obj_path in obj_paths}
+    for old_fbx_path in JUNCTION_DEBUG_FBX_DIR.glob("J*.fbx"):
+        if old_fbx_path.name not in expected_names:
+            old_fbx_path.unlink()
+    if LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH.exists():
+        LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH.unlink()
+    if LEGACY_JUNCTION_DEBUG_BUNDLE_FBX_PATH.exists():
+        LEGACY_JUNCTION_DEBUG_BUNDLE_FBX_PATH.unlink()
+    for obj_path in obj_paths:
+        export_obj_to_fbx(obj_path, JUNCTION_DEBUG_FBX_DIR / f"{obj_path.stem}.fbx")
+    update_junction_debug_manifest()
+    print(f"Junction debug FBX files exported: {len(obj_paths)}")
+    return len(obj_paths)
+
+
+def update_junction_debug_manifest() -> None:
+    if not JUNCTION_DEBUG_MANIFEST_PATH.exists():
+        return
+    with JUNCTION_DEBUG_MANIFEST_PATH.open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    manifest["policy"] = "one independently inspectable finalized-geometry OBJ and FBX per junction topology bucket"
+    manifest.pop("bundle_obj_path", None)
+    manifest["junction_fbx_dir"] = JUNCTION_DEBUG_FBX_DIR.relative_to(ROOT).as_posix()
+    summary = manifest.get("summary", {})
+    summary.pop("bundle_mesh_count", None)
+    summary["mesh_count"] = sum(record.get("mesh_count", 0) for record in manifest.get("objects", []))
+    for record in manifest.get("objects", []):
+        junction_id = record.get("junction_id")
+        if not junction_id:
+            continue
+        fbx_path = JUNCTION_DEBUG_FBX_DIR / f"{junction_id}.fbx"
+        if fbx_path.exists():
+            record["fbx_path"] = fbx_path.relative_to(ROOT).as_posix()
+    with JUNCTION_DEBUG_MANIFEST_PATH.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    print(f"Junction debug manifest updated: {JUNCTION_DEBUG_MANIFEST_PATH}")
+
+
 def main() -> None:
     export_obj_to_fbx(OBJ_PATH, FBX_PATH)
 
     for _, (obj_path, fbx_path) in MODULE_EXPORTS.items():
         export_obj_to_fbx(obj_path, fbx_path)
+    export_junction_debug_fbxs()
 
 
 if __name__ == "__main__":

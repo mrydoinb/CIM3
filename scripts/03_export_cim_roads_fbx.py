@@ -16,7 +16,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 BLENDER_EXPORT_SCRIPT = ROOT / "scripts" / "04_export_cim_roads_fbx_blender.py"
 ROAD_FBX_PATH = ROOT / "output" / "fbx" / "modules" / "cim_city_roads.fbx"
-JUNCTION_DEBUG_FBX_PATH = ROOT / "output" / "fbx" / "modules" / "cim_city_junctions_debug.fbx"
+JUNCTION_DEBUG_FBX_DIR = ROOT / "output" / "fbx" / "junctions"
 
 
 def blender_candidates() -> list[Path]:
@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[1/1] Exporting road FBX with Blender: {blender}", flush=True)
     subprocess.run(command, cwd=ROOT, check=True)
     print(f"Road FBX output: {ROAD_FBX_PATH}", flush=True)
-    print(f"Junction debug FBX output: {JUNCTION_DEBUG_FBX_PATH}", flush=True)
+    print(f"Junction debug FBX directory: {JUNCTION_DEBUG_FBX_DIR}", flush=True)
     return 0
 
 
