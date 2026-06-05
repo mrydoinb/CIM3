@@ -1,0 +1,19 @@
+# Project-local Codex settings for fast CIM road iteration.
+# Project-local config is loaded only when this repository is trusted by Codex.
+
+model_reasoning_effort = "medium"
+model_verbosity = "medium"
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "cached"
+project_doc_max_bytes = 65536
+
+[sandbox_workspace_write]
+network_access = false
+
+# Fast mode is useful while repeatedly tuning Blender-visible geometry, but it
+# consumes credits at a higher rate. Uncomment only when you want that tradeoff.
+# service_tier = "fast"
+# [features]
+# fast_mode = true

@@ -1,0 +1,48 @@
+# Allow common read-only discovery commands.
+prefix_rule(
+    pattern = ["rg"],
+    decision = "allow",
+    justification = "Fast repository search is part of normal CIM road debugging.",
+)
+
+prefix_rule(
+    pattern = ["git", "status"],
+    decision = "allow",
+    justification = "Checking worktree state is safe and needed before edits.",
+)
+
+prefix_rule(
+    pattern = ["git", "diff"],
+    decision = "allow",
+    justification = "Inspecting diffs is safe and needed before summaries.",
+)
+
+prefix_rule(
+    pattern = ["D:\\ProgramData\\miniconda3\\envs\\cim-road\\python.exe", "-m", "py_compile"],
+    decision = "allow",
+    justification = "Lightweight Python syntax checks are the default verification step.",
+)
+
+prefix_rule(
+    pattern = ["D:\\ProgramData\\miniconda3\\envs\\cim-road\\python.exe", "scripts\\02_generate_cim_roads.py"],
+    decision = "allow",
+    justification = "Generate CIM road OBJ for visual iteration.",
+)
+
+prefix_rule(
+    pattern = ["D:\\ProgramData\\miniconda3\\envs\\cim-road\\python.exe", "scripts\\03_export_cim_roads_fbx.py"],
+    decision = "allow",
+    justification = "Export CIM road FBX after OBJ generation.",
+)
+
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    justification = "Do not hard-reset the project. Use targeted restore only when the user explicitly requests it.",
+)
+
+prefix_rule(
+    pattern = ["Remove-Item", "-Recurse"],
+    decision = "prompt",
+    justification = "Recursive deletion must be reviewed before running.",
+)
