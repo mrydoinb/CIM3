@@ -4,3 +4,7 @@ cache/
 /data/
 __pycache__/
 *.pyc
+output/
+output/
+assets/*.zip
+*.glb
