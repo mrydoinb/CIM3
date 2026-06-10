@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Generate the CIM road OBJ, semantics, and separate junction debug models."""
+"""Generate the CIM road OBJ and semantics.
+
+Separate junction debug models are opt-in with CIM_ROAD_EXPORT_JUNCTION_DEBUG=1.
+"""
 
 from __future__ import annotations
 

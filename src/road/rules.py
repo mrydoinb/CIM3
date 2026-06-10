@@ -27,7 +27,7 @@ ROAD_SECTION_REQUIREMENTS = {
     # section: road class, default total section width, modeled carriageway
     # lane count, and lane width. The total width is also overridden by the
     # source width field when present in data/Data/road50kms.
-    "A1": {"road_class": "trunk", "grade": "expressway", "total_width": 93.5, "lane_count": 8, "lane_width": 3.75},
+    "A1": {"road_class": "trunk", "grade": "expressway", "total_width": 138.0, "lane_count": 8, "lane_width": 3.75},
     "A2": {"road_class": "trunk", "grade": "expressway", "total_width": 100.0, "lane_count": 8, "lane_width": 3.75},
     "A3": {"road_class": "trunk", "grade": "expressway", "total_width": 72.0, "lane_count": 6, "lane_width": 3.75},
     "B1": {"road_class": "primary", "grade": "arterial", "total_width": 197.0, "lane_count": 8, "lane_width": 3.5},
@@ -81,7 +81,7 @@ VISUAL_SIDE_RESERVE_LIMITS_M = {
     "branch": 3.0,
 }
 
-MODEL_CROSS_SECTIONS_AS_SYMMETRIC = True
+MODEL_CROSS_SECTIONS_AS_SYMMETRIC = False
 SECTION_SYMMETRY_TOLERANCE_M = 0.05
 SYMMETRIC_SECTION_FALLBACKS = {
     "A2": "A3",
@@ -530,7 +530,10 @@ def source_cross_section_components_for_row(row: pd.Series) -> list[dict[str, An
 
 
 def row_target_total_width(row: pd.Series, section_rule: dict[str, Any] | None = None) -> float | None:
-    if section_rule and section_rule.get("use_rule_width") and "total_width" in section_rule:
+    # The section-rule library is sourced from the authored PPT cross-sections.
+    # When a road carries a recognized section code, keep its modeled width tied
+    # to that authored section instead of stretching to a source width field.
+    if section_rule and "total_width" in section_rule:
         return float(section_rule["total_width"])
     width = parse_road_width_m(row.get("osm_width", row.get("width")))
     if width is not None:

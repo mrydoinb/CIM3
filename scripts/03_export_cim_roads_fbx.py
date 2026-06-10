@@ -83,7 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[1/1] Exporting road FBX with Blender: {blender}", flush=True)
     subprocess.run(command, cwd=ROOT, check=True)
     print(f"Road FBX output: {ROAD_FBX_PATH}", flush=True)
-    print(f"Junction debug FBX directory: {JUNCTION_DEBUG_FBX_DIR}", flush=True)
+    if str(os.environ.get("CIM_ROAD_EXPORT_JUNCTION_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        print(f"Junction debug FBX directory: {JUNCTION_DEBUG_FBX_DIR}", flush=True)
+    else:
+        print("Junction debug FBX export: skipped (set CIM_ROAD_EXPORT_JUNCTION_DEBUG=1 to enable)", flush=True)
     return 0
 
 

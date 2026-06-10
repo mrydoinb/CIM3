@@ -29,9 +29,11 @@ OBJ_PATH = ROOT / "output" / "obj" / "cim_city.obj"
 FBX_PATH = ROOT / "output" / "fbx" / "cim_city.fbx"
 MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
 MODULE_FBX_DIR = ROOT / "output" / "fbx" / "modules"
+SEMANTIC_DIR = ROOT / "output" / "semantic"
 JUNCTION_DEBUG_OBJ_DIR = ROOT / "output" / "obj" / "junctions"
 JUNCTION_DEBUG_FBX_DIR = ROOT / "output" / "fbx" / "junctions"
-JUNCTION_DEBUG_MANIFEST_PATH = ROOT / "output" / "semantic" / "cim_city_junctions_debug_manifest.json"
+ROAD_MESH_ATTRIBUTES_PATH = SEMANTIC_DIR / "cim_city_roads_mesh_attributes.json"
+JUNCTION_DEBUG_MANIFEST_PATH = SEMANTIC_DIR / "cim_city_junctions_debug_manifest.json"
 LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH = MODULE_OBJ_DIR / "cim_city_junctions_debug.obj"
 LEGACY_JUNCTION_DEBUG_BUNDLE_FBX_PATH = MODULE_FBX_DIR / "cim_city_junctions_debug.fbx"
 GOOGLE_MAP_TEXTURE_PATH = ROOT / "output" / "textures" / "google_static_map.png"
@@ -269,19 +271,77 @@ def apply_city_materials() -> None:
         obj.data.materials.append(material_for_object(obj.name))
 
 
+def strip_blender_duplicate_suffix(name: str) -> str:
+    if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
+        return name[:-4]
+    return name
+
+
+def attribute_sidecar_for_obj(obj_path: Path) -> Path | None:
+    if obj_path.name not in {"cim_city.obj", "cim_city_roads.obj"}:
+        return None
+    return ROAD_MESH_ATTRIBUTES_PATH if ROAD_MESH_ATTRIBUTES_PATH.exists() else None
+
+
+def load_object_attributes(obj_path: Path) -> tuple[Path | None, dict[str, dict]]:
+    sidecar = attribute_sidecar_for_obj(obj_path)
+    if sidecar is None:
+        return None, {}
+    with sidecar.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    objects_by_name = data.get("objects_by_name") or {}
+    if not isinstance(objects_by_name, dict):
+        return sidecar, {}
+    return sidecar, {str(name): record for name, record in objects_by_name.items() if isinstance(record, dict)}
+
+
+def blender_custom_property_value(value):
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def apply_object_attributes(obj_path: Path) -> None:
+    sidecar, attributes_by_name = load_object_attributes(obj_path)
+    if not attributes_by_name:
+        return
+
+    applied_count = 0
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        attributes = attributes_by_name.get(obj.name) or attributes_by_name.get(strip_blender_duplicate_suffix(obj.name))
+        if not attributes:
+            continue
+        for key, value in attributes.items():
+            prop_key = str(key) if str(key).startswith("cim_") else f"cim_{key}"
+            obj[prop_key] = blender_custom_property_value(value)
+        applied_count += 1
+
+    print(f"Applied CIM custom properties to {applied_count} mesh objects from {sidecar}")
+
+
 def export_fbx(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    bpy.ops.export_scene.fbx(
-        filepath=str(path),
-        use_selection=False,
-        apply_unit_scale=True,
-        bake_space_transform=False,
-        object_types={"MESH"},
-        mesh_smooth_type="FACE",
-        add_leaf_bones=False,
-        path_mode="COPY",
-        embed_textures=False,
-    )
+    export_kwargs = {
+        "filepath": str(path),
+        "use_selection": False,
+        "apply_unit_scale": True,
+        "bake_space_transform": False,
+        "object_types": {"MESH"},
+        "mesh_smooth_type": "FACE",
+        "add_leaf_bones": False,
+        "path_mode": "COPY",
+        "embed_textures": False,
+        "use_custom_props": True,
+    }
+    try:
+        bpy.ops.export_scene.fbx(**export_kwargs)
+    except TypeError:
+        export_kwargs.pop("use_custom_props", None)
+        bpy.ops.export_scene.fbx(**export_kwargs)
 
 
 def export_obj_to_fbx(obj_path: Path, fbx_path: Path) -> bool:
@@ -294,6 +354,7 @@ def export_obj_to_fbx(obj_path: Path, fbx_path: Path) -> bool:
     clear_scene()
     import_obj(obj_path)
     apply_city_materials()
+    apply_object_attributes(obj_path)
 
     bpy.context.scene.unit_settings.system = "METRIC"
     bpy.context.scene.unit_settings.scale_length = 1.0
