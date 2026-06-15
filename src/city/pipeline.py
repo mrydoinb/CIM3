@@ -155,7 +155,18 @@ JUNCTION_SKEW_EXTRA_SETBACK_M = 3.0
 JUNCTION_MULTI_ARM_EXTRA_SETBACK_M = 4.0
 JUNCTION_T_STEM_EXTRA_SETBACK_M = 4.0
 JUNCTION_Y_JUNCTION_EXTRA_SETBACK_M = 2.0
-JUNCTION_DYNAMIC_EXTRA_SETBACK_MAX_M = 18.0
+JUNCTION_WIDE_ROAD_EXTRA_SETBACK_START_M = 32.0
+JUNCTION_WIDE_ROAD_MINOR_APPROACH_RATIO = 0.32
+JUNCTION_WIDE_ROAD_WIDTH_DIFFERENCE_RATIO = 0.22
+JUNCTION_WIDE_ROAD_MINOR_EXTRA_SETBACK_MAX_M = 46.0
+JUNCTION_WIDE_DRIVABLE_EXTRA_SETBACK_START_M = 24.0
+JUNCTION_WIDE_DRIVABLE_MINOR_APPROACH_RATIO = 0.28
+JUNCTION_WIDE_DRIVABLE_MINOR_EXTRA_SETBACK_MAX_M = 14.0
+JUNCTION_EXPRESSWAY_MINOR_EXTRA_SETBACK_M = 10.0
+JUNCTION_EXPRESSWAY_WIDE_MINOR_EXTRA_SETBACK_M = 6.0
+JUNCTION_DYNAMIC_EXTRA_SETBACK_MAX_M = 70.0
+JUNCTION_SIDEWALK_CONNECTOR_EXTRA_SETBACK_MAX_M = 18.0
+JUNCTION_SIDEWALK_CONNECTOR_EXPRESSWAY_MINOR_EXTRA_MAX_M = 16.0
 JUNCTION_WIDE_THROUGH_MIN_WIDTH_M = 14.0
 JUNCTION_WIDE_THROUGH_CLEARANCE_M = 0.75
 JUNCTION_WIDE_THROUGH_MIN_CROSSING_SIN = 0.35
@@ -175,6 +186,8 @@ SIMPLE_JUNCTION_STOP_LINE_TO_CROSSWALK_GAP_M = 1.0
 JUNCTION_CONNECTOR_LOCAL_MARGIN_M = 6.0
 OUTPUT_JUNCTION_SURFACE_CLOSE_M = 0.18
 OUTPUT_ROAD_COMPONENT_CLOSE_M = 0.18
+OUTPUT_ROADSIDE_COMPONENT_CLOSE_M = 0.18
+JUNCTION_SIDE_COMPONENT_CONNECTOR_OVERLAP_M = 1.2 # 相邻道路组件连接处的重叠距离
 JUNCTION_RAMP_MERGE_BRANCH_THROAT_MIN_M = 10.0
 JUNCTION_RAMP_MERGE_BRANCH_THROAT_MAX_M = 24.0
 JUNCTION_RAMP_MERGE_MAIN_SIDE_PATCH_MIN_M = 16.0
@@ -190,6 +203,7 @@ JUNCTION_BUCKET_CLUSTER_M = 22.0
 JUNCTION_APPROACH_BLEND_OVERLAP_M = 0.0
 JUNCTION_DRIVABLE_BLEND_OVERLAP_M = 0.0
 JUNCTION_ROADSIDE_SEAM_OVERLAP_M = 0.8
+JUNCTION_APPROACH_ELEMENT_STOP_CLEARANCE_M = 0# 路口接近段停止线与道路边缘的距离
 JUNCTION_DRIVABLE_CORE_CLIP_INSET_M = 0.0
 JUNCTION_ROADSIDE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M = 0.0
@@ -673,6 +687,12 @@ OUTPUT_ROAD_COMPONENT_CLOSE_LAYERS = {
     "Parking_Lane",
 }
 
+OUTPUT_ROADSIDE_COMPONENT_CLOSE_LAYERS = {
+    "Sidewalk",
+    "Green_Belt",
+    "Facility_Belt",
+}
+
 
 def close_output_same_material_gaps(
     mesh: trimesh.Trimesh,
@@ -1014,7 +1034,7 @@ JUNCTION_STOP_LINE_COMPONENT_TYPES = {"main_carriageway", "carriageway"}
 JUNCTION_APPROACH_CONTROL_COMPONENT_TYPES = DRIVABLE_COMPONENT_TYPES | JUNCTION_DIVIDER_COMPONENT_TYPES
 JUNCTION_PLANAR_SURFACE_COMPONENT_TYPES = set(JUNCTION_ASPHALT_COMPONENT_TYPES)
 JUNCTION_APPROACH_SURFACE_COMPONENT_TYPES = JUNCTION_ASPHALT_COMPONENT_TYPES | {"service_lane"}
-JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES = {"sidewalk", "green_belt", "facility_belt"}
+JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES = {"sidewalk"}
 REAL_WORLD_PLANAR_JUNCTION_TYPES = {"T_JUNCTION", "Y_JUNCTION", "CROSS_JUNCTION"}
 JUNCTION_SIDE_DRIVABLE_RETRACT_COMPONENT_TYPES = {"non_motor_lane", "parking_lane"}
 JUNCTION_EDGE_CLIPPED_COMPONENT_TYPES = {"service_lane"}
@@ -1469,6 +1489,73 @@ def junction_approach_offsets_for_row(row: pd.Series, rule: Any) -> tuple[float,
     return crosswalk_offset, stop_line_offset
 
 
+def junction_approach_element_stop_offset_m(
+    row: pd.Series,
+    rule: Any,
+    arm: dict[str, Any] | None = None,
+    arms: list[dict[str, Any]] | None = None,
+) -> float:
+    """Offset from the junction node to the transverse line where road elements stop."""
+    _crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+    if arm is not None and arms is not None:
+        stop_line_offset += junction_arm_extra_setback_m(arm, arms)
+    return max(
+        0.0,
+        float(stop_line_offset) - STOP_LINE_WIDTH_M * 0.5 - JUNCTION_CHAINAGE_EPSILON_M,
+    )
+
+
+def junction_approach_element_stop_distance(
+    line: LineString,
+    row: pd.Series,
+    rule: Any,
+    arm: dict[str, Any],
+    arms: list[dict[str, Any]],
+    outward_extra_m: float = 0.0,
+) -> float | None:
+    node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", 0.0) or 0.0))
+    if node_distance is None:
+        return None
+    side_sign = -1.0 if float(arm.get("line_direction_sign", 0.0) or 0.0) < 0.0 else 1.0
+    stop_offset = junction_approach_element_stop_offset_m(row, rule, arm, arms) + max(float(outward_extra_m), 0.0)
+    return clamp_junction_chainage(line, float(node_distance) + side_sign * stop_offset)
+
+
+def junction_sidewalk_connector_extra_setback_m(arm: dict[str, Any], arms: list[dict[str, Any]]) -> float:
+    raw_extra = junction_arm_extra_setback_m(arm, arms)
+    category = str(arm.get("category", "") or "").strip().lower()
+    has_expressway = any(str(item.get("category", "") or "").strip().lower() == "expressway" for item in arms)
+    if has_expressway and category != "expressway":
+        return min(raw_extra, float(JUNCTION_SIDEWALK_CONNECTOR_EXPRESSWAY_MINOR_EXTRA_MAX_M))
+    return min(raw_extra, float(JUNCTION_SIDEWALK_CONNECTOR_EXTRA_SETBACK_MAX_M))
+
+
+def junction_sidewalk_connector_distance(
+    line: LineString,
+    row: pd.Series,
+    rule: Any,
+    arm: dict[str, Any],
+    arms: list[dict[str, Any]],
+    outward_extra_m: float = 0.0,
+) -> float | None:
+    """Endpoint distance for outer sidewalk curves, independent from stop-line retreat."""
+    node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", 0.0) or 0.0))
+    if node_distance is None:
+        return None
+    side_sign = -1.0 if float(arm.get("line_direction_sign", 0.0) or 0.0) < 0.0 else 1.0
+    _crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
+    capped_connector_offset = max(
+        0.0,
+        float(stop_line_offset)
+        + junction_sidewalk_connector_extra_setback_m(arm, arms)
+        - STOP_LINE_WIDTH_M * 0.5
+        - JUNCTION_CHAINAGE_EPSILON_M
+    )
+    road_element_stop_offset = junction_approach_element_stop_offset_m(row, rule, arm, arms)
+    connector_offset = max(capped_connector_offset, road_element_stop_offset) + max(float(outward_extra_m), 0.0)
+    return clamp_junction_chainage(line, float(node_distance) + side_sign * connector_offset)
+
+
 def simple_junction_crosswalk_center_distance(boundary_distance: float, side_sign: float) -> float:
     return float(boundary_distance) + float(side_sign) * (
         float(SIMPLE_JUNCTION_CROSSWALK_RETREAT_M) + CROSSWALK_BAND_LENGTH_M * 0.5
@@ -1727,8 +1814,18 @@ def junction_arm_extra_setback_m(arm: dict[str, Any], arms: list[dict[str, Any]]
         return 0.0
     priority = int(arm.get("road_priority", 0) or 0)
     width = float(arm.get("drivable_width_m", 0.0) or 0.0)
+    modeled_width = max(float(arm.get("modeled_width_m", 0.0) or 0.0), width)
+    category = str(arm.get("category", "") or "").strip().lower()
     max_priority = max((int(item.get("road_priority", 0) or 0) for item in arms), default=priority)
     max_width = max((float(item.get("drivable_width_m", 0.0) or 0.0) for item in arms), default=width)
+    max_modeled_width = max(
+        (
+            max(float(item.get("modeled_width_m", 0.0) or 0.0), float(item.get("drivable_width_m", 0.0) or 0.0))
+            for item in arms
+        ),
+        default=modeled_width,
+    )
+    has_expressway = any(str(item.get("category", "") or "").strip().lower() == "expressway" for item in arms)
     junction_type = junction_type_from_arm_geometry(arms)
     gaps = angular_gaps_deg([tuple(item.get("direction_out", (0.0, 0.0))) for item in arms])
     min_gap = min(gaps) if gaps else 90.0
@@ -1745,6 +1842,36 @@ def junction_arm_extra_setback_m(arm: dict[str, Any], arms: list[dict[str, Any]]
 
     if max_priority >= 4 or max_width >= float(JUNCTION_WIDE_THROUGH_MIN_WIDTH_M):
         extra_setback += float(JUNCTION_MAJOR_ROAD_BASE_EXTRA_SETBACK_M)
+
+    if has_expressway and category != "expressway":
+        extra_setback += float(JUNCTION_EXPRESSWAY_MINOR_EXTRA_SETBACK_M)
+        if modeled_width <= max_modeled_width * 0.65:
+            extra_setback += float(JUNCTION_EXPRESSWAY_WIDE_MINOR_EXTRA_SETBACK_M)
+
+    is_minor_to_wide_road = (
+        max_modeled_width >= float(JUNCTION_WIDE_ROAD_EXTRA_SETBACK_START_M)
+        and modeled_width < max_modeled_width - 1.0
+        and (priority_is_minor or width_is_minor or modeled_width <= max_modeled_width * 0.86)
+    )
+    if is_minor_to_wide_road:
+        wide_road_extra = max(
+            0.0,
+            min(
+                float(JUNCTION_WIDE_ROAD_MINOR_EXTRA_SETBACK_MAX_M),
+                (max_modeled_width - float(JUNCTION_WIDE_ROAD_EXTRA_SETBACK_START_M))
+                * float(JUNCTION_WIDE_ROAD_MINOR_APPROACH_RATIO)
+                + (max_modeled_width - modeled_width) * float(JUNCTION_WIDE_ROAD_WIDTH_DIFFERENCE_RATIO),
+            ),
+        )
+        wide_drivable_extra = max(
+            0.0,
+            min(
+                float(JUNCTION_WIDE_DRIVABLE_MINOR_EXTRA_SETBACK_MAX_M),
+                (max_width - float(JUNCTION_WIDE_DRIVABLE_EXTRA_SETBACK_START_M))
+                * float(JUNCTION_WIDE_DRIVABLE_MINOR_APPROACH_RATIO),
+            ),
+        )
+        extra_setback += wide_road_extra + wide_drivable_extra
 
     if junction_type in {"SKEWED_CROSS_OR_MULTI_ARM", "Y_JUNCTION"} or min_gap < 65.0 or max_gap > 155.0:
         skew_ratio = max(0.0, min(1.0, (75.0 - min(float(min_gap), 75.0)) / 40.0))
@@ -3967,7 +4094,8 @@ def variable_width_curve_band(
             continue
         normal = left_normal(direction)
         t = idx / max(last_idx, 1)
-        width = max(0.05, float(start_width) * (1.0 - t) + float(end_width) * t)
+        smooth_t = t * t * (3.0 - 2.0 * t)
+        width = max(0.05, float(start_width) * (1.0 - smooth_t) + float(end_width) * smooth_t)
         half_width = width * 0.5
         left_xy = (point_xy[0] + normal[0] * half_width, point_xy[1] + normal[1] * half_width)
         right_xy = (point_xy[0] - normal[0] * half_width, point_xy[1] - normal[1] * half_width)
@@ -4017,6 +4145,7 @@ def simple_junction_outer_sidewalk_connection_geometries(
     rules: dict[str, Any],
     point: Point,
     members: list[tuple[Any, float]],
+    endpoint_overlap_m: float = 0.0,
 ) -> tuple[list[Any], list[Any]]:
     if point is None or getattr(point, "is_empty", False):
         return [], []
@@ -4028,6 +4157,7 @@ def simple_junction_outer_sidewalk_connection_geometries(
         return [], []
 
     endpoint_by_arm_side: dict[tuple[str, str], dict[str, Any]] = {}
+    landing_parts: list[Any] = []
     for arm in arms:
         road_idx = prepared_road_index_from_arm(prepared_roads, arm)
         if road_idx is None:
@@ -4041,17 +4171,16 @@ def simple_junction_outer_sidewalk_connection_geometries(
         if not components:
             components = fallback_cross_section_components(rule)
         spans = component_spans(components)
-        node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", 0.0) or 0.0))
-        if node_distance is None:
-            continue
-        _, stop_line_offset = junction_approach_offsets_for_row(row, rule)
-        stop_line_offset += junction_arm_extra_setback_m(arm, arms)
-        stop_edge_offset = max(
-            0.0,
-            float(stop_line_offset) - STOP_LINE_WIDTH_M * 0.5 - JUNCTION_CHAINAGE_EPSILON_M,
-        )
         side_sign = -1.0 if float(arm.get("line_direction_sign", 0.0) or 0.0) < 0.0 else 1.0
-        boundary_distance = clamp_junction_chainage(line, float(node_distance) + side_sign * stop_edge_offset)
+        boundary_distance = junction_sidewalk_connector_distance(
+            line,
+            row,
+            rule,
+            arm,
+            arms,
+            outward_extra_m=endpoint_overlap_m,
+        )
+        stop_distance = junction_approach_element_stop_distance(line, row, rule, arm, arms)
         if boundary_distance is None:
             continue
         boundary_point, _, line_normal = road_gen.line_frame_at_distance(line, boundary_distance)
@@ -4071,14 +4200,45 @@ def simple_junction_outer_sidewalk_connection_geometries(
                 "direction": direction,
                 "width": float(sidewalk_span["width"]),
             }
+            if stop_distance is not None and abs(float(boundary_distance) - float(stop_distance)) > 0.05:
+                try:
+                    landing_line = substring(
+                        line,
+                        min(float(stop_distance), float(boundary_distance)),
+                        max(float(stop_distance), float(boundary_distance)),
+                    )
+                except Exception:
+                    landing_line = None
+                if landing_line is not None and not landing_line.is_empty:
+                    landing_geom = swept_band_polygon(
+                        landing_line,
+                        float(sidewalk_span["left_offset"]),
+                        float(sidewalk_span["right_offset"]),
+                    )
+                    if landing_geom is not None and not landing_geom.is_empty:
+                        landing_parts.append(landing_geom)
 
     sidewalk_parts: list[Any] = []
     asphalt_fill_parts: list[Any] = []
+    sidewalk_parts.extend(landing_parts)
+    skip_outer_curve_arm_pairs: set[frozenset[str]] = set()
+    if junction_type_from_arm_geometry(arms) == "T_JUNCTION":
+        opposing_pairs = junction_opposing_arm_pairs(arms)
+        if opposing_pairs:
+            through_a, through_b, _ = opposing_pairs[0]
+            through_a_id = str(through_a.get("arm_id", ""))
+            through_b_id = str(through_b.get("arm_id", ""))
+            if through_a_id and through_b_id:
+                skip_outer_curve_arm_pairs.add(frozenset((through_a_id, through_b_id)))
     ordered_arms = sorted(arms, key=lambda item: float(item.get("bearing_out_deg", 0.0) or 0.0))
     for idx, current_arm in enumerate(ordered_arms):
         next_arm = ordered_arms[(idx + 1) % len(ordered_arms)]
+        current_arm_id = str(current_arm.get("arm_id", ""))
+        next_arm_id = str(next_arm.get("arm_id", ""))
+        if frozenset((current_arm_id, next_arm_id)) in skip_outer_curve_arm_pairs:
+            continue
         gap = (float(next_arm.get("bearing_out_deg", 0.0) or 0.0) - float(current_arm.get("bearing_out_deg", 0.0) or 0.0)) % 360.0
-        if gap <= 20.0 or gap >= 175.0:
+        if gap <= 35.0 or gap >= 145.0:
             continue
         current = endpoint_by_arm_side.get((str(current_arm.get("arm_id", "")), "left"))
         next_endpoint = endpoint_by_arm_side.get((str(next_arm.get("arm_id", "")), "right"))
@@ -4134,6 +4294,7 @@ def simple_junction_outer_sidewalk_connection_meshes(
             rules,
             point,
             surface.get("members", []),
+            endpoint_overlap_m=JUNCTION_SIDE_COMPONENT_CONNECTOR_OVERLAP_M,
         )
         if not sidewalk_geometries:
             continue
@@ -4178,18 +4339,16 @@ def arm_stop_edge_distance(
     rule: Any,
     arm: dict[str, Any],
     arms: list[dict[str, Any]],
+    endpoint_overlap_m: float = 0.0,
 ) -> float | None:
-    node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", 0.0) or 0.0))
-    if node_distance is None:
-        return None
-    side_sign = -1.0 if float(arm.get("line_direction_sign", 0.0) or 0.0) < 0.0 else 1.0
-    _, stop_line_offset = junction_approach_offsets_for_row(row, rule)
-    stop_line_offset += junction_arm_extra_setback_m(arm, arms)
-    stop_edge_offset = max(
-        0.0,
-        float(stop_line_offset) - STOP_LINE_WIDTH_M * 0.5 - JUNCTION_CHAINAGE_EPSILON_M,
+    return junction_approach_element_stop_distance(
+        line,
+        row,
+        rule,
+        arm,
+        arms,
+        outward_extra_m=endpoint_overlap_m,
     )
-    return clamp_junction_chainage(line, float(node_distance) + side_sign * stop_edge_offset)
 
 
 def simple_junction_through_component_connection_meshes(
@@ -4257,8 +4416,22 @@ def simple_junction_through_component_connection_meshes(
         if junction_connection_level_key_for_row(row_a, rule_a) != junction_connection_level_key_for_row(row_b, rule_b):
             continue
 
-        edge_a = arm_stop_edge_distance(row_a, line_a, rule_a, through_a, arms)
-        edge_b = arm_stop_edge_distance(row_b, line_b, rule_b, through_b, arms)
+        edge_a = arm_stop_edge_distance(
+            row_a,
+            line_a,
+            rule_a,
+            through_a,
+            arms,
+            endpoint_overlap_m=JUNCTION_SIDE_COMPONENT_CONNECTOR_OVERLAP_M,
+        )
+        edge_b = arm_stop_edge_distance(
+            row_b,
+            line_b,
+            rule_b,
+            through_b,
+            arms,
+            endpoint_overlap_m=JUNCTION_SIDE_COMPONENT_CONNECTOR_OVERLAP_M,
+        )
         if edge_a is None or edge_b is None:
             continue
         if road_idx_a == road_idx_b:
@@ -4809,6 +4982,7 @@ def simple_junction_surface_geometries(
 
         parts = []
         radii = []
+        approach_boundary_by_arm_id: dict[str, float] = {}
         for road_idx, distance_hints in member_distances.items():
             if road_idx not in prepared_roads.index:
                 continue
@@ -4819,7 +4993,6 @@ def simple_junction_surface_geometries(
             rule = road_gen.get_road_rule(row, rules)
             radius = simple_junction_corner_radius_for_row(row, rule)
             radii.append(radius)
-            _crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
             projected = float(line.project(point))
             if line.distance(point) <= max(road_gen.junction_connection_tolerance(), JUNCTION_BUCKET_CLUSTER_M):
                 node_distance = projected
@@ -4838,18 +5011,20 @@ def simple_junction_surface_geometries(
                 half_width = max(drivable_width_for_row(row, rule), float(rule.road_width)) * 0.5
                 spans = [({"type": "main_carriageway"}, -half_width, half_width)]
 
-            stop_edge_offset = max(
-                0.0,
-                float(stop_line_offset) - STOP_LINE_WIDTH_M * 0.5 - JUNCTION_CHAINAGE_EPSILON_M,
-            )
             for sign in signs:
                 arm = arm_by_road_and_sign.get((str(json_safe_value(road_idx)), -1 if sign < 0.0 else 1))
-                extra_setback = junction_arm_extra_setback_m(arm, arms) if arm is not None else 0.0
                 start = node_distance
-                reach_m = max(float(stop_edge_offset) + float(extra_setback), 1.0)
-                end = max(0.0, min(float(line.length), node_distance + sign * reach_m))
+                if arm is not None:
+                    end = junction_approach_element_stop_distance(line, row, rule, arm, arms)
+                    if end is None:
+                        continue
+                else:
+                    stop_edge_offset = junction_approach_element_stop_offset_m(row, rule)
+                    end = max(0.0, min(float(line.length), node_distance + sign * max(stop_edge_offset, 1.0)))
                 if abs(end - start) <= 0.1:
                     continue
+                if arm is not None:
+                    approach_boundary_by_arm_id[str(arm.get("arm_id", ""))] = float(end)
                 try:
                     segment = substring(line, min(start, end), max(start, end))
                 except Exception:
@@ -4901,6 +5076,7 @@ def simple_junction_surface_geometries(
                 "junction_type": "SIMPLE_ROUNDED_ASPHALT",
                 "junction_hierarchy": "SIMPLE_AT_GRADE",
                 "corner_radius_m": round(float(max(radii, default=0.0)), 3),
+                "approach_marking_boundary_by_arm_id": approach_boundary_by_arm_id,
             }
         )
     return surfaces
@@ -4941,28 +5117,6 @@ def simple_junction_clip_profiles_by_road(
             ): arm
             for arm in arms
         }
-    for road_idx, row in prepared_roads.iterrows():
-        line = row.geometry
-        if line is None or line.is_empty or not isinstance(line, LineString):
-            continue
-        for start, end in line_intersection_distance_ranges(line, surface_union):
-            for profile in ("drivable", "roadside", "divider"):
-                add_adjusted_clip_range(
-                    raw_ranges[profile],
-                    road_idx,
-                    float(line.length),
-                    start,
-                    end,
-                )
-        for start, end in line_intersection_distance_ranges(line, marking_union):
-            add_adjusted_clip_range(
-                raw_ranges["marking"],
-                road_idx,
-                float(line.length),
-                start,
-                end,
-                outward_pad=0.10,
-            )
     for surface in surface_geometries:
         surface_idx = int(surface.get("index", -1))
         if surface_idx < 0:
@@ -4981,20 +5135,22 @@ def simple_junction_clip_profiles_by_road(
             node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", 0.0) or 0.0))
             if node_distance is None:
                 continue
-            _crosswalk_offset, stop_line_offset = junction_approach_offsets_for_row(row, rule)
-            stop_line_offset += junction_arm_extra_setback_m(arm, list(arm_by_key.values()))
-            stop_edge_offset = max(
-                0.0,
-                float(stop_line_offset) - STOP_LINE_WIDTH_M * 0.5 - JUNCTION_CHAINAGE_EPSILON_M,
-            )
-            stop_line_distance = clamp_junction_chainage(
+            element_stop_distance = junction_approach_element_stop_distance(
                 line,
-                float(node_distance) + side_sign * stop_edge_offset,
+                row,
+                rule,
+                arm,
+                list(arm_by_key.values()),
             )
-            if stop_line_distance is None:
+            if element_stop_distance is None:
                 continue
-            start = min(node_distance, stop_line_distance)
-            end = max(node_distance, stop_line_distance)
+            start = min(node_distance, element_stop_distance)
+            end = max(node_distance, element_stop_distance)
+            stop_clearance = max(float(JUNCTION_APPROACH_ELEMENT_STOP_CLEARANCE_M), 0.0)
+            if side_sign > 0.0:
+                end = min(float(line.length), end + stop_clearance)
+            else:
+                start = max(0.0, start - stop_clearance)
             if end - start <= 0.05:
                 continue
             for profile in ("drivable", "roadside", "divider", "marking"):
@@ -5004,6 +5160,20 @@ def simple_junction_clip_profiles_by_road(
                     float(line.length),
                     start,
                     end,
+                )
+    if marking_union is not None and not marking_union.is_empty:
+        for road_idx, row in prepared_roads.iterrows():
+            line = row.geometry
+            if line is None or line.is_empty or not isinstance(line, LineString):
+                continue
+            for start, end in line_intersection_distance_ranges(line, marking_union):
+                add_adjusted_clip_range(
+                    raw_ranges["marking"],
+                    road_idx,
+                    float(line.length),
+                    start,
+                    end,
+                    outward_pad=0.10,
                 )
     return {profile: merge_clip_ranges_by_road(ranges) for profile, ranges in raw_ranges.items()}
 
@@ -5149,6 +5319,7 @@ def add_simple_junction_boundary_markings(
                     boundaries.append((float(end), 1.0, "After"))
                 for boundary_distance, sign, side_name in boundaries:
                     arm = arm_by_key.get((str(json_safe_value(road_idx)), int(sign)))
+                    has_custom_boundary = False
                     if arm is not None:
                         custom_boundary = approach_boundary_by_arm_id.get(str(arm.get("arm_id", "")))
                         if custom_boundary is not None:
@@ -5156,8 +5327,16 @@ def add_simple_junction_boundary_markings(
                                 0.0,
                                 min(float(line.length), float(custom_boundary)),
                             )
-                    crosswalk_distance = simple_junction_crosswalk_center_distance(boundary_distance, sign)
-                    stop_distance = simple_junction_stop_line_center_distance(boundary_distance, sign)
+                            has_custom_boundary = True
+                    if has_custom_boundary:
+                        stop_distance = float(boundary_distance) + float(sign) * (STOP_LINE_WIDTH_M * 0.5)
+                        crosswalk_distance = float(boundary_distance) - float(sign) * (
+                            float(SIMPLE_JUNCTION_STOP_LINE_TO_CROSSWALK_GAP_M)
+                            + CROSSWALK_BAND_LENGTH_M * 0.5
+                        )
+                    else:
+                        crosswalk_distance = simple_junction_crosswalk_center_distance(boundary_distance, sign)
+                        stop_distance = simple_junction_stop_line_center_distance(boundary_distance, sign)
                     min_margin = max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5, 0.4)
                     if not (
                         min_margin < stop_distance < float(line.length) - min_margin
@@ -5606,6 +5785,8 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
             close_m = float(OUTPUT_JUNCTION_SURFACE_CLOSE_M)
         elif layer_name in OUTPUT_ROAD_COMPONENT_CLOSE_LAYERS:
             close_m = float(OUTPUT_ROAD_COMPONENT_CLOSE_M)
+        elif layer_name in OUTPUT_ROADSIDE_COMPONENT_CLOSE_LAYERS:
+            close_m = float(OUTPUT_ROADSIDE_COMPONENT_CLOSE_M)
         if close_m <= 0.0:
             continue
         closed_mesh, closed_count, closed_area = close_output_same_material_gaps(
@@ -5618,6 +5799,9 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
             closed_output_junction_gap_count += closed_count
             closed_output_junction_gap_area += closed_area
         elif layer_name in OUTPUT_ROAD_COMPONENT_CLOSE_LAYERS:
+            closed_output_road_component_gap_count += closed_count
+            closed_output_road_component_gap_area += closed_area
+        elif layer_name in OUTPUT_ROADSIDE_COMPONENT_CLOSE_LAYERS:
             closed_output_road_component_gap_count += closed_count
             closed_output_road_component_gap_area += closed_area
         combined_meshes[mesh_name] = closed_mesh

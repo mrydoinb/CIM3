@@ -125,9 +125,15 @@ def import_obj(path: Path) -> None:
         raise FileNotFoundError(f"Missing OBJ input: {path}")
 
     if hasattr(bpy.ops.wm, "obj_import"):
-        bpy.ops.wm.obj_import(filepath=str(path))
+        try:
+            bpy.ops.wm.obj_import(filepath=str(path), forward_axis="Y", up_axis="Z")
+        except TypeError:
+            bpy.ops.wm.obj_import(filepath=str(path))
     else:
-        bpy.ops.import_scene.obj(filepath=str(path))
+        try:
+            bpy.ops.import_scene.obj(filepath=str(path), axis_forward="Y", axis_up="Z")
+        except TypeError:
+            bpy.ops.import_scene.obj(filepath=str(path))
 
 
 def set_node_input(node, names: tuple[str, ...], value) -> None:
