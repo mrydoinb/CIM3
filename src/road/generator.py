@@ -102,15 +102,20 @@ def first_existing_data_file(patterns: list[str], base_dir: Path) -> Path:
 
 
 RAW_DATA_DIR_ENV = "CIM_ROAD_DATA_DIR"
+RAW_ROADS_FILE_ENV = "CIM_ROAD_ROADS_FILE"
 RAW_SOURCE_DIR = Path(os.environ.get(RAW_DATA_DIR_ENV, ROOT / "data" / "Data")).expanduser().resolve()
-RAW_ROADS = first_existing_data_file(
-    [
-        "road_centerline.geojson",
-        "road50kms/*.shp",
-        "**/road_centerline.geojson",
-        "**/*.geojson",
-    ],
-    RAW_SOURCE_DIR,
+RAW_ROADS = (
+    Path(os.environ[RAW_ROADS_FILE_ENV]).expanduser().resolve()
+    if os.environ.get(RAW_ROADS_FILE_ENV)
+    else first_existing_data_file(
+        [
+            "road_centerline.geojson",
+            "road50kms/*.shp",
+            "**/road_centerline.geojson",
+            "**/*.geojson",
+        ],
+        RAW_SOURCE_DIR,
+    )
 )
 TEXTURE_DIR = ROOT / "output" / "textures"
 GOOGLE_MAP_TEXTURE_PATH = TEXTURE_DIR / "google_static_map.png"

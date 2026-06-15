@@ -248,7 +248,9 @@ def create_basemap_material() -> bpy.types.Material:
     return material
 
 
-def material_for_object(obj_name: str) -> bpy.types.Material:
+def material_for_object(obj_name: str, layer_name: str = "") -> bpy.types.Material:
+    if layer_name in MATERIALS:
+        return create_material(*MATERIALS[layer_name])
     if obj_name.startswith(("GIS_GoogleMap", "GIS_WorldImagery")):
         return create_basemap_material()
     if obj_name.startswith("Junction_Label"):
@@ -267,14 +269,19 @@ def material_for_object(obj_name: str) -> bpy.types.Material:
     return create_material(*DEFAULT_MATERIAL)
 
 
-def apply_city_materials() -> None:
+def apply_city_materials(obj_path: Path | None = None) -> None:
+    attributes_by_name: dict[str, dict] = {}
+    if obj_path is not None:
+        _, attributes_by_name = load_object_attributes(obj_path)
     for obj in bpy.context.scene.objects:
         if obj.type != "MESH":
             continue
         if obj.name.startswith(("GIS_GoogleMap", "GIS_WorldImagery")):
             ensure_planar_uv(obj)
+        attributes = attributes_by_name.get(obj.name) or attributes_by_name.get(strip_blender_duplicate_suffix(obj.name)) or {}
+        layer_name = str(attributes.get("layer_name") or "")
         obj.data.materials.clear()
-        obj.data.materials.append(material_for_object(obj.name))
+        obj.data.materials.append(material_for_object(obj.name, layer_name))
 
 
 def strip_blender_duplicate_suffix(name: str) -> str:
@@ -359,7 +366,7 @@ def export_obj_to_fbx(obj_path: Path, fbx_path: Path) -> bool:
 
     clear_scene()
     import_obj(obj_path)
-    apply_city_materials()
+    apply_city_materials(obj_path)
     apply_object_attributes(obj_path)
 
     bpy.context.scene.unit_settings.system = "METRIC"

@@ -617,7 +617,7 @@ def apply_road_feature_metadata(
 def object_name_token(value: Any, fallback: str = "unknown") -> str:
     text = str(value if value is not None else "").strip()
     text = re.sub(r"\s+", "_", text)
-    text = re.sub(r"[^0-9A-Za-z_\-]+", "", text)
+    text = re.sub(r"[^\w\-]+", "", text, flags=re.UNICODE).strip("_")
     return text[:80] if text else fallback
 
 
@@ -640,13 +640,16 @@ def mesh_road_monomer_key(mesh: trimesh.Trimesh) -> tuple[str, str, str, str]:
 
 
 def road_monomer_mesh_name(layer_name: str, key: tuple[str, str, str, str]) -> str:
-    road_idx, source_road_id, _road_name, category = key
+    road_idx, source_road_id, road_name, category = key
     if road_idx == "shared":
         return f"{layer_name}_Shared_{object_name_token(category, 'Unknown')}"
+    name_token = object_name_token(road_name, "")
+    if name_token:
+        return f"{name_token}-{object_name_token(layer_name, 'Layer')}"
     source_token = object_name_token(source_road_id, "")
     road_token = object_name_token(road_idx, "unknown")
     suffix = road_token if not source_token or source_token == road_token else f"{road_token}_{source_token}"
-    return f"{layer_name}_Road_{suffix}"
+    return f"{suffix}-{object_name_token(layer_name, 'Layer')}"
 
 
 def combine_meshes_by_road_monomer(
@@ -1202,7 +1205,62 @@ def fallback_cross_section_components(rule: Any) -> list[dict[str, Any]]:
     return components
 
 
+def one_sided_sidewalk_spans(
+    components: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], float, float]] | None:
+    valid_components = [
+        component
+        for component in components
+        if float(component.get("width", 0.0) or 0.0) > 0.01
+    ]
+    sidewalk_indexes = [
+        idx
+        for idx, component in enumerate(valid_components)
+        if str(component.get("type", "")) == "sidewalk"
+    ]
+    if len(sidewalk_indexes) != 1:
+        return None
+    sidewalk_idx = sidewalk_indexes[0]
+    if sidewalk_idx not in {0, len(valid_components) - 1}:
+        return None
+    if any(str(component.get("type", "")) not in DRIVABLE_COMPONENT_TYPES | {"sidewalk"} for component in valid_components):
+        return None
+
+    road_width = sum(
+        float(component.get("width", 0.0) or 0.0)
+        for component in valid_components
+        if str(component.get("type", "")) != "sidewalk"
+    )
+    if road_width <= 0.01:
+        return None
+
+    road_left = -road_width / 2.0
+    road_right = road_width / 2.0
+    if sidewalk_idx == 0:
+        cursor = road_left - float(valid_components[0].get("width", 0.0) or 0.0)
+    else:
+        cursor = road_left
+
+    spans: list[tuple[dict[str, Any], float, float]] = []
+    for component in valid_components:
+        width = float(component.get("width", 0.0) or 0.0)
+        component_type = str(component.get("type", ""))
+        if component_type == "sidewalk" and sidewalk_idx == len(valid_components) - 1:
+            left = road_right
+            right = road_right + width
+        else:
+            left = cursor
+            right = cursor + width
+            cursor = right
+        spans.append((component, left, right))
+    return spans
+
+
 def component_spans(components: list[dict[str, Any]]) -> list[tuple[dict[str, Any], float, float]]:
+    one_sided_spans = one_sided_sidewalk_spans(components)
+    if one_sided_spans is not None:
+        return one_sided_spans
+
     total_width = road_gen.component_total_width(components)
     cursor = -total_width / 2.0
     spans: list[tuple[dict[str, Any], float, float]] = []
@@ -3201,6 +3259,131 @@ def build_rounded_junction_surface_meshes(
     return meshes
 
 
+def one_sided_sidewalk_protection_geometries_by_surface(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    surface_geometries: list[dict[str, Any]],
+) -> dict[int, list[dict[str, Any]]]:
+    protected: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for surface in surface_geometries:
+        surface_idx = int(surface.get("index", -1))
+        point = surface.get("point")
+        if surface_idx < 0 or point is None or getattr(point, "is_empty", False):
+            continue
+        try:
+            arms = junction_arm_records(prepared_roads, rules, point, surface.get("members", []))
+        except Exception:
+            continue
+        for arm in arms:
+            road_idx = prepared_road_index_from_arm(prepared_roads, arm)
+            if road_idx is None:
+                continue
+            row = prepared_roads.loc[road_idx]
+            line = row.geometry
+            if line is None or line.is_empty or not isinstance(line, LineString):
+                continue
+            if road_gen.row_section_code(row) != "D6":
+                continue
+            rule = road_gen.get_road_rule(row, rules)
+            components = road_gen.cross_section_components_for_row(row)
+            if not components:
+                components = fallback_cross_section_components(rule)
+            spans = component_spans(components)
+            sidewalk_spans = [
+                (component_idx, component, float(left), float(right))
+                for component_idx, (component, left, right) in enumerate(spans)
+                if str(component.get("type", "")) == "sidewalk" and float(right) - float(left) > 0.05
+            ]
+            if len(sidewalk_spans) != 1:
+                continue
+            component_idx, _sidewalk_component, left_offset, right_offset = sidewalk_spans[0]
+            if not (right_offset <= -0.05 or left_offset >= 0.05):
+                continue
+            boundary_distance = junction_sidewalk_connector_distance(
+                line,
+                row,
+                rule,
+                arm,
+                arms,
+                outward_extra_m=JUNCTION_ROADSIDE_SEAM_OVERLAP_M,
+            )
+            stop_distance = junction_approach_element_stop_distance(line, row, rule, arm, arms)
+            if boundary_distance is None:
+                continue
+            node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", line.project(point)) or 0.0))
+            distances = [float(boundary_distance)]
+            if stop_distance is not None:
+                distances.append(float(stop_distance))
+            if node_distance is not None:
+                distances.append(float(node_distance))
+            start = max(0.0, min(distances))
+            end = min(float(line.length), max(distances))
+            if end - start <= 0.05:
+                continue
+            try:
+                segment = substring(line, start, end)
+            except Exception:
+                continue
+            if segment is None or segment.is_empty:
+                continue
+            geom = swept_band_polygon(segment, left_offset, right_offset)
+            if geom is None or geom.is_empty:
+                continue
+            try:
+                geom = road_gen.clean_polygonal(geom)
+            except Exception:
+                pass
+            if geom is None or geom.is_empty:
+                continue
+            protected[surface_idx].append(
+                {
+                    "geometry": geom,
+                    "road_idx": road_idx,
+                    "row": row,
+                    "rule": rule,
+                    "component_type": "sidewalk",
+                    "component_idx": component_idx,
+                }
+            )
+    return protected
+
+
+def one_sided_sidewalk_protection_meshes(
+    protected_by_surface: dict[int, list[dict[str, Any]]],
+) -> list[trimesh.Trimesh]:
+    meshes: list[trimesh.Trimesh] = []
+    for surface_idx, items in sorted(protected_by_surface.items()):
+        for item_idx, item in enumerate(items):
+            geom = item.get("geometry")
+            if geom is None or geom.is_empty:
+                continue
+            mesh = road_gen.polygon_to_top_mesh(
+                geom,
+                component_z_offset("sidewalk", item["rule"]),
+                f"Sidewalk_Junction_One_Sided_{surface_idx}_{item_idx}",
+                visual_color=COLORS["sidewalk"],
+            )
+            if len(mesh.vertices) == 0:
+                continue
+            apply_road_feature_metadata(
+                mesh,
+                item["row"],
+                item["rule"],
+                layer_name="Sidewalk",
+                component_type="sidewalk",
+                component_idx=item.get("component_idx"),
+            )
+            mesh.metadata.update(
+                {
+                    "name": f"Sidewalk_Junction_One_Sided_{surface_idx}_{item_idx}",
+                    "junction_index": surface_idx,
+                    "cim_entity_type": "junction_one_sided_sidewalk_protection",
+                }
+            )
+            meshes.append(mesh)
+    return meshes
+
+
 def junction_connector_footprints_by_surface(
     mesh_groups: dict[str, list[trimesh.Trimesh]],
 ) -> dict[int, list[Any]]:
@@ -4042,10 +4225,17 @@ def outer_sidewalk_span_for_outward_side(
     # coordinate. Roads approached from the line end have the lateral sides
     # flipped relative to the stored LineString direction.
     use_positive_line_side = bool(outward_left_side) == (float(line_direction_sign) >= 0.0)
+    side_candidates = [
+        item
+        for item in candidates
+        if (item["center_offset"] > 0.05 if use_positive_line_side else item["center_offset"] < -0.05)
+    ]
+    if not side_candidates:
+        return None
     return (
-        max(candidates, key=lambda item: item["center_offset"])
+        max(side_candidates, key=lambda item: item["center_offset"])
         if use_positive_line_side
-        else min(candidates, key=lambda item: item["center_offset"])
+        else min(side_candidates, key=lambda item: item["center_offset"])
     )
 
 
@@ -4157,7 +4347,6 @@ def simple_junction_outer_sidewalk_connection_geometries(
         return [], []
 
     endpoint_by_arm_side: dict[tuple[str, str], dict[str, Any]] = {}
-    landing_parts: list[Any] = []
     for arm in arms:
         road_idx = prepared_road_index_from_arm(prepared_roads, arm)
         if road_idx is None:
@@ -4199,6 +4388,7 @@ def simple_junction_outer_sidewalk_connection_geometries(
                 ),
                 "direction": direction,
                 "width": float(sidewalk_span["width"]),
+                "landing_geom": None,
             }
             if stop_distance is not None and abs(float(boundary_distance) - float(stop_distance)) > 0.05:
                 try:
@@ -4216,11 +4406,11 @@ def simple_junction_outer_sidewalk_connection_geometries(
                         float(sidewalk_span["right_offset"]),
                     )
                     if landing_geom is not None and not landing_geom.is_empty:
-                        landing_parts.append(landing_geom)
+                        endpoint_by_arm_side[(str(arm.get("arm_id", "")), side_name)]["landing_geom"] = landing_geom
 
     sidewalk_parts: list[Any] = []
     asphalt_fill_parts: list[Any] = []
-    sidewalk_parts.extend(landing_parts)
+    used_landing_keys: set[tuple[str, str]] = set()
     skip_outer_curve_arm_pairs: set[frozenset[str]] = set()
     if junction_type_from_arm_geometry(arms) == "T_JUNCTION":
         opposing_pairs = junction_opposing_arm_pairs(arms)
@@ -4244,6 +4434,14 @@ def simple_junction_outer_sidewalk_connection_geometries(
         next_endpoint = endpoint_by_arm_side.get((str(next_arm.get("arm_id", "")), "right"))
         if current is None or next_endpoint is None:
             continue
+        for landing_key, endpoint in (
+            ((str(current_arm.get("arm_id", "")), "left"), current),
+            ((str(next_arm.get("arm_id", "")), "right"), next_endpoint),
+        ):
+            landing_geom = endpoint.get("landing_geom")
+            if landing_key not in used_landing_keys and landing_geom is not None and not landing_geom.is_empty:
+                sidewalk_parts.append(landing_geom)
+                used_landing_keys.add(landing_key)
         start_point = current["point"]
         end_point = next_endpoint["point"]
         chord = math.hypot(end_point[0] - start_point[0], end_point[1] - start_point[1])
@@ -5466,6 +5664,19 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     road_generation_log("Building simple rounded asphalt junction surfaces.")
     junction_surface_geometries = simple_junction_surface_geometries(prepared_roads, rules, junction_buckets)
     road_generation_log(f"Built {len(junction_surface_geometries)} simple junction asphalt surfaces.")
+    one_sided_sidewalk_protection = one_sided_sidewalk_protection_geometries_by_surface(
+        prepared_roads,
+        rules,
+        junction_surface_geometries,
+    )
+    one_sided_sidewalk_subtract = {
+        surface_idx: [
+            item["geometry"]
+            for item in items
+            if item.get("geometry") is not None and not item["geometry"].is_empty
+        ]
+        for surface_idx, items in one_sided_sidewalk_protection.items()
+    }
     junction_mask_geom = junction_surface_union(junction_surface_geometries)
     junction_asset_filter_geom = junction_surface_union(junction_surface_geometries, clearance=1.0)
     junction_drivable_core_clip_geom = road_gen.clean_polygonal(junction_mask_geom) if junction_mask_geom is not None and not junction_mask_geom.is_empty else None
@@ -5483,7 +5694,16 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         junction_surface_geometries,
     )
     ramp_merge_marking_controls_by_road: dict[Any, list[dict[str, Any]]] = {}
-    junction_surface_meshes = build_rounded_junction_surface_meshes(junction_surface_geometries)
+    junction_surface_meshes = build_rounded_junction_surface_meshes(
+        junction_surface_geometries,
+        subtract_geometries_by_surface=one_sided_sidewalk_subtract,
+    )
+    one_sided_sidewalk_meshes = one_sided_sidewalk_protection_meshes(one_sided_sidewalk_protection)
+    component_mesh_groups["Sidewalk"].extend(one_sided_sidewalk_meshes)
+    if one_sided_sidewalk_meshes:
+        road_generation_log(
+            f"Preserved {len(one_sided_sidewalk_meshes)} D6 one-sided sidewalk junction approaches."
+        )
     sidewalk_curve_meshes = simple_junction_outer_sidewalk_connection_meshes(
         prepared_roads,
         rules,
