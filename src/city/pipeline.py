@@ -23,6 +23,7 @@ Output:
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 import json
 import math
@@ -88,17 +89,17 @@ RAW_DIR = road_gen.RAW_SOURCE_DIR
 OUT_PATH = ROOT / "output" / "obj" / "cim_city.obj"
 MODULE_OBJ_DIR = ROOT / "output" / "obj" / "modules"
 MODULE_OBJ_PATHS = {
-    "roads": MODULE_OBJ_DIR / "cim_city_roads.obj",
+    "roads": MODULE_OBJ_DIR / "cim4_city_roads.obj",
     "buildings": MODULE_OBJ_DIR / "cim_city_buildings.obj",
     "subway_tunnels": MODULE_OBJ_DIR / "cim_city_subway_tunnels.obj",
     "subway_stations": MODULE_OBJ_DIR / "cim_city_subway_stations.obj",
     "bus_stops": MODULE_OBJ_DIR / "cim_city_bus_stops.obj",
     "utility_pipes": MODULE_OBJ_DIR / "cim_city_utility_pipes.obj",
 }
-CITY_ROAD_SEMANTIC_PATH = ROOT / "output" / "semantic" / "cim_city_roads_semantic.json"
-CITY_ROAD_CLASSIFICATION_PATH = ROOT / "output" / "semantic" / "cim_city_roads_classification.json"
-CITY_ROAD_MESH_ATTRIBUTES_PATH = ROOT / "output" / "semantic" / "cim_city_roads_mesh_attributes.json"
-CITY_JUNCTION_SEMANTIC_PATH = ROOT / "output" / "semantic" / "cim_city_junctions_semantic.json"
+CITY_ROAD_SEMANTIC_PATH = ROOT / "output" / "semantic" / "cim4_city_roads_semantic.json"
+CITY_ROAD_CLASSIFICATION_PATH = ROOT / "output" / "semantic" / "cim4_city_roads_classification.json"
+CITY_ROAD_MESH_ATTRIBUTES_PATH = ROOT / "output" / "semantic" / "cim4_city_roads_mesh_attributes.json"
+CITY_JUNCTION_SEMANTIC_PATH = ROOT / "output" / "semantic" / "cim4_city_junctions_semantic.json"
 CITY_UTILITY_SEMANTIC_PATH = ROOT / "output" / "semantic" / "cim_city_utility_pipes_semantic.json"
 CITY_ROAD_SCORE_PATH = ROOT / "output" / "qc_report" / "cim_city_roads_model_score.json"
 CITY_JUNCTION_SCORE_PATH = ROOT / "output" / "qc_report" / "cim_city_junction_score.json"
@@ -231,6 +232,82 @@ JUNCTION_STOP_LINE_CENTER_GAP_M = 0.0
 JUNCTION_CROSSWALK_TOP_Z_OFFSET_M = 0.07
 JUNCTION_STOP_LINE_TOP_Z_OFFSET_M = 0.07
 MARKING_SWEEP_SAMPLE_INTERVAL_M = 8.0
+
+
+@dataclass(frozen=True)
+class RoadGenerationProfile:
+    name: str
+    mesh_granularity: str
+    generate_assets: bool
+    generate_lane_markings: bool
+    generate_junction_markings: bool
+    generate_side_component_connectors: bool
+    generate_curbs: bool
+    semantic_level: str
+
+
+CIM4_PROFILE = RoadGenerationProfile(
+    name="cim4",
+    mesh_granularity="component",
+    generate_assets=True,
+    generate_lane_markings=True,
+    generate_junction_markings=True,
+    generate_side_component_connectors=True,
+    generate_curbs=True,
+    semantic_level="fine_component_with_assets_markings_and_full_junction_semantics",
+)
+CIM3_PROFILE = RoadGenerationProfile(
+    name="cim3",
+    mesh_granularity="component",
+    generate_assets=False,
+    generate_lane_markings=False,
+    generate_junction_markings=True,
+    generate_side_component_connectors=True,
+    generate_curbs=False,
+    semantic_level="lightweight_component_layers_with_full_junction_handling",
+)
+ROAD_GENERATION_PROFILES = {
+    CIM3_PROFILE.name: CIM3_PROFILE,
+    CIM4_PROFILE.name: CIM4_PROFILE,
+}
+
+
+def road_generation_profile(level: str | RoadGenerationProfile | None = None) -> RoadGenerationProfile:
+    if isinstance(level, RoadGenerationProfile):
+        return level
+    key = str(level or CIM4_PROFILE.name).strip().lower()
+    if key not in ROAD_GENERATION_PROFILES:
+        raise ValueError(f"Unknown road generation level: {level!r}. Expected one of: {sorted(ROAD_GENERATION_PROFILES)}")
+    return ROAD_GENERATION_PROFILES[key]
+
+
+def road_output_stem(profile: RoadGenerationProfile) -> str:
+    return f"{profile.name}_city_roads"
+
+
+def road_obj_path_for_profile(profile: RoadGenerationProfile) -> Path:
+    return MODULE_OBJ_DIR / profile.name / "city_roads.obj"
+
+
+def road_semantic_path_for_profile(profile: RoadGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "city_roads_semantic.json"
+
+
+def road_classification_path_for_profile(profile: RoadGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "city_roads_classification.json"
+
+
+def road_mesh_attributes_path_for_profile(profile: RoadGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "city_roads_mesh_attributes.json"
+
+
+def road_source_attributes_path_for_profile(profile: RoadGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "city_roads_source_attributes.json"
+
+
+def junction_semantic_path_for_profile(profile: RoadGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "city_junctions_semantic.json"
+
 
 COLORS = {
     "gis_basemap": [88, 118, 94, 255],
@@ -3274,7 +3351,14 @@ def one_sided_sidewalk_protection_geometries_by_surface(
             arms = junction_arm_records(prepared_roads, rules, point, surface.get("members", []))
         except Exception:
             continue
+        has_expressway_arm = any(
+            str(item.get("category", "") or "").strip().lower() == "expressway"
+            for item in arms
+        )
         for arm in arms:
+            category = str(arm.get("category", "") or "").strip().lower()
+            if has_expressway_arm and category != "expressway":
+                continue
             road_idx = prepared_road_index_from_arm(prepared_roads, arm)
             if road_idx is None:
                 continue
@@ -5623,13 +5707,19 @@ def add_simple_junction_boundary_markings(
 
 
 
-def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
+def build_road_surface_meshes(
+    roads: gpd.GeoDataFrame,
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+) -> dict[str, trimesh.Trimesh]:
     """Build road meshes without the legacy junction subsystem attached."""
+    profile = road_generation_profile(profile)
     if roads.empty:
         road_generation_log("No road records; skipping road mesh generation.")
         return {}
 
-    road_generation_log(f"Preparing {len(roads)} source road records for surface generation.")
+    road_generation_log(
+        f"Preparing {len(roads)} source road records for {profile.name.upper()} surface generation."
+    )
     prepared_roads = roads.copy() if roads_are_prepared_for_surfaces(roads) else prepare_roads_for_surfaces(roads)
     if prepared_roads.empty:
         road_generation_log("No valid prepared roads; skipping road mesh generation.")
@@ -5664,10 +5754,14 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
     road_generation_log("Building simple rounded asphalt junction surfaces.")
     junction_surface_geometries = simple_junction_surface_geometries(prepared_roads, rules, junction_buckets)
     road_generation_log(f"Built {len(junction_surface_geometries)} simple junction asphalt surfaces.")
-    one_sided_sidewalk_protection = one_sided_sidewalk_protection_geometries_by_surface(
-        prepared_roads,
-        rules,
-        junction_surface_geometries,
+    one_sided_sidewalk_protection = (
+        one_sided_sidewalk_protection_geometries_by_surface(
+            prepared_roads,
+            rules,
+            junction_surface_geometries,
+        )
+        if profile.generate_side_component_connectors
+        else {}
     )
     one_sided_sidewalk_subtract = {
         surface_idx: [
@@ -5704,19 +5798,27 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
         road_generation_log(
             f"Preserved {len(one_sided_sidewalk_meshes)} D6 one-sided sidewalk junction approaches."
         )
-    sidewalk_curve_meshes = simple_junction_outer_sidewalk_connection_meshes(
-        prepared_roads,
-        rules,
-        junction_surface_geometries,
+    sidewalk_curve_meshes = (
+        simple_junction_outer_sidewalk_connection_meshes(
+            prepared_roads,
+            rules,
+            junction_surface_geometries,
+        )
+        if profile.generate_side_component_connectors
+        else []
     )
     component_mesh_groups["Sidewalk"].extend(sidewalk_curve_meshes)
     road_generation_log(
         f"Built {len(sidewalk_curve_meshes)} outer sidewalk curve meshes from junction boundary arcs."
     )
-    through_component_meshes = simple_junction_through_component_connection_meshes(
-        prepared_roads,
-        rules,
-        junction_surface_geometries,
+    through_component_meshes = (
+        simple_junction_through_component_connection_meshes(
+            prepared_roads,
+            rules,
+            junction_surface_geometries,
+        )
+        if profile.generate_side_component_connectors
+        else []
     )
     through_component_counts: Counter[str] = Counter()
     for mesh in through_component_meshes:
@@ -5766,21 +5868,21 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
             line_spans = spans
             segment_cache: dict[str, list[tuple[LineString, float]]] = {}
 
-            def clipped_segments_for(profile: str) -> list[tuple[LineString, float]]:
-                if profile not in segment_cache:
+            def clipped_segments_for(clip_profile: str) -> list[tuple[LineString, float]]:
+                if clip_profile not in segment_cache:
                     profile_ranges = {
                         "drivable": drivable_clip_ranges,
                         "roadside": roadside_clip_ranges,
                         "divider": divider_clip_ranges,
                         "marking": marking_clip_ranges,
-                    }.get(profile, {})
+                    }.get(clip_profile, {})
                     clip_ranges = profile_ranges.get(road_idx, [])
-                    segment_cache[profile] = (
+                    segment_cache[clip_profile] = (
                         road_gen.line_segments_outside_ranges(line, clip_ranges)
                         if clip_ranges
                         else [(line, 0.0)]
                     )
-                return segment_cache[profile]
+                return segment_cache[clip_profile]
 
             # 1. Longitudinal cross-section components: road surfaces,
             # sidewalks, non-motor lanes, green belts, medians, and similar.
@@ -5789,12 +5891,12 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                 layer_name = component_layer_name_for_row(component_type, row)
                 color = COMPONENT_COLORS.get(layer_name, COLORS["green_belt"])
                 if component_type in JUNCTION_ASPHALT_COMPONENT_TYPES:
-                    profile = "drivable"
+                    clip_profile = "drivable"
                 elif component_type in JUNCTION_DIVIDER_COMPONENT_TYPES:
-                    profile = "divider"
+                    clip_profile = "divider"
                 else:
-                    profile = "roadside"
-                for segment_idx, (segment, distance_offset) in enumerate(clipped_segments_for(profile)):
+                    clip_profile = "roadside"
+                for segment_idx, (segment, distance_offset) in enumerate(clipped_segments_for(clip_profile)):
                     if segment is None or segment.is_empty:
                         continue
                     if component_type in JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES:
@@ -5835,65 +5937,67 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
 
             # 2. Lane markings are generated on the marking profile so they
             # stop earlier than road surfaces near intersections.
-            for segment, distance_offset in clipped_segments_for("marking"):
-                if segment is None or segment.is_empty:
-                    continue
-                for component_idx, (component, left_offset, right_offset) in enumerate(line_spans):
-                    suppressed_edges = white_edge_suppression.get(component_idx, set())
-                    add_component_lane_markings(
+            if profile.generate_lane_markings:
+                for segment, distance_offset in clipped_segments_for("marking"):
+                    if segment is None or segment.is_empty:
+                        continue
+                    for component_idx, (component, left_offset, right_offset) in enumerate(line_spans):
+                        suppressed_edges = white_edge_suppression.get(component_idx, set())
+                        add_component_lane_markings(
+                            row,
+                            segment,
+                            rule,
+                            component,
+                            left_offset,
+                            right_offset,
+                            white_marking_meshes,
+                            suppress_left_edge="left" in suppressed_edges,
+                            suppress_right_edge="right" in suppressed_edges,
+                            distance_offset=distance_offset,
+                        )
+
+                    add_center_markings_for_adjacent_carriageways(
                         row,
                         segment,
                         rule,
-                        component,
-                        left_offset,
-                        right_offset,
-                        white_marking_meshes,
-                        suppress_left_edge="left" in suppressed_edges,
-                        suppress_right_edge="right" in suppressed_edges,
+                        line_spans,
+                        yellow_marking_meshes,
                         distance_offset=distance_offset,
                     )
-
-                add_center_markings_for_adjacent_carriageways(
-                    row,
-                    segment,
-                    rule,
-                    line_spans,
-                    yellow_marking_meshes,
-                    distance_offset=distance_offset,
-                )
 
             # 3. Curbs follow the roadside profile and retreat from junctions
             # together with raised roadside components; divider curbs use the
             # divider profile so medians reach the stop line.
-            for segment, distance_offset in clipped_segments_for("roadside"):
-                if segment is None or segment.is_empty:
-                    continue
-                add_component_curbs(
-                    row,
-                    segment,
-                    rule,
-                    line_spans,
-                    curb_meshes,
-                    distance_offset=distance_offset,
-                    clip_mask=side_component_conflict_clip_geom,
-                    exclude_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
-                )
-            for segment, distance_offset in clipped_segments_for("divider"):
-                if segment is None or segment.is_empty:
-                    continue
-                add_component_curbs(
-                    row,
-                    segment,
-                    rule,
-                    line_spans,
-                    curb_meshes,
-                    distance_offset=distance_offset,
-                    clip_mask=side_component_conflict_clip_geom,
-                    include_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
-                )
+            if profile.generate_curbs:
+                for segment, distance_offset in clipped_segments_for("roadside"):
+                    if segment is None or segment.is_empty:
+                        continue
+                    add_component_curbs(
+                        row,
+                        segment,
+                        rule,
+                        line_spans,
+                        curb_meshes,
+                        distance_offset=distance_offset,
+                        clip_mask=side_component_conflict_clip_geom,
+                        exclude_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
+                    )
+                for segment, distance_offset in clipped_segments_for("divider"):
+                    if segment is None or segment.is_empty:
+                        continue
+                    add_component_curbs(
+                        row,
+                        segment,
+                        rule,
+                        line_spans,
+                        curb_meshes,
+                        distance_offset=distance_offset,
+                        clip_mask=side_component_conflict_clip_geom,
+                        include_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
+                    )
             # 4. Roadside assets are generated without legacy junction or
             # stop-line exclusion while the junction subsystem is being rebuilt.
-            if GENERATE_ROAD_ASSETS:
+            if GENERATE_ROAD_ASSETS and profile.generate_assets:
                 for mesh in road_gen.build_street_light_meshes(
                     row,
                     rule,
@@ -5919,15 +6023,16 @@ def build_road_surface_meshes(roads: gpd.GeoDataFrame) -> dict[str, trimesh.Trim
                     mesh.metadata["cim_entity_type"] = "road_asset"
                     asset_mesh_groups.setdefault(road_gen.asset_mesh_group_name(mesh), []).append(mesh)
 
-    junction_marking_stats.update(
-        add_simple_junction_boundary_markings(
-            prepared_roads,
-            rules,
-            junction_surface_geometries,
-            crosswalk_meshes,
-            stop_line_meshes,
+    if profile.generate_junction_markings:
+        junction_marking_stats.update(
+            add_simple_junction_boundary_markings(
+                prepared_roads,
+                rules,
+                junction_surface_geometries,
+                crosswalk_meshes,
+                stop_line_meshes,
+            )
         )
-    )
     road_generation_log(
         "Generated "
         f"{junction_marking_stats.get('stop_line_count', 0)} stop lines and "
@@ -6157,11 +6262,25 @@ def road_cross_section_record(row: pd.Series) -> dict[str, Any]:
     }
 
 
-def build_city_road_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
+def build_city_road_semantic(
+    prepared_roads: gpd.GeoDataFrame,
+    origin: tuple[float, float],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
     records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
     return {
         "project": "cim_road_poc",
-        "model": "cim_city_roads",
+        "model": road_output_stem(profile),
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+            "generate_assets": profile.generate_assets,
+            "generate_lane_markings": profile.generate_lane_markings,
+            "generate_junction_markings": profile.generate_junction_markings,
+            "generate_side_component_connectors": profile.generate_side_component_connectors,
+        },
         "unit": "meter",
         "coordinate": {
             "model_crs": TARGET_CRS,
@@ -6176,12 +6295,76 @@ def build_city_road_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[flo
     }
 
 
-def write_city_road_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
-    semantic = build_city_road_semantic(prepared_roads, origin)
-    CITY_ROAD_SEMANTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_ROAD_SEMANTIC_PATH.open("w", encoding="utf-8") as f:
+def write_city_road_semantic(
+    prepared_roads: gpd.GeoDataFrame,
+    origin: tuple[float, float],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    semantic = build_city_road_semantic(prepared_roads, origin, profile)
+    output_path = path or road_semantic_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(semantic, f, ensure_ascii=False, indent=2)
     return semantic
+
+
+def build_city_road_source_attributes(
+    prepared_roads: gpd.GeoDataFrame,
+    source_attribute_columns: list[str],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    source_columns = [column for column in source_attribute_columns if column in prepared_roads.columns]
+    records: list[dict[str, Any]] = []
+    for _, row in prepared_roads.iterrows():
+        source_attributes = {
+            str(column): json_safe_value(row.get(column))
+            for column in source_columns
+        }
+        name = road_gen.safe_str(source_attributes.get("name")) or road_gen.safe_str(row.get("road_name")) or ""
+        records.append(
+            {
+                "name": name,
+                "source_road_id": road_gen.safe_str(row.get("road_id")) or "",
+                "road_name": road_gen.safe_str(row.get("road_name")) or "",
+                "source_attributes": source_attributes,
+            }
+        )
+    records_by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        records_by_name[str(record.get("name") or "")].append(record)
+    return {
+        "project": "cim_road_poc",
+        "model": f"{road_output_stem(profile)}_source_attributes",
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+        },
+        "association_key": "name",
+        "source_attribute_columns": source_columns,
+        "object_count": len(records),
+        "unique_name_count": len(records_by_name),
+        "objects": records,
+        "records_by_name": dict(sorted(records_by_name.items())),
+    }
+
+
+def write_city_road_source_attributes(
+    prepared_roads: gpd.GeoDataFrame,
+    source_attribute_columns: list[str],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    attributes = build_city_road_source_attributes(prepared_roads, source_attribute_columns, profile)
+    output_path = path or road_source_attributes_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(attributes, f, ensure_ascii=False, indent=2)
+    return attributes
 
 
 def road_model_classification_group(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -6222,10 +6405,12 @@ def grouped_road_model_classifications(
 
 def build_city_road_classification(road_semantic: dict[str, Any]) -> dict[str, Any]:
     records = list(road_semantic.get("objects", []))
+    source_model = road_semantic.get("model", "cim4_city_roads")
     return {
         "project": road_semantic.get("project", "cim_road_poc"),
-        "model": "cim_city_roads_classification",
-        "source_model": road_semantic.get("model", "cim_city_roads"),
+        "model": f"{source_model}_classification",
+        "source_model": source_model,
+        "generation_profile": road_semantic.get("generation_profile", {}),
         "classification_policy": {
             "primary_dimension": "category",
             "secondary_dimension": "road_name",
@@ -6263,10 +6448,16 @@ def build_city_road_classification(road_semantic: dict[str, Any]) -> dict[str, A
     }
 
 
-def write_city_road_classification(road_semantic: dict[str, Any]) -> dict[str, Any]:
+def write_city_road_classification(
+    road_semantic: dict[str, Any],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
     classification = build_city_road_classification(road_semantic)
-    CITY_ROAD_CLASSIFICATION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_ROAD_CLASSIFICATION_PATH.open("w", encoding="utf-8") as f:
+    output_path = path or road_classification_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(classification, f, ensure_ascii=False, indent=2)
     return classification
 
@@ -6334,7 +6525,11 @@ def road_mesh_attribute_record(object_name: str, mesh: trimesh.Trimesh) -> dict[
     return record
 
 
-def build_city_road_mesh_attributes(road_meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
+def build_city_road_mesh_attributes(
+    road_meshes: dict[str, trimesh.Trimesh],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
     records = [
         road_mesh_attribute_record(name, mesh)
         for name, mesh in sorted(road_meshes.items())
@@ -6349,7 +6544,12 @@ def build_city_road_mesh_attributes(road_meshes: dict[str, trimesh.Trimesh]) -> 
     layer_counts = Counter(str(record.get("layer_name") or "unknown") for record in records)
     return {
         "project": "cim_road_poc",
-        "model": "cim_city_roads_mesh_attributes",
+        "model": f"{road_output_stem(profile)}_mesh_attributes",
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+        },
         "policy": "road geometry is exported as source-road monomers per material/component layer; attributes are reattached as Blender/FBX custom properties",
         "object_count": len(records),
         "road_monomer_object_count": len(monomer_records),
@@ -6360,10 +6560,16 @@ def build_city_road_mesh_attributes(road_meshes: dict[str, trimesh.Trimesh]) -> 
     }
 
 
-def write_city_road_mesh_attributes(road_meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
-    attributes = build_city_road_mesh_attributes(road_meshes)
-    CITY_ROAD_MESH_ATTRIBUTES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_ROAD_MESH_ATTRIBUTES_PATH.open("w", encoding="utf-8") as f:
+def write_city_road_mesh_attributes(
+    road_meshes: dict[str, trimesh.Trimesh],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    attributes = build_city_road_mesh_attributes(road_meshes, profile)
+    output_path = path or road_mesh_attributes_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(attributes, f, ensure_ascii=False, indent=2)
     return attributes
 
@@ -6643,7 +6849,10 @@ def build_junction_correspondence_records(arms: list[dict[str, Any]]) -> list[di
     return correspondences
 
 
-def build_city_junction_semantic_records(prepared_roads: gpd.GeoDataFrame) -> list[dict[str, Any]]:
+def build_city_junction_semantic_records(
+    prepared_roads: gpd.GeoDataFrame,
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+) -> list[dict[str, Any]]:
     """Build semantic junction records from the same buckets used for meshes.
 
     This mirrors the geometry pipeline: bucket -> arm records -> junction type
@@ -6653,6 +6862,7 @@ def build_city_junction_semantic_records(prepared_roads: gpd.GeoDataFrame) -> li
     """
     if prepared_roads.empty or not (ENABLE_ROUNDED_JUNCTION_SURFACES or ENABLE_SIMPLE_ROUNDED_JUNCTIONS):
         return []
+    profile = road_generation_profile(profile)
     rules = road_gen.load_rules()
     records = []
     for idx, bucket in enumerate(junction_point_buckets(prepared_roads)):
@@ -6677,43 +6887,45 @@ def build_city_junction_semantic_records(prepared_roads: gpd.GeoDataFrame) -> li
             junction_connection_level_key_for_record(arm.get("road_level", {}))
             for arm in arms
         )
-        records.append(
+        record = {
+            "junction_id": junction_id,
+            "junction_type": junction_type,
+            "junction_hierarchy": hierarchy,
+            "surface_strategy": (
+                "simple_rounded_asphalt_with_outer_sidewalk_curves"
+                if ENABLE_SIMPLE_ROUNDED_JUNCTIONS
+                else selected_design.get("option_id", "clustered_rounded_conflict_area_with_clipped_approaches")
+            ),
+            "center_local": {
+                "x": round(float(bucket["point"].x), 3),
+                "y": round(float(bucket["point"].y), 3),
+                "z": 0.0,
+            },
+            "connected_road_count": len(connected_road_ids),
+            "arm_count": len(arms),
+            "marked_approach_count": sum(1 for arm in arms if arm["marked_approach_fit"]),
+            "connected_road_ids": connected_road_ids,
+            "road_class_counts": dict(Counter(arm["road_class"] for arm in arms)),
+            "road_level_counts": dict(road_level_counts),
+            "junction_connection_level_counts": dict(connection_level_counts),
+            "section_counts": dict(Counter(arm["modeled_section_code"] or "unknown" for arm in arms)),
+            "angular_gaps_deg": angular_gaps_deg([arm["direction_out"] for arm in arms]),
+            "max_drivable_width_m": round(max(float(arm["drivable_width_m"]) for arm in arms), 3),
+            "max_lane_count_estimate": max(int(arm["lane_count_estimate"]) for arm in arms),
+            "arms": arms,
+        }
+        record.update(
             {
-                "junction_id": junction_id,
-                "junction_type": junction_type,
-                "junction_hierarchy": hierarchy,
-                "surface_strategy": (
-                    "simple_rounded_asphalt_with_outer_sidewalk_curves"
-                    if ENABLE_SIMPLE_ROUNDED_JUNCTIONS
-                    else selected_design.get("option_id", "clustered_rounded_conflict_area_with_clipped_approaches")
-                ),
                 "source_node_summary": design_profile["source_node_summary"],
                 "candidate_design_options": design_profile["candidate_design_options"],
                 "selected_design_option": selected_design,
                 "design_references": design_profile["design_references"],
-                "center_local": {
-                    "x": round(float(bucket["point"].x), 3),
-                    "y": round(float(bucket["point"].y), 3),
-                    "z": 0.0,
-                },
-                "connected_road_count": len(connected_road_ids),
-                "arm_count": len(arms),
-                "marked_approach_count": sum(1 for arm in arms if arm["marked_approach_fit"]),
-                "connected_road_ids": connected_road_ids,
-                "road_class_counts": dict(Counter(arm["road_class"] for arm in arms)),
-                "road_level_counts": dict(road_level_counts),
-                "junction_connection_level_counts": dict(connection_level_counts),
                 "side_component_connectable_road_levels": [
                     level_key for level_key, count in sorted(road_level_counts.items()) if count >= 2
                 ],
                 "side_component_connectable_connection_levels": [
                     level_key for level_key, count in sorted(connection_level_counts.items()) if count >= 2
                 ],
-                "section_counts": dict(Counter(arm["modeled_section_code"] or "unknown" for arm in arms)),
-                "angular_gaps_deg": angular_gaps_deg([arm["direction_out"] for arm in arms]),
-                "max_drivable_width_m": round(max(float(arm["drivable_width_m"]) for arm in arms), 3),
-                "max_lane_count_estimate": max(int(arm["lane_count_estimate"]) for arm in arms),
-                "arms": arms,
                 "movements": movements,
                 "road_level_correspondence": correspondences,
                 "movement_summary": {
@@ -6731,11 +6943,17 @@ def build_city_junction_semantic_records(prepared_roads: gpd.GeoDataFrame) -> li
                 },
             }
         )
+        records.append(record)
     return records
 
 
-def build_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
-    records = build_city_junction_semantic_records(prepared_roads)
+def build_city_junction_semantic(
+    prepared_roads: gpd.GeoDataFrame,
+    origin: tuple[float, float],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    records = build_city_junction_semantic_records(prepared_roads, profile)
     for record in records:
         local = record["center_local"]
         record["center_global"] = {
@@ -6745,7 +6963,12 @@ def build_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple
         }
     return {
         "project": "cim_road_poc",
-        "model": "cim_city_junctions",
+        "model": f"{profile.name}_city_junctions",
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+        },
         "generation_state": (
             "simple_rounded_junction_refactor"
             if ENABLE_SIMPLE_ROUNDED_JUNCTIONS
@@ -6756,34 +6979,37 @@ def build_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple
             "model_crs": TARGET_CRS,
             "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
         },
-        "semantic_level": (
-            "simple_topology_node_with_rounded_asphalt_surface"
-            if ENABLE_SIMPLE_ROUNDED_JUNCTIONS
-            else "disabled_pending_refactor"
-            if not ENABLE_ROUNDED_JUNCTION_SURFACES
-            else "topology_node_with_arms_movements_and_scored_design_options"
-        ),
+        "semantic_level": profile.semantic_level,
         "objects": records,
         "summary": {
             "junction_count": len(records),
             "junction_type_counts": dict(Counter(record["junction_type"] for record in records)),
             "junction_hierarchy_counts": dict(Counter(record["junction_hierarchy"] for record in records)),
             "selected_design_option_counts": dict(
-                Counter(record.get("selected_design_option", {}).get("option_id", "unknown") for record in records)
+                Counter(record.get("selected_design_option", {}).get("option_id", "not_exported") for record in records)
             ),
             "design_review_required_count": sum(
                 1 for record in records if record.get("selected_design_option", {}).get("review_required")
             ),
             "total_arm_count": sum(int(record["arm_count"]) for record in records),
-            "total_allowed_movement_count": sum(int(record["movement_summary"]["allowed_movement_count"]) for record in records),
+            "total_allowed_movement_count": sum(
+                int(record.get("movement_summary", {}).get("allowed_movement_count", 0)) for record in records
+            ),
         },
     }
 
 
-def write_city_junction_semantic(prepared_roads: gpd.GeoDataFrame, origin: tuple[float, float]) -> dict[str, Any]:
-    semantic = build_city_junction_semantic(prepared_roads, origin)
-    CITY_JUNCTION_SEMANTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CITY_JUNCTION_SEMANTIC_PATH.open("w", encoding="utf-8") as f:
+def write_city_junction_semantic(
+    prepared_roads: gpd.GeoDataFrame,
+    origin: tuple[float, float],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    semantic = build_city_junction_semantic(prepared_roads, origin, profile)
+    output_path = path or junction_semantic_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(semantic, f, ensure_ascii=False, indent=2)
     return semantic
 
@@ -7649,9 +7875,18 @@ def road_generation_log(message: str) -> None:
     print(f"[roads] {message}", flush=True)
 
 
-def generate_roads_only() -> dict[str, Any]:
+def generate_roads_only(level: str | RoadGenerationProfile | None = None) -> dict[str, Any]:
+    profile = road_generation_profile(level)
+    road_obj_path = road_obj_path_for_profile(profile)
+    road_semantic_path = road_semantic_path_for_profile(profile)
+    road_classification_path = road_classification_path_for_profile(profile)
+    road_mesh_attributes_path = road_mesh_attributes_path_for_profile(profile)
+    road_source_attributes_path = road_source_attributes_path_for_profile(profile)
+    junction_semantic_path = junction_semantic_path_for_profile(profile)
+    print(f"Road generation level: {profile.name}", flush=True)
     print(f"[1/5] Loading road layer from {road_gen.RAW_ROADS}...", flush=True)
     roads = load_layer(road_gen.RAW_ROADS)
+    source_attribute_columns = [str(column) for column in roads.columns if str(column) != str(roads.geometry.name)]
     print(f"[2/5] Localizing {len(roads)} road records...", flush=True)
     origin = compute_origin(roads)
     roads = localize(roads, origin)
@@ -7660,20 +7895,26 @@ def generate_roads_only() -> dict[str, Any]:
     prepared_roads_for_qc = prepare_roads_for_surfaces(roads)
 
     print("[4/5] Building road, junction, marking, and roadside meshes...", flush=True)
-    road_meshes = build_road_surface_meshes(prepared_roads_for_qc)
+    road_meshes = build_road_surface_meshes(prepared_roads_for_qc, profile)
 
     print("[5/5] Exporting road OBJ and semantics...", flush=True)
     MODULE_OBJ_DIR.mkdir(parents=True, exist_ok=True)
-    road_obj_path = MODULE_OBJ_PATHS["roads"]
+    road_obj_path.parent.mkdir(parents=True, exist_ok=True)
     if road_meshes:
         scene_from_meshes(road_meshes).export(road_obj_path)
     elif road_obj_path.exists():
         road_obj_path.unlink()
 
-    road_semantic = write_city_road_semantic(prepared_roads_for_qc, origin)
-    road_classification = write_city_road_classification(road_semantic)
-    road_mesh_attributes = write_city_road_mesh_attributes(road_meshes)
-    junction_semantic = write_city_junction_semantic(prepared_roads_for_qc, origin)
+    road_semantic = write_city_road_semantic(prepared_roads_for_qc, origin, profile, road_semantic_path)
+    road_classification = write_city_road_classification(road_semantic, profile, road_classification_path)
+    road_mesh_attributes = write_city_road_mesh_attributes(road_meshes, profile, road_mesh_attributes_path)
+    road_source_attributes = write_city_road_source_attributes(
+        prepared_roads_for_qc,
+        source_attribute_columns,
+        profile,
+        road_source_attributes_path,
+    )
+    junction_semantic = write_city_junction_semantic(prepared_roads_for_qc, origin, profile, junction_semantic_path)
     road_score = None
     junction_score = None
     marking_qc = None
@@ -7685,14 +7926,15 @@ def generate_roads_only() -> dict[str, Any]:
     print("CIM road OBJ generated:")
     print(f"- roads OBJ: {road_obj_path if road_meshes else 'skipped (no geometry)'}")
     print(f"- road mesh layers: {len(road_meshes)}")
-    print(f"- road semantic objects: {len(road_semantic['objects'])} -> {CITY_ROAD_SEMANTIC_PATH}")
-    print(f"- road classification groups: {road_classification['summary']['category_road_name_group_count']} -> {CITY_ROAD_CLASSIFICATION_PATH}")
+    print(f"- road semantic objects: {len(road_semantic['objects'])} -> {road_semantic_path}")
+    print(f"- road source attribute records: {len(road_source_attributes['objects'])} -> {road_source_attributes_path}")
+    print(f"- road classification groups: {road_classification['summary']['category_road_name_group_count']} -> {road_classification_path}")
     print(
         "- road mesh monomers: "
         f"{road_mesh_attributes['road_monomer_object_count']} / {road_mesh_attributes['object_count']} "
-        f"-> {CITY_ROAD_MESH_ATTRIBUTES_PATH}"
+        f"-> {road_mesh_attributes_path}"
     )
-    print(f"- junction semantic objects: {len(junction_semantic['objects'])} -> {CITY_JUNCTION_SEMANTIC_PATH}")
+    print(f"- junction semantic objects: {len(junction_semantic['objects'])} -> {junction_semantic_path}")
     if GENERATE_JUNCTION_DEBUG_MODELS:
         print(f"- separate junction debug models: {CITY_JUNCTION_DEBUG_OBJ_DIR}")
         print(f"- junction debug manifest: {CITY_JUNCTION_DEBUG_MANIFEST_PATH}")
@@ -7708,6 +7950,7 @@ def generate_roads_only() -> dict[str, Any]:
         "road_obj_path": road_obj_path if road_meshes else None,
         "road_meshes": road_meshes,
         "road_semantic": road_semantic,
+        "road_source_attributes": road_source_attributes,
         "road_classification": road_classification,
         "road_mesh_attributes": road_mesh_attributes,
         "junction_semantic": junction_semantic,

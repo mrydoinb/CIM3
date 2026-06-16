@@ -32,7 +32,7 @@ MODULE_FBX_DIR = ROOT / "output" / "fbx" / "modules"
 SEMANTIC_DIR = ROOT / "output" / "semantic"
 JUNCTION_DEBUG_OBJ_DIR = ROOT / "output" / "obj" / "junctions"
 JUNCTION_DEBUG_FBX_DIR = ROOT / "output" / "fbx" / "junctions"
-ROAD_MESH_ATTRIBUTES_PATH = SEMANTIC_DIR / "cim_city_roads_mesh_attributes.json"
+ROAD_MESH_ATTRIBUTES_PATH = SEMANTIC_DIR / "cim4" / "city_roads_mesh_attributes.json"
 JUNCTION_DEBUG_MANIFEST_PATH = SEMANTIC_DIR / "cim_city_junctions_debug_manifest.json"
 LEGACY_JUNCTION_DEBUG_BUNDLE_OBJ_PATH = MODULE_OBJ_DIR / "cim_city_junctions_debug.obj"
 LEGACY_JUNCTION_DEBUG_BUNDLE_FBX_PATH = MODULE_FBX_DIR / "cim_city_junctions_debug.fbx"
@@ -40,8 +40,8 @@ GOOGLE_MAP_TEXTURE_PATH = ROOT / "output" / "textures" / "google_static_map.png"
 WORLD_IMAGERY_TEXTURE_PATH = ROOT / "output" / "textures" / "world_imagery_basemap.png"
 MODULE_EXPORTS = {
     "roads": (
-        MODULE_OBJ_DIR / "cim_city_roads.obj",
-        MODULE_FBX_DIR / "cim_city_roads.fbx",
+        MODULE_OBJ_DIR / "cim4" / "city_roads.obj",
+        MODULE_FBX_DIR / "cim4" / "city_roads.fbx",
     ),
     "buildings": (
         MODULE_OBJ_DIR / "cim_city_buildings.obj",
@@ -291,9 +291,15 @@ def strip_blender_duplicate_suffix(name: str) -> str:
 
 
 def attribute_sidecar_for_obj(obj_path: Path) -> Path | None:
-    if obj_path.name not in {"cim_city.obj", "cim_city_roads.obj"}:
-        return None
-    return ROAD_MESH_ATTRIBUTES_PATH if ROAD_MESH_ATTRIBUTES_PATH.exists() else None
+    if obj_path.name == "cim_city.obj":
+        return ROAD_MESH_ATTRIBUTES_PATH if ROAD_MESH_ATTRIBUTES_PATH.exists() else None
+    if obj_path.parent.name in {"cim3", "cim4"} and obj_path.name == "city_roads.obj":
+        sidecar = SEMANTIC_DIR / obj_path.parent.name / "city_roads_mesh_attributes.json"
+        return sidecar if sidecar.exists() else None
+    if obj_path.name in {"cim3_city_roads.obj", "cim4_city_roads.obj", "cim_city_roads.obj"}:
+        sidecar = SEMANTIC_DIR / f"{obj_path.stem}_mesh_attributes.json"
+        return sidecar if sidecar.exists() else None
+    return None
 
 
 def load_object_attributes(obj_path: Path) -> tuple[Path | None, dict[str, dict]]:

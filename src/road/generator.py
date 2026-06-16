@@ -171,7 +171,7 @@ STREET_LIGHT_POLE_ROAD_CLEARANCE_M = 0.45 # 路灯杆与道路的距离 0.45米
 MAX_STREET_LIGHTS_PER_ROAD = 800 # 每条道路最多800盏路灯
 MAX_TREES_PER_ROAD = 900 # 每条道路最多900棵树
 
-CIM3_COLORS = {
+CIM_ROAD_COLORS = {
     "median": [120, 126, 112, 255],
     "guardrail": [185, 190, 188, 255],
     "street_light": [88, 86, 78, 255],
@@ -195,6 +195,7 @@ CIM3_COLORS = {
     "junction_label_ramp": [82, 122, 210, 255],
     "junction_label_complex": [156, 88, 190, 255],
 }
+CIM3_COLORS = CIM_ROAD_COLORS
 
 # ---------------------------------------------------------------------------
 # Road rule schema and normalized attributes
@@ -2477,9 +2478,9 @@ def textured_basemap_mesh(
     try:
         mesh.visual = TextureVisuals(uv=uv, image=str(texture_path)) if texture_path is not None else mesh.visual
     except Exception:
-        mesh.visual.face_colors = CIM3_COLORS["gis_basemap"]
+        mesh.visual.face_colors = CIM_ROAD_COLORS["gis_basemap"]
     if texture_path is None:
-        mesh.visual.face_colors = CIM3_COLORS["gis_basemap"]
+        mesh.visual.face_colors = CIM_ROAD_COLORS["gis_basemap"]
     return mesh
 
 
@@ -2519,7 +2520,7 @@ def make_gis_basemap_meshes(
         y += grid_spacing
 
     grid_geom = clean_polygonal(unary_union(grid_parts)) if grid_parts else None
-    grid = polygon_to_top_mesh(grid_geom, z + 0.004, "GIS_Grid", CIM3_COLORS["gis_grid"])
+    grid = polygon_to_top_mesh(grid_geom, z + 0.004, "GIS_Grid", CIM_ROAD_COLORS["gis_grid"])
     result = {}
     if len(base.vertices) > 0:
         result[base.metadata["name"]] = base
@@ -2788,7 +2789,7 @@ def asset_mesh_group_name(mesh: trimesh.Trimesh) -> str:
 
 
 def asset_group_color(group: str) -> list[int] | None:
-    return CIM3_COLORS.get(group.lower())
+    return CIM_ROAD_COLORS.get(group.lower())
 
 
 
@@ -2870,7 +2871,7 @@ def build_street_light_meshes(
                 (x, y, z0),
                 (x, y, z0 + 0.42),
                 0.26,
-                CIM3_COLORS["street_light"],
+                CIM_ROAD_COLORS["street_light"],
                 sections=14,
             )
             pole = cylinder_between(
@@ -2878,7 +2879,7 @@ def build_street_light_meshes(
                 (x, y, z0 + 0.32),
                 (x, y, z0 + pole_height),
                 0.115,
-                CIM3_COLORS["street_light"],
+                CIM_ROAD_COLORS["street_light"],
                 sections=14,
             )
             arm = cylinder_between(
@@ -2886,14 +2887,14 @@ def build_street_light_meshes(
                 (x, y, z0 + pole_height - 0.25),
                 (arm_end[0], arm_end[1], z0 + pole_height - 0.65),
                 0.065,
-                CIM3_COLORS["street_light"],
+                CIM_ROAD_COLORS["street_light"],
                 sections=10,
             )
             lamp = box_at(
                 f"Street_Light_Lamp_{row['road_id']}_{placed_idx}",
                 (arm_end[0], arm_end[1], z0 + pole_height - 0.75),
                 (1.35, 0.44, 0.30),
-                CIM3_COLORS["street_light_lamp"],
+                CIM_ROAD_COLORS["street_light_lamp"],
             )
             if base is not None:
                 meshes.append(base)
@@ -2964,21 +2965,21 @@ def build_tree_meshes(
                 (x, y, z0),
                 (x, y, crown_base + 0.15),
                 0.26 * tree_scale,
-                CIM3_COLORS["tree_trunk"],
+                CIM_ROAD_COLORS["tree_trunk"],
                 sections=10,
             )
             crown = ellipsoid_at(
                 f"Tree_Crown_{row['road_id']}_{tree_idx}",
                 (x, y, crown_base + 1.75 * tree_scale),
                 (2.75 * tree_scale, 2.55 * tree_scale, 2.45 * tree_scale),
-                CIM3_COLORS["tree_crown"],
+                CIM_ROAD_COLORS["tree_crown"],
                 subdivisions=2,
             )
             crown_top = ellipsoid_at(
                 f"Tree_Crown_Top_{row['road_id']}_{tree_idx}",
                 (x, y, crown_base + 3.28 * tree_scale),
                 (1.85 * tree_scale, 1.7 * tree_scale, 1.6 * tree_scale),
-                CIM3_COLORS["tree_crown"],
+                CIM_ROAD_COLORS["tree_crown"],
                 subdivisions=1,
             )
             if trunk is not None:

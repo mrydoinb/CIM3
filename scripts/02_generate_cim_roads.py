@@ -6,8 +6,8 @@
 Separate junction debug models are opt-in with CIM_ROAD_EXPORT_JUNCTION_DEBUG=1.
 
 Examples:
-    python scripts/02_generate_cim_roads.py --source expressway2
-    python scripts/02_generate_cim_roads.py --source full
+    python scripts/02_generate_cim_roads.py --source expressway2 --level cim4
+    python scripts/02_generate_cim_roads.py --source full --level both
     python scripts/02_generate_cim_roads.py --roads-file path/to/roads.shp
 """
 
@@ -48,6 +48,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=sorted(SOURCE_PRESETS),
         default="expressway2",
         help="Named source-data preset. Default: expressway2.",
+    )
+    parser.add_argument(
+        "--level",
+        choices=["cim3", "cim4", "both"],
+        default="cim4",
+        help="Road generation detail level. Use 'both' to generate cim3 and cim4. Default: cim4.",
     )
     parser.add_argument(
         "--roads-file",
@@ -96,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["CIM_ROAD_DATA_DIR"] = str(data_dir)
     os.environ["CIM_ROAD_ROADS_FILE"] = str(roads_file)
     print(f"Source preset: {args.source}", flush=True)
+    levels = ["cim3", "cim4"] if args.level == "both" else [args.level]
+    print(f"Road generation level: {args.level}", flush=True)
     print(f"Source data directory: {data_dir}", flush=True)
     print(f"Road source file: {roads_file}", flush=True)
 
@@ -103,7 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     # its source paths at module import time.
     from city.pipeline import generate_roads_only
 
-    generate_roads_only()
+    for level in levels:
+        if len(levels) > 1:
+            print(f"\n=== Generating {level.upper()} roads ===", flush=True)
+        generate_roads_only(level)
     return 0
 
 
