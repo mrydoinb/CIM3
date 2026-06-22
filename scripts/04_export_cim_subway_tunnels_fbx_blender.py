@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Blender-side exporter for the generated CIM subway tunnel module.
+"""生成 CIM 地铁隧道模块的 Blender 侧导出脚本。
 
-Default mode exports the current hybrid subway model: large structures from the
-generated railway-centerline OBJ plus sample-derived small components from
-subway01.blend. Set CIM_SUBWAY_PROCEDURAL_ONLY=1 for the old direct OBJ-to-FBX
-path.
+默认模式导出当前 hybrid 地铁模型：大构件来自轨道中心线生成的 OBJ，
+小构件来自 subway01.blend 样例。设置 CIM_SUBWAY_PROCEDURAL_ONLY=1 时，
+会走旧的直接 OBJ 转 FBX 路径。
 """
 
 from __future__ import annotations
