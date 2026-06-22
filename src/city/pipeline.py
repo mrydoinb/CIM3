@@ -197,48 +197,321 @@ SUBWAY_REFERENCE_COMPONENTS_41: tuple[dict[str, Any], ...] = (
     {"component": "Ref41_Rail_Fastener", "reference_mesh": "Mesh.041", "reference_dimensions_m": (24.953, 524.629, 0.188), "system": "track"},
 )
 SUBWAY_REFERENCE_COMPONENT_BY_NAME = {record["component"]: record for record in SUBWAY_REFERENCE_COMPONENTS_41}
-SUBWAY_REFERENCE_COMPONENT_SOURCE_MAP = {
-    "Ref01_Guardrail": "Guardrail",
-    "Ref02_Aggregate_Base": "Track_Bed",
-    "Ref03_Rubber_Isolation": "Sleeper",
-    "Ref04_Concrete_Segment": "Lining",
-    "Ref05_Steel_Plate": "Lining_Seam",
-    "Ref06_Seal_Ring": "Lining_Ring",
-    "Ref07_Bolt": "Lining_Bolt",
-    "Ref08_Platform_Main": "Evacuation_Platform",
-    "Ref09_Platform_Support": "Evacuation_Platform",
-    "Ref10_Platform_Edge_Strip": "Evacuation_Platform",
-    "Ref11_Platform_Steel_Frame": "Evacuation_Platform",
-    "Ref12_Platform_Concrete_Panel": "Evacuation_Platform",
-    "Ref13_Platform_Bracket": "Evacuation_Platform",
-    "Ref14_Contact_Rail": "Contact_Wire",
-    "Ref15_Contact_Hanger": "Contact_Wire",
-    "Ref16_Contact_Clamp": "Contact_Wire",
-    "Ref17_High_Voltage_Cable_Bracket": "Cable_Bracket",
-    "Ref18_Comm_Cable_Bracket_A": "Cable_Bracket",
-    "Ref19_Comm_Cable_Bracket_B": "Cable_Bracket",
-    "Ref20_Leakage_Cable_A": "Side_Pipe",
-    "Ref21_Leakage_Cable_B": "Side_Pipe",
-    "Ref22_Leakage_Cable_C": "Side_Pipe",
-    "Ref23_Evacuation_Sign_Panel": "Evacuation_Sign",
-    "Ref24_Evacuation_Sign_Frame": "Evacuation_Sign",
-    "Ref25_Evacuation_Sign_Lamp": "Evacuation_Sign",
-    "Ref26_Lighting_Fixture": "Lighting",
-    "Ref27_Lighting_Cable": "Lighting",
-    "Ref28_Lighting_Bracket": "Lighting",
-    "Ref29_Water_System_Bracket_A": "Side_Pipe",
-    "Ref30_Water_System_Bracket_B": "Cable_Bracket",
-    "Ref31_Water_System_Bracket_C": "Side_Pipe",
-    "Ref32_Water_System_Bracket_D": "Cable_Bracket",
-    "Ref33_Fire_Water_Bracket_A": "Side_Pipe",
-    "Ref34_Fire_Water_Bracket_B": "Cable_Bracket",
-    "Ref35_Fire_Water_Bracket_C": "Side_Pipe",
-    "Ref36_Fire_Water_Bracket_D": "Cable_Bracket",
-    "Ref37_Rail_Bed_Surface": "Track_Bed",
-    "Ref38_Rail_Aluminum_Part": "Rail",
-    "Ref39_Rail_Cast_Iron_Part": "Sleeper",
-    "Ref40_Rail_Chrome_Part": "Rail",
-    "Ref41_Rail_Fastener": "Sleeper",
+SUBWAY_RULE_COMPONENT_SPECS: dict[str, dict[str, Any]] = {
+    "Ref01_Guardrail": {
+        "component_name_zh": "GJ-平台扶手",
+        "rule_geometry_type": "linear_guardrail_with_posts",
+        "placement_mode": "continuous_with_interval_supports",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "evacuation_platform_edge",
+        "installation_height_relative_m": 1.05,
+    },
+    "Ref02_Aggregate_Base": {
+        "component_name_zh": "GJ-道床基础",
+        "rule_geometry_type": "swept_box",
+        "placement_mode": "continuous",
+        "installation_side": "track_center",
+        "installation_height_relative_m": -2.15,
+    },
+    "Ref03_Rubber_Isolation": {
+        "component_name_zh": "GJ-轨道橡胶隔振垫",
+        "rule_geometry_type": "arrayed_pad_box",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_SLEEPER_INTERVAL_M,
+        "installation_side": "under_both_rails",
+        "installation_height_relative_m": -1.72,
+    },
+    "Ref04_Concrete_Segment": {
+        "component_name_zh": "JG-圆形隧道管片",
+        "rule_geometry_type": "circular_section_sweep",
+        "placement_mode": "continuous",
+        "installation_side": "tunnel_envelope",
+        "installation_height_relative_m": 0.0,
+    },
+    "Ref05_Steel_Plate": {
+        "component_name_zh": "JG-管片连接钢板",
+        "rule_geometry_type": "radial_seam_cylinder",
+        "placement_mode": "lining_ring_array",
+        "placement_interval_m": SUBWAY_LINING_RING_INTERVAL_M,
+        "installation_side": "tunnel_envelope",
+        "installation_height_relative_m": 0.0,
+    },
+    "Ref06_Seal_Ring": {
+        "component_name_zh": "JG-管片密封圈",
+        "rule_geometry_type": "circular_ring_sweep",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_LINING_RING_INTERVAL_M,
+        "installation_side": "tunnel_envelope",
+        "installation_height_relative_m": 0.0,
+    },
+    "Ref07_Bolt": {
+        "component_name_zh": "JG-管片螺栓",
+        "rule_geometry_type": "arrayed_bolt_cylinder",
+        "placement_mode": "lining_ring_array",
+        "placement_interval_m": SUBWAY_LINING_BOLT_INTERVAL_M,
+        "installation_side": "tunnel_envelope",
+        "installation_height_relative_m": 0.0,
+    },
+    "Ref08_Platform_Main": {
+        "component_name_zh": "GJ-疏散平台主体",
+        "rule_geometry_type": "swept_box",
+        "placement_mode": "continuous",
+        "installation_side": "platform_side",
+        "installation_height_relative_m": -1.0,
+    },
+    "Ref09_Platform_Support": {
+        "component_name_zh": "疏散平台_支撑1",
+        "rule_geometry_type": "arrayed_support_box",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "platform_side",
+        "installation_height_relative_m": -1.35,
+    },
+    "Ref10_Platform_Edge_Strip": {
+        "component_name_zh": "GJ-疏散平台边条",
+        "rule_geometry_type": "swept_edge_strip",
+        "placement_mode": "continuous",
+        "installation_side": "platform_track_edge",
+        "installation_height_relative_m": -0.72,
+    },
+    "Ref11_Platform_Steel_Frame": {
+        "component_name_zh": "GJ-疏散平台钢架",
+        "rule_geometry_type": "swept_frame_beam",
+        "placement_mode": "continuous",
+        "installation_side": "platform_side",
+        "installation_height_relative_m": -1.18,
+    },
+    "Ref12_Platform_Concrete_Panel": {
+        "component_name_zh": "GJ-疏散平台混凝土板",
+        "rule_geometry_type": "swept_panel_box",
+        "placement_mode": "continuous",
+        "installation_side": "platform_side",
+        "installation_height_relative_m": -0.72,
+    },
+    "Ref13_Platform_Bracket": {
+        "component_name_zh": "GJ-疏散平台托架",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "platform_wall_side",
+        "installation_height_relative_m": -1.15,
+    },
+    "Ref14_Contact_Rail": {
+        "component_name_zh": "DL-接触网",
+        "rule_geometry_type": "longitudinal_cylinder",
+        "placement_mode": "continuous",
+        "installation_side": "contact_side",
+        "installation_height_relative_m": 1.65,
+    },
+    "Ref15_Contact_Hanger": {
+        "component_name_zh": "DL-接触网吊架",
+        "rule_geometry_type": "arrayed_hanger_box",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CONTACT_HANGER_INTERVAL_M,
+        "installation_side": "contact_side",
+        "installation_height_relative_m": 1.95,
+    },
+    "Ref16_Contact_Clamp": {
+        "component_name_zh": "DL-接触网卡具",
+        "rule_geometry_type": "arrayed_clamp_box",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CONTACT_HANGER_INTERVAL_M,
+        "installation_side": "contact_side",
+        "installation_height_relative_m": 1.65,
+    },
+    "Ref17_High_Voltage_Cable_Bracket": {
+        "component_name_zh": "GD-高压控制电缆支架",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "service_wall",
+        "installation_height_relative_m": -0.45,
+    },
+    "Ref18_Comm_Cable_Bracket_A": {
+        "component_name_zh": "TX-通信信号电缆支架A",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "service_wall",
+        "installation_height_relative_m": 0.05,
+    },
+    "Ref19_Comm_Cable_Bracket_B": {
+        "component_name_zh": "TX-通信信号电缆支架B",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "service_wall",
+        "installation_height_relative_m": 0.55,
+    },
+    "Ref20_Leakage_Cable_A": {
+        "component_name_zh": "TX-漏泄同轴电缆A",
+        "rule_geometry_type": "longitudinal_cylinder",
+        "placement_mode": "continuous",
+        "installation_side": "service_wall",
+        "installation_height_relative_m": 1.05,
+    },
+    "Ref21_Leakage_Cable_B": {
+        "component_name_zh": "TX-漏泄同轴电缆B",
+        "rule_geometry_type": "longitudinal_cylinder",
+        "placement_mode": "continuous",
+        "installation_side": "service_wall",
+        "installation_height_relative_m": 1.30,
+    },
+    "Ref22_Leakage_Cable_C": {
+        "component_name_zh": "TX-漏泄同轴电缆C",
+        "rule_geometry_type": "longitudinal_cylinder",
+        "placement_mode": "continuous",
+        "installation_side": "service_wall",
+        "installation_height_relative_m": 1.55,
+    },
+    "Ref23_Evacuation_Sign_Panel": {
+        "component_name_zh": "疏散照明双向-面板",
+        "rule_geometry_type": "arrayed_sign_panel",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_EVACUATION_SIGN_INTERVAL_M,
+        "installation_side": "evacuation_wall",
+        "installation_height_relative_m": 0.75,
+    },
+    "Ref24_Evacuation_Sign_Frame": {
+        "component_name_zh": "疏散照明双向-边框",
+        "rule_geometry_type": "arrayed_sign_frame",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_EVACUATION_SIGN_INTERVAL_M,
+        "installation_side": "evacuation_wall",
+        "installation_height_relative_m": 0.75,
+    },
+    "Ref25_Evacuation_Sign_Lamp": {
+        "component_name_zh": "疏散照明双向-灯体",
+        "rule_geometry_type": "arrayed_sign_lamp",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_EVACUATION_SIGN_INTERVAL_M,
+        "installation_side": "evacuation_wall",
+        "installation_height_relative_m": 0.92,
+    },
+    "Ref26_Lighting_Fixture": {
+        "component_name_zh": "ZM-双管LED灯-壁装",
+        "rule_geometry_type": "arrayed_light_box",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_LIGHTING_INTERVAL_M,
+        "installation_side": "lighting_wall",
+        "installation_height_relative_m": 1.45,
+    },
+    "Ref27_Lighting_Cable": {
+        "component_name_zh": "ZM-照明电缆",
+        "rule_geometry_type": "longitudinal_cylinder",
+        "placement_mode": "continuous",
+        "installation_side": "lighting_wall",
+        "installation_height_relative_m": 1.75,
+    },
+    "Ref28_Lighting_Bracket": {
+        "component_name_zh": "ZM-照明灯具支架",
+        "rule_geometry_type": "arrayed_short_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_LIGHTING_INTERVAL_M,
+        "installation_side": "lighting_wall",
+        "installation_height_relative_m": 1.45,
+    },
+    "Ref29_Water_System_Bracket_A": {
+        "component_name_zh": "GP-给水系统支架A",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "water_wall",
+        "installation_height_relative_m": -1.15,
+    },
+    "Ref30_Water_System_Bracket_B": {
+        "component_name_zh": "GP-给水系统支架B",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "water_wall",
+        "installation_height_relative_m": -0.90,
+    },
+    "Ref31_Water_System_Bracket_C": {
+        "component_name_zh": "GP-给水系统支架C",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "water_wall",
+        "installation_height_relative_m": -0.65,
+    },
+    "Ref32_Water_System_Bracket_D": {
+        "component_name_zh": "GP-给水系统支架D",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "water_wall",
+        "installation_height_relative_m": -0.40,
+    },
+    "Ref33_Fire_Water_Bracket_A": {
+        "component_name_zh": "GP-消防系统支架A",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "fire_water_wall",
+        "installation_height_relative_m": -0.20,
+    },
+    "Ref34_Fire_Water_Bracket_B": {
+        "component_name_zh": "GP-消防系统支架B",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "fire_water_wall",
+        "installation_height_relative_m": 0.05,
+    },
+    "Ref35_Fire_Water_Bracket_C": {
+        "component_name_zh": "GP-消防系统支架C",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "fire_water_wall",
+        "installation_height_relative_m": 0.30,
+    },
+    "Ref36_Fire_Water_Bracket_D": {
+        "component_name_zh": "GP-消防系统支架D",
+        "rule_geometry_type": "arrayed_l_bracket",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_CABLE_BRACKET_INTERVAL_M,
+        "installation_side": "fire_water_wall",
+        "installation_height_relative_m": 0.55,
+    },
+    "Ref37_Rail_Bed_Surface": {
+        "component_name_zh": "GJ-轨床面层",
+        "rule_geometry_type": "swept_surface_box",
+        "placement_mode": "continuous",
+        "installation_side": "track_center",
+        "installation_height_relative_m": -1.62,
+    },
+    "Ref38_Rail_Aluminum_Part": {
+        "component_name_zh": "GJ-钢轨主体",
+        "rule_geometry_type": "dual_longitudinal_cylinder",
+        "placement_mode": "continuous",
+        "installation_side": "both_rails",
+        "installation_height_relative_m": -1.48,
+    },
+    "Ref39_Rail_Cast_Iron_Part": {
+        "component_name_zh": "GJ-轨枕",
+        "rule_geometry_type": "arrayed_sleeper_box",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_SLEEPER_INTERVAL_M,
+        "installation_side": "track_center",
+        "installation_height_relative_m": -1.65,
+    },
+    "Ref40_Rail_Chrome_Part": {
+        "component_name_zh": "GJ-钢轨顶面",
+        "rule_geometry_type": "dual_longitudinal_cylinder",
+        "placement_mode": "continuous",
+        "installation_side": "both_rails",
+        "installation_height_relative_m": -1.42,
+    },
+    "Ref41_Rail_Fastener": {
+        "component_name_zh": "GJ-扣件",
+        "rule_geometry_type": "arrayed_fastener_box",
+        "placement_mode": "fixed_interval_array",
+        "placement_interval_m": SUBWAY_SLEEPER_INTERVAL_M,
+        "installation_side": "both_rails",
+        "installation_height_relative_m": -1.52,
+    },
 }
 SUBWAY_TEMPLATE_SECTION_PROFILE_NAME = "subway01_mesh004_hull_35pt"
 SUBWAY_TEMPLATE_SECTION_SOURCE_MESH = "Mesh.004"
@@ -308,17 +581,6 @@ SUBWAY_SINGLE_TUNNEL_SECTION_SOURCE_ARC_XZ_M: tuple[tuple[float, float], ...] = 
     (144.129135, -25.150301),
     (143.783539, -25.155260),
 )
-SUBWAY_TEMPLATE_TRACK_BED_SECTION_BOUNDS_XZ_M = (124.485481, 146.663071, -23.925467, -19.978727)
-SUBWAY_TEMPLATE_PLATFORM_SECTION_BOUNDS_XZ_M = (124.839516, 141.344711, -24.283327, -23.080204)
-SUBWAY_TEMPLATE_CONTACT_SECTION_BOUNDS_XZ_M = (126.591156, 144.516266, -19.784359, -19.711065)
-SUBWAY_TEMPLATE_CABLE_BRACKET_SECTION_BOUNDS_XZ_M = (128.561584, 142.585541, -24.132040, -20.408028)
-SUBWAY_TEMPLATE_PIPE_SECTION_BOUNDS_XZ_M = (128.745224, 142.309692, -20.270914, -20.114948)
-SUBWAY_TEMPLATE_LIGHTING_SECTION_BOUNDS_XZ_M = (124.648254, 145.432083, -23.303722, -22.940712)
-SUBWAY_TEMPLATE_SIGN_SECTION_BOUNDS_XZ_M = (129.644440, 141.075272, -22.781256, -22.682747)
-SUBWAY_TEMPLATE_WATER_BRACKET_SECTION_BOUNDS_XZ_M = (125.044983, 146.082947, -23.926720, -23.751547)
-SUBWAY_TEMPLATE_RAIL_SURFACE_SECTION_BOUNDS_XZ_M = (120.362335, 145.055740, -24.212988, -24.142374)
-SUBWAY_TEMPLATE_RAIL_SECTION_BOUNDS_XZ_M = (120.352455, 145.088959, -24.199865, -24.104048)
-SUBWAY_TEMPLATE_FASTENER_SECTION_BOUNDS_XZ_M = (120.246849, 145.186646, -24.381388, -24.194271)
 SUBWAY_STATION_DEPTH_M = -11.0
 SUBWAY_STATION_SIZE_M = (34.0, 16.0, 7.0)
 # Road/junction generation switches. These settings are kept next to the city
@@ -474,7 +736,7 @@ class SubwayGenerationProfile:
 SUBWAY_CIM4_PROFILE = SubwayGenerationProfile(
     name="cim4",
     mesh_granularity="source_line_component",
-    semantic_level="interval_tunnel_source_line_with_mesh_attributes",
+    semantic_level="interval_tunnel_41_parameterized_rule_components",
     generate_station_trim=False,
     generate_track_bed=False,
 )
@@ -8644,30 +8906,6 @@ def subway_template_section_offsets(expand_m: float = 0.0) -> list[tuple[float, 
     return offsets
 
 
-def subway_single_tunnel_bounds_xz(bounds_xz: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-    min_x, max_x, min_z, max_z = [float(value) for value in bounds_xz]
-    if SUBWAY_SINGLE_TUNNEL_SECTION_SIDE == "right":
-        min_x = max(min_x, SUBWAY_SINGLE_TUNNEL_SECTION_SPLIT_X_M)
-    else:
-        max_x = min(max_x, SUBWAY_SINGLE_TUNNEL_SECTION_SPLIT_X_M)
-    if max_x - min_x <= 0.05:
-        half_center_x = SUBWAY_SINGLE_TUNNEL_SECTION_CENTER_XZ_M[0]
-        min_x = half_center_x - 0.025
-        max_x = half_center_x + 0.025
-    return min_x, max_x, min_z, max_z
-
-
-def subway_template_section_rule(bounds_xz: tuple[float, float, float, float]) -> dict[str, float]:
-    center_x, center_z = SUBWAY_SINGLE_TUNNEL_SECTION_CENTER_XZ_M
-    min_x, max_x, min_z, max_z = subway_single_tunnel_bounds_xz(bounds_xz)
-    return {
-        "lateral_offset_m": ((min_x + max_x) * 0.5) - center_x,
-        "vertical_offset_m": ((min_z + max_z) * 0.5) - center_z,
-        "width_m": max(max_x - min_x, 0.05),
-        "height_m": max(max_z - min_z, 0.05),
-    }
-
-
 def subway_template_section_surface_between(
     name: str,
     start,
@@ -8799,10 +9037,12 @@ def subway_component_metadata(
     tunnel_depth_m: float,
     tunnel_category: str,
     part_count: int,
+    mileage_length_m: float,
     lateral_translation_x_m: float = 0.0,
     lateral_translation_y_m: float = 0.0,
 ) -> dict[str, Any]:
     reference_record = SUBWAY_REFERENCE_COMPONENT_BY_NAME.get(component)
+    rule_spec = SUBWAY_RULE_COMPONENT_SPECS.get(component, {})
     tunnel_side = ""
     if abs(float(lateral_translation_x_m)) > 1e-6 or abs(float(lateral_translation_y_m)) > 1e-6:
         tunnel_side = "left" if float(lateral_translation_x_m) >= 0.0 else "right"
@@ -8833,7 +9073,12 @@ def subway_component_metadata(
         "section_hull_vertex_count": SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS,
         "section_hull_area_m2": SUBWAY_SINGLE_TUNNEL_SECTION_AREA_M2,
         "construction_method": "subway01_circular_single_tunnel_rule_sweep",
+        "geometry_source": "procedural_parameterized_rule",
+        "geometry_lod": "cim_simplified_semantic_geometry",
+        "mileage_start_m": 0.0,
+        "mileage_end_m": round(float(mileage_length_m), 3),
     }
+    metadata.update(rule_spec)
     if reference_record is not None:
         metadata.update(
             {
@@ -8860,16 +9105,6 @@ def marker_sphere(name: str, center, radius: float, color, subdivisions: int = 1
     return mesh
 
 
-def expand_subway_reference_component_meshes(
-    component_meshes: dict[str, list[trimesh.Trimesh]],
-) -> dict[str, list[trimesh.Trimesh]]:
-    reference_meshes: dict[str, list[trimesh.Trimesh]] = {}
-    for component in subway_reference_component_names():
-        source_component = SUBWAY_REFERENCE_COMPONENT_SOURCE_MAP.get(component, component)
-        reference_meshes[component] = list(component_meshes.get(source_component, []))
-    return reference_meshes
-
-
 def build_subway_tunnel_meshes(
     railways: gpd.GeoDataFrame,
     profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
@@ -8878,17 +9113,17 @@ def build_subway_tunnel_meshes(
     profile = subway_generation_profile(profile)
     depth_by_index = depth_by_index or assign_railway_tunnel_depths(railways)
     tunnel_meshes: dict[str, trimesh.Trimesh] = {}
-    track_bed_rule = subway_template_section_rule(SUBWAY_TEMPLATE_TRACK_BED_SECTION_BOUNDS_XZ_M)
-    platform_rule = subway_template_section_rule(SUBWAY_TEMPLATE_PLATFORM_SECTION_BOUNDS_XZ_M)
-    contact_rule = subway_template_section_rule(SUBWAY_TEMPLATE_CONTACT_SECTION_BOUNDS_XZ_M)
-    cable_rule = subway_template_section_rule(SUBWAY_TEMPLATE_CABLE_BRACKET_SECTION_BOUNDS_XZ_M)
-    pipe_rule = subway_template_section_rule(SUBWAY_TEMPLATE_PIPE_SECTION_BOUNDS_XZ_M)
-    lighting_rule = subway_template_section_rule(SUBWAY_TEMPLATE_LIGHTING_SECTION_BOUNDS_XZ_M)
-    sign_rule = subway_template_section_rule(SUBWAY_TEMPLATE_SIGN_SECTION_BOUNDS_XZ_M)
-    water_rule = subway_template_section_rule(SUBWAY_TEMPLATE_WATER_BRACKET_SECTION_BOUNDS_XZ_M)
-    rail_surface_rule = subway_template_section_rule(SUBWAY_TEMPLATE_RAIL_SURFACE_SECTION_BOUNDS_XZ_M)
-    rail_rule = subway_template_section_rule(SUBWAY_TEMPLATE_RAIL_SECTION_BOUNDS_XZ_M)
-    fastener_rule = subway_template_section_rule(SUBWAY_TEMPLATE_FASTENER_SECTION_BOUNDS_XZ_M)
+    track_bed_rule = {"lateral_offset_m": 0.0, "vertical_offset_m": -2.15, "width_m": 2.60, "height_m": 0.58}
+    platform_rule = {"lateral_offset_m": 1.95, "vertical_offset_m": -1.15, "width_m": 0.90, "height_m": 0.32}
+    contact_rule = {"lateral_offset_m": 0.0, "vertical_offset_m": 2.20, "width_m": 0.20, "height_m": 0.72}
+    cable_rule = {"lateral_offset_m": -2.35, "vertical_offset_m": 0.0, "width_m": 0.74, "height_m": 1.40}
+    pipe_rule = {"lateral_offset_m": -2.45, "vertical_offset_m": 0.75, "width_m": 0.54, "height_m": 0.12}
+    lighting_rule = {"lateral_offset_m": 2.42, "vertical_offset_m": 0.88, "width_m": 0.42, "height_m": 0.22}
+    sign_rule = {"lateral_offset_m": 2.42, "vertical_offset_m": 0.25, "width_m": 0.55, "height_m": 0.34}
+    water_rule = {"lateral_offset_m": -2.32, "vertical_offset_m": -0.82, "width_m": 0.72, "height_m": 0.30}
+    rail_surface_rule = {"lateral_offset_m": 0.0, "vertical_offset_m": -1.86, "width_m": 2.42, "height_m": 0.08}
+    rail_rule = {"lateral_offset_m": 0.0, "vertical_offset_m": -1.62, "width_m": 1.60, "height_m": 0.12}
+    fastener_rule = {"lateral_offset_m": 0.0, "vertical_offset_m": -1.78, "width_m": 2.00, "height_m": 0.14}
     for idx, row in railways.iterrows():
         if not subway_like(row):
             continue
@@ -8900,22 +9135,10 @@ def build_subway_tunnel_meshes(
         lateral_translation_x_m = safe_float(row.get("_subway_lateral_translation_x_m"), 0.0)
         lateral_translation_y_m = safe_float(row.get("_subway_lateral_translation_y_m"), 0.0)
         component_meshes: dict[str, list[trimesh.Trimesh]] = {
-            "Lining": [],
-            "Lining_Ring": [],
-            "Lining_Seam": [],
-            "Lining_Bolt": [],
-            "Track_Bed": [],
-            "Rail": [],
-            "Sleeper": [],
-            "Evacuation_Platform": [],
-            "Guardrail": [],
-            "Side_Pipe": [],
-            "Cable_Bracket": [],
-            "Contact_Wire": [],
-            "Lighting": [],
-            "Evacuation_Sign": [],
+            component: [] for component in subway_reference_component_names()
         }
         part_count = 0
+        mileage_length_m = 0.0
         for line in iter_lines(row.geometry):
             coords = list(line.coords)
             for part_idx, (a, b) in enumerate(zip(coords, coords[1:])):
@@ -8923,13 +9146,14 @@ def build_subway_tunnel_meshes(
                 if frame is None:
                     continue
                 tangent, normal, up, segment_length = frame
+                mileage_length_m += segment_length
                 lining = subway_template_section_surface_between(
                     f"{tunnel_name}_Lining_Part_{part_idx}",
                     (a[0], a[1], tunnel_depth_m),
                     (b[0], b[1], tunnel_depth_m),
                     COLORS["subway_tunnel"],
                 )
-                add_mesh(component_meshes["Lining"], lining)
+                add_mesh(component_meshes["Ref04_Concrete_Segment"], lining)
 
                 ring_count = max(1, int(segment_length // SUBWAY_LINING_RING_INTERVAL_M))
                 segment_start = np.array([float(a[0]), float(a[1]), tunnel_depth_m], dtype=float)
@@ -8945,7 +9169,7 @@ def build_subway_tunnel_meshes(
                         [184, 186, 184, 255],
                         expand_m=0.04,
                     )
-                    add_mesh(component_meshes["Lining_Ring"], ring)
+                    add_mesh(component_meshes["Ref06_Seal_Ring"], ring)
 
                     stagger_deg = 36.0 if ring_idx % 2 else 0.0
                     seam_angles = (-144.0, -108.0, -72.0, -36.0, 36.0, 72.0, 108.0, 144.0)
@@ -8967,7 +9191,7 @@ def build_subway_tunnel_meshes(
                             [238, 238, 232, 255],
                             sections=6,
                         )
-                        add_mesh(component_meshes["Lining_Seam"], seam)
+                        add_mesh(component_meshes["Ref05_Steel_Plate"], seam)
 
                     if ring_idx % max(1, int(SUBWAY_LINING_BOLT_INTERVAL_M // SUBWAY_LINING_RING_INTERVAL_M)) == 0:
                         bolt_angles = (-150.0, -120.0, -90.0, -60.0, 60.0, 90.0, 120.0, 150.0)
@@ -8987,7 +9211,7 @@ def build_subway_tunnel_meshes(
                                 [70, 70, 66, 255],
                                 subdivisions=1,
                             )
-                            add_mesh(component_meshes["Lining_Bolt"], bolt)
+                            add_mesh(component_meshes["Ref07_Bolt"], bolt)
 
                 track_surface_z = tunnel_depth_m + rail_surface_rule["vertical_offset_m"]
                 track_bed_height = min(max(track_bed_rule["height_m"] * 0.16, 0.52), 0.72)
@@ -9004,7 +9228,20 @@ def build_subway_tunnel_meshes(
                     bed_z,
                     [150, 150, 145, 255],
                 )
-                add_mesh(component_meshes["Track_Bed"], track_bed)
+                add_mesh(component_meshes["Ref02_Aggregate_Base"], track_bed)
+
+                track_surface = oriented_box_between(
+                    f"{tunnel_name}_Rail_Bed_Surface_Part_{part_idx}",
+                    a,
+                    b,
+                    segment_length,
+                    max(track_bed_width - 0.18, 0.40),
+                    0.08,
+                    track_bed_rule["lateral_offset_m"],
+                    track_surface_z + 0.04,
+                    [92, 92, 88, 255],
+                )
+                add_mesh(component_meshes["Ref37_Rail_Bed_Surface"], track_surface)
 
                 rail_z = tunnel_depth_m + rail_rule["vertical_offset_m"] + 0.035
                 rail_offset = SUBWAY_TRACK_GAUGE_M * 0.5
@@ -9020,10 +9257,20 @@ def build_subway_tunnel_meshes(
                         [55, 55, 55, 255],
                         sections=10,
                     )
-                    add_mesh(component_meshes["Rail"], rail)
+                    add_mesh(component_meshes["Ref38_Rail_Aluminum_Part"], rail)
+                    rail_top = cylinder_surface_between(
+                        f"{tunnel_name}_Rail_Top_{rail_side}_Part_{part_idx}",
+                        rail_start + up * 0.055,
+                        rail_end + up * 0.055,
+                        0.026,
+                        [210, 214, 216, 255],
+                        sections=10,
+                    )
+                    add_mesh(component_meshes["Ref40_Rail_Chrome_Part"], rail_top)
 
                 sleeper_count = max(1, int(segment_length // SUBWAY_SLEEPER_INTERVAL_M))
                 sleeper_start = np.array([float(a[0]), float(a[1]), 0.0], dtype=float)
+                sleeper_z = tunnel_depth_m + fastener_rule["vertical_offset_m"]
                 for sleeper_idx in range(sleeper_count):
                     distance = min(segment_length, (sleeper_idx + 0.5) * SUBWAY_SLEEPER_INTERVAL_M)
                     center_xy = sleeper_start + tangent * distance
@@ -9035,10 +9282,36 @@ def build_subway_tunnel_meshes(
                         min(max(fastener_rule["width_m"] * 0.08, 1.75), 2.20),
                         min(max(fastener_rule["height_m"], 0.12), 0.20),
                         track_bed_rule["lateral_offset_m"],
-                        tunnel_depth_m + fastener_rule["vertical_offset_m"],
+                        sleeper_z,
                         [45, 45, 45, 255],
                     )
-                    add_mesh(component_meshes["Sleeper"], sleeper)
+                    add_mesh(component_meshes["Ref39_Rail_Cast_Iron_Part"], sleeper)
+                    for rail_side, lateral_offset in (("L", -rail_offset), ("R", rail_offset)):
+                        rail_lateral = track_bed_rule["lateral_offset_m"] + lateral_offset
+                        isolation_pad = oriented_box_between(
+                            f"{tunnel_name}_Isolation_Pad_{rail_side}_{part_idx}_{sleeper_idx}",
+                            center_xy,
+                            center_xy + tangent * 0.22,
+                            0.22,
+                            0.24,
+                            0.055,
+                            rail_lateral,
+                            sleeper_z + 0.095,
+                            [28, 28, 26, 255],
+                        )
+                        add_mesh(component_meshes["Ref03_Rubber_Isolation"], isolation_pad)
+                        fastener = oriented_box_between(
+                            f"{tunnel_name}_Rail_Fastener_{rail_side}_{part_idx}_{sleeper_idx}",
+                            center_xy,
+                            center_xy + tangent * 0.16,
+                            0.16,
+                            0.20,
+                            0.08,
+                            rail_lateral,
+                            sleeper_z + 0.16,
+                            [72, 72, 68, 255],
+                        )
+                        add_mesh(component_meshes["Ref41_Rail_Fastener"], fastener)
 
                 platform_width = min(platform_rule["width_m"], SUBWAY_REFERENCE_BENCHMARK_DIMENSIONS_M[0] - 1.00)
                 platform_height = min(max(platform_rule["height_m"], 0.32), 1.20)
@@ -9054,9 +9327,47 @@ def build_subway_tunnel_meshes(
                     platform_z,
                     [132, 132, 128, 255],
                 )
-                add_mesh(component_meshes["Evacuation_Platform"], platform)
+                add_mesh(component_meshes["Ref08_Platform_Main"], platform)
 
                 platform_top_z = platform_z + platform_height * 0.5
+                platform_panel = oriented_box_between(
+                    f"{tunnel_name}_Platform_Panel_Part_{part_idx}",
+                    a,
+                    b,
+                    segment_length,
+                    max(platform_width - 0.12, 0.30),
+                    0.07,
+                    platform_rule["lateral_offset_m"],
+                    platform_top_z - 0.035,
+                    [154, 154, 150, 255],
+                )
+                add_mesh(component_meshes["Ref12_Platform_Concrete_Panel"], platform_panel)
+                platform_frame_lateral = platform_rule["lateral_offset_m"] - platform_width * 0.28
+                platform_frame = oriented_box_between(
+                    f"{tunnel_name}_Platform_Frame_Part_{part_idx}",
+                    a,
+                    b,
+                    segment_length,
+                    0.16,
+                    0.16,
+                    platform_frame_lateral,
+                    platform_top_z - 0.22,
+                    [72, 72, 68, 255],
+                )
+                add_mesh(component_meshes["Ref11_Platform_Steel_Frame"], platform_frame)
+                platform_edge_lateral = platform_rule["lateral_offset_m"] + platform_width * 0.5 - 0.05
+                platform_edge = oriented_box_between(
+                    f"{tunnel_name}_Platform_Edge_Part_{part_idx}",
+                    a,
+                    b,
+                    segment_length,
+                    0.10,
+                    0.06,
+                    platform_edge_lateral,
+                    platform_top_z + 0.03,
+                    [210, 190, 86, 255],
+                )
+                add_mesh(component_meshes["Ref10_Platform_Edge_Strip"], platform_edge)
                 guardrail_lateral = platform_rule["lateral_offset_m"] + platform_width * 0.5 - 0.45
                 for rail_level, z_offset in enumerate((0.45, 0.82)):
                     guardrail_z = platform_top_z + z_offset
@@ -9068,7 +9379,7 @@ def build_subway_tunnel_meshes(
                         [128, 128, 122, 255],
                         sections=8,
                     )
-                    add_mesh(component_meshes["Guardrail"], guardrail)
+                    add_mesh(component_meshes["Ref01_Guardrail"], guardrail)
                 post_count = max(1, int(segment_length // SUBWAY_CABLE_BRACKET_INTERVAL_M))
                 for post_idx in range(post_count):
                     distance = min(segment_length, (post_idx + 0.5) * SUBWAY_CABLE_BRACKET_INTERVAL_M)
@@ -9084,71 +9395,99 @@ def build_subway_tunnel_meshes(
                         platform_top_z + 0.41,
                         [128, 128, 122, 255],
                     )
-                    add_mesh(component_meshes["Guardrail"], post)
+                    add_mesh(component_meshes["Ref01_Guardrail"], post)
+                    platform_support = oriented_box_between(
+                        f"{tunnel_name}_Platform_Support_{part_idx}_{post_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.18,
+                        0.18,
+                        0.16,
+                        0.72,
+                        platform_frame_lateral,
+                        platform_z - platform_height * 0.5 - 0.34,
+                        [92, 92, 88, 255],
+                    )
+                    add_mesh(component_meshes["Ref09_Platform_Support"], platform_support)
+                    platform_bracket = oriented_box_between(
+                        f"{tunnel_name}_Platform_Bracket_{part_idx}_{post_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.20,
+                        0.20,
+                        0.58,
+                        0.10,
+                        platform_rule["lateral_offset_m"] - platform_width * 0.32,
+                        platform_top_z - 0.34,
+                        [112, 112, 106, 255],
+                    )
+                    add_mesh(component_meshes["Ref13_Platform_Bracket"], platform_bracket)
 
                 pipe_z = tunnel_depth_m + pipe_rule["vertical_offset_m"]
                 pipe_radius = min(max(pipe_rule["height_m"] * 0.45, 0.055), 0.12)
-                pipe_span = max(pipe_rule["width_m"] * 0.32, 2.40)
-                for pipe_side, lateral_offset in (
-                    ("L", pipe_rule["lateral_offset_m"] - pipe_span),
-                    ("C", pipe_rule["lateral_offset_m"]),
-                    ("R", pipe_rule["lateral_offset_m"] + pipe_span),
+                for component, pipe_side, lateral_offset, z_offset in (
+                    ("Ref20_Leakage_Cable_A", "A", pipe_rule["lateral_offset_m"], -0.25),
+                    ("Ref21_Leakage_Cable_B", "B", pipe_rule["lateral_offset_m"], 0.0),
+                    ("Ref22_Leakage_Cable_C", "C", pipe_rule["lateral_offset_m"], 0.25),
                 ):
-                    pipe_start = np.array([float(a[0]), float(a[1]), pipe_z]) + normal * lateral_offset
-                    pipe_end = np.array([float(b[0]), float(b[1]), pipe_z]) + normal * lateral_offset
+                    pipe_start = np.array([float(a[0]), float(a[1]), pipe_z + z_offset]) + normal * lateral_offset
+                    pipe_end = np.array([float(b[0]), float(b[1]), pipe_z + z_offset]) + normal * lateral_offset
                     pipe = cylinder_surface_between(
-                        f"{tunnel_name}_Side_Pipe_{pipe_side}_Part_{part_idx}",
+                        f"{tunnel_name}_Leakage_Cable_{pipe_side}_Part_{part_idx}",
                         pipe_start,
                         pipe_end,
-                        pipe_radius,
+                        min(pipe_radius, 0.075),
                         [110, 110, 105, 255],
-                        sections=12,
+                        sections=8,
                     )
-                    add_mesh(component_meshes["Side_Pipe"], pipe)
-
-                water_z = tunnel_depth_m + water_rule["vertical_offset_m"]
-                water_span = max(water_rule["width_m"] * 0.34, 2.20)
-                for pipe_side, lateral_offset in (
-                    ("WL", water_rule["lateral_offset_m"] - water_span),
-                    ("WR", water_rule["lateral_offset_m"] + water_span),
-                ):
-                    water_pipe = cylinder_surface_between(
-                        f"{tunnel_name}_Side_Pipe_{pipe_side}_Part_{part_idx}",
-                        np.array([float(a[0]), float(a[1]), water_z]) + normal * lateral_offset,
-                        np.array([float(b[0]), float(b[1]), water_z]) + normal * lateral_offset,
-                        0.075,
-                        [95, 106, 112, 255],
-                        sections=10,
-                    )
-                    add_mesh(component_meshes["Side_Pipe"], water_pipe)
+                    add_mesh(component_meshes[component], pipe)
 
                 bracket_count = max(1, int(segment_length // SUBWAY_CABLE_BRACKET_INTERVAL_M))
-                bracket_span = max(cable_rule["width_m"] * 0.40, 2.80)
-                bracket_level_offsets = (
-                    cable_rule["vertical_offset_m"] - cable_rule["height_m"] * 0.24,
-                    cable_rule["vertical_offset_m"],
-                    cable_rule["vertical_offset_m"] + cable_rule["height_m"] * 0.24,
+                cable_bracket_rules = (
+                    ("Ref17_High_Voltage_Cable_Bracket", "HV", cable_rule["lateral_offset_m"], -0.45, [120, 58, 190, 255], 0.72),
+                    ("Ref18_Comm_Cable_Bracket_A", "COMM_A", cable_rule["lateral_offset_m"], 0.05, [168, 110, 138, 255], 0.62),
+                    ("Ref19_Comm_Cable_Bracket_B", "COMM_B", cable_rule["lateral_offset_m"], 0.55, [132, 82, 168, 255], 0.52),
+                )
+                water_base_z = water_rule["vertical_offset_m"]
+                water_bracket_rules = (
+                    ("Ref29_Water_System_Bracket_A", "WATER_A", water_rule["lateral_offset_m"], water_base_z - 0.38, [72, 116, 170, 255], 0.74),
+                    ("Ref30_Water_System_Bracket_B", "WATER_B", water_rule["lateral_offset_m"], water_base_z - 0.13, [82, 126, 180, 255], 0.66),
+                    ("Ref31_Water_System_Bracket_C", "WATER_C", water_rule["lateral_offset_m"], water_base_z + 0.12, [92, 136, 190, 255], 0.58),
+                    ("Ref32_Water_System_Bracket_D", "WATER_D", water_rule["lateral_offset_m"], water_base_z + 0.37, [102, 146, 200, 255], 0.50),
+                    ("Ref33_Fire_Water_Bracket_A", "FIRE_A", -water_rule["lateral_offset_m"], water_base_z - 0.18, [182, 64, 54, 255], 0.78),
+                    ("Ref34_Fire_Water_Bracket_B", "FIRE_B", -water_rule["lateral_offset_m"], water_base_z + 0.07, [192, 74, 64, 255], 0.70),
+                    ("Ref35_Fire_Water_Bracket_C", "FIRE_C", -water_rule["lateral_offset_m"], water_base_z + 0.32, [202, 84, 74, 255], 0.62),
+                    ("Ref36_Fire_Water_Bracket_D", "FIRE_D", -water_rule["lateral_offset_m"], water_base_z + 0.57, [212, 94, 84, 255], 0.54),
                 )
                 for bracket_idx in range(bracket_count):
                     distance = min(segment_length, (bracket_idx + 0.5) * SUBWAY_CABLE_BRACKET_INTERVAL_M)
                     center_xy = sleeper_start + tangent * distance
-                    for bracket_side, lateral_offset, color in (
-                        ("L", cable_rule["lateral_offset_m"] - bracket_span, [168, 110, 138, 255]),
-                        ("R", cable_rule["lateral_offset_m"] + bracket_span, [120, 58, 190, 255]),
+                    for component, bracket_name, lateral_offset, z_offset, color, shelf_width in (
+                        *cable_bracket_rules,
+                        *water_bracket_rules,
                     ):
-                        for level_idx, z_offset in enumerate(bracket_level_offsets):
-                            bracket = oriented_box_between(
-                                f"{tunnel_name}_Cable_Bracket_{bracket_side}_{part_idx}_{bracket_idx}_{level_idx}",
-                                center_xy,
-                                center_xy + tangent * 0.18,
-                                0.18,
-                                0.72,
-                                0.08,
-                                lateral_offset,
-                                tunnel_depth_m + z_offset,
-                                color,
-                            )
-                            add_mesh(component_meshes["Cable_Bracket"], bracket)
+                        bracket = oriented_box_between(
+                            f"{tunnel_name}_{bracket_name}_{part_idx}_{bracket_idx}",
+                            center_xy,
+                            center_xy + tangent * 0.18,
+                            0.18,
+                            shelf_width,
+                            0.08,
+                            lateral_offset,
+                            tunnel_depth_m + z_offset,
+                            color,
+                        )
+                        add_mesh(component_meshes[component], bracket)
+                        support = oriented_box_between(
+                            f"{tunnel_name}_{bracket_name}_Support_{part_idx}_{bracket_idx}",
+                            center_xy,
+                            center_xy + tangent * 0.18,
+                            0.18,
+                            0.10,
+                            0.32,
+                            lateral_offset - math.copysign(shelf_width * 0.45, lateral_offset or 1.0),
+                            tunnel_depth_m + z_offset + 0.12,
+                            color,
+                        )
+                        add_mesh(component_meshes[component], support)
 
                 contact_z = tunnel_depth_m + contact_rule["vertical_offset_m"]
                 contact_lateral = contact_rule["lateral_offset_m"]
@@ -9160,7 +9499,7 @@ def build_subway_tunnel_meshes(
                     [50, 50, 48, 255],
                     sections=8,
                 )
-                add_mesh(component_meshes["Contact_Wire"], contact)
+                add_mesh(component_meshes["Ref14_Contact_Rail"], contact)
                 hanger_count = max(1, int(segment_length // SUBWAY_CONTACT_HANGER_INTERVAL_M))
                 for hanger_idx in range(hanger_count):
                     distance = min(segment_length, (hanger_idx + 0.5) * SUBWAY_CONTACT_HANGER_INTERVAL_M)
@@ -9176,11 +9515,32 @@ def build_subway_tunnel_meshes(
                         contact_z + 0.18,
                         [76, 76, 72, 255],
                     )
-                    add_mesh(component_meshes["Contact_Wire"], hanger)
+                    add_mesh(component_meshes["Ref15_Contact_Hanger"], hanger)
+                    clamp = oriented_box_between(
+                        f"{tunnel_name}_Contact_Clamp_{part_idx}_{hanger_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.12,
+                        0.12,
+                        0.16,
+                        0.10,
+                        contact_lateral,
+                        contact_z,
+                        [54, 54, 52, 255],
+                    )
+                    add_mesh(component_meshes["Ref16_Contact_Clamp"], clamp)
 
                 lighting_count = max(1, int(segment_length // SUBWAY_LIGHTING_INTERVAL_M))
                 lighting_z = tunnel_depth_m + lighting_rule["vertical_offset_m"]
                 lighting_lateral = lighting_rule["lateral_offset_m"]
+                lighting_cable = cylinder_surface_between(
+                    f"{tunnel_name}_Lighting_Cable_Part_{part_idx}",
+                    np.array([float(a[0]), float(a[1]), lighting_z + 0.28]) + normal * lighting_lateral,
+                    np.array([float(b[0]), float(b[1]), lighting_z + 0.28]) + normal * lighting_lateral,
+                    0.018,
+                    [44, 44, 42, 255],
+                    sections=6,
+                )
+                add_mesh(component_meshes["Ref27_Lighting_Cable"], lighting_cable)
                 for light_idx in range(lighting_count):
                     distance = min(segment_length, (light_idx + 0.5) * SUBWAY_LIGHTING_INTERVAL_M)
                     center_xy = sleeper_start + tangent * distance
@@ -9195,7 +9555,19 @@ def build_subway_tunnel_meshes(
                         lighting_z,
                         [235, 238, 210, 255],
                     )
-                    add_mesh(component_meshes["Lighting"], light)
+                    add_mesh(component_meshes["Ref26_Lighting_Fixture"], light)
+                    light_bracket = oriented_box_between(
+                        f"{tunnel_name}_Lighting_Bracket_{part_idx}_{light_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.18,
+                        0.18,
+                        0.42,
+                        0.08,
+                        lighting_lateral,
+                        lighting_z - 0.10,
+                        [96, 96, 90, 255],
+                    )
+                    add_mesh(component_meshes["Ref28_Lighting_Bracket"], light_bracket)
 
                 sign_count = max(1, int(segment_length // SUBWAY_EVACUATION_SIGN_INTERVAL_M))
                 sign_z = tunnel_depth_m + sign_rule["vertical_offset_m"]
@@ -9203,21 +9575,44 @@ def build_subway_tunnel_meshes(
                 for sign_idx in range(sign_count):
                     distance = min(segment_length, (sign_idx + 0.5) * SUBWAY_EVACUATION_SIGN_INTERVAL_M)
                     center_xy = sleeper_start + tangent * distance
-                    sign = oriented_box_between(
-                        f"{tunnel_name}_Evacuation_Sign_{part_idx}_{sign_idx}",
+                    sign_frame = oriented_box_between(
+                        f"{tunnel_name}_Evacuation_Sign_Frame_{part_idx}_{sign_idx}",
                         center_xy,
                         center_xy + tangent * 0.55,
                         0.55,
-                        0.08,
-                        0.28,
+                        0.10,
+                        0.34,
+                        sign_lateral,
+                        sign_z,
+                        [28, 88, 46, 255],
+                    )
+                    add_mesh(component_meshes["Ref24_Evacuation_Sign_Frame"], sign_frame)
+                    sign_panel = oriented_box_between(
+                        f"{tunnel_name}_Evacuation_Sign_Panel_{part_idx}_{sign_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.48,
+                        0.48,
+                        0.07,
+                        0.26,
                         sign_lateral,
                         sign_z,
                         [60, 170, 90, 255],
                     )
-                    add_mesh(component_meshes["Evacuation_Sign"], sign)
+                    add_mesh(component_meshes["Ref23_Evacuation_Sign_Panel"], sign_panel)
+                    sign_lamp = oriented_box_between(
+                        f"{tunnel_name}_Evacuation_Sign_Lamp_{part_idx}_{sign_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.36,
+                        0.36,
+                        0.08,
+                        0.08,
+                        sign_lateral,
+                        sign_z + 0.20,
+                        [96, 236, 126, 255],
+                    )
+                    add_mesh(component_meshes["Ref25_Evacuation_Sign_Lamp"], sign_lamp)
                 part_count += 1
-        reference_component_meshes = expand_subway_reference_component_meshes(component_meshes)
-        for component, meshes in reference_component_meshes.items():
+        for component, meshes in component_meshes.items():
             object_name = f"{tunnel_name}_{component}"
             color = COLORS["subway_tunnel"] if component == "Ref04_Concrete_Segment" else None
             combined = combine_mesh_list(object_name, meshes, color)
@@ -9234,6 +9629,7 @@ def build_subway_tunnel_meshes(
                     tunnel_depth_m,
                     tunnel_category,
                     part_count,
+                    mileage_length_m,
                     lateral_translation_x_m,
                     lateral_translation_y_m,
                 )
@@ -9388,6 +9784,16 @@ def subway_tunnel_mesh_attribute_record(object_name: str, mesh: trimesh.Trimesh)
         "reference_dimensions_m",
         "reference_benchmark_dimensions_m",
         "reference_dimension_ratios",
+        "component_name_zh",
+        "rule_geometry_type",
+        "placement_mode",
+        "placement_interval_m",
+        "installation_side",
+        "installation_height_relative_m",
+        "geometry_source",
+        "geometry_lod",
+        "mileage_start_m",
+        "mileage_end_m",
     ):
         if key in metadata and metadata.get(key) is not None:
             record[key] = json_safe_attribute_value(metadata.get(key))
@@ -9413,8 +9819,13 @@ def build_subway_tunnel_mesh_attributes(
             "mesh_granularity": profile.mesh_granularity,
             "semantic_level": profile.semantic_level,
         },
-        "policy": "subway interval tunnels are exported as source-line monomers; attributes are reattached as Blender/FBX custom properties",
+        "policy": (
+            "all 41 subway component classes are generated from railway centerlines as simplified "
+            "parameterized rule geometry; subway01.blend is retained only as a dimension reference"
+        ),
         "object_count": len(records),
+        "rule_component_class_count": len(SUBWAY_REFERENCE_COMPONENTS_41),
+        "geometry_source": "procedural_parameterized_rule",
         "source_line_count": len({str(record.get("source_subway_id") or "") for record in records}),
         "layer_object_counts": dict(sorted(layer_counts.items())),
         "objects": records,
