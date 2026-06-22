@@ -103,6 +103,20 @@ MATERIALS = {
     "Bridge_Pier": ("CIM_Bridge_Pier_Concrete", (0.56, 0.56, 0.52, 1.0), 0.78),
     "Building": ("CIM_Building_Concrete", (0.72, 0.71, 0.68, 1.0), 0.72),
     "Subway_Tunnel": ("CIM_Subway_Tunnel_Dark_Concrete", (0.26, 0.26, 0.30, 1.0), 0.85),
+    "Subway_Lining": ("CIM_Subway_Segmental_Lining", (0.58, 0.59, 0.57, 1.0), 0.78),
+    "Subway_Lining_Ring": ("CIM_Subway_Lining_Ring_Joints", (0.72, 0.73, 0.71, 1.0), 0.66),
+    "Subway_Lining_Seam": ("CIM_Subway_Lining_Panel_Seams", (0.86, 0.86, 0.82, 1.0), 0.70),
+    "Subway_Lining_Bolt": ("CIM_Subway_Lining_Bolt_Holes", (0.12, 0.12, 0.11, 1.0), 0.58),
+    "Subway_Track_Bed": ("CIM_Subway_Track_Bed_Concrete", (0.44, 0.44, 0.42, 1.0), 0.72),
+    "Subway_Rail": ("CIM_Subway_Rail_Steel", (0.12, 0.12, 0.12, 1.0), 0.32),
+    "Subway_Sleeper": ("CIM_Subway_Sleeper_Dark", (0.06, 0.06, 0.06, 1.0), 0.48),
+    "Subway_Evacuation_Platform": ("CIM_Subway_Evacuation_Platform", (0.52, 0.52, 0.50, 1.0), 0.68),
+    "Subway_Guardrail": ("CIM_Subway_Guardrail", (0.56, 0.55, 0.50, 1.0), 0.42),
+    "Subway_Side_Pipe": ("CIM_Subway_Side_Pipe", (0.43, 0.43, 0.40, 1.0), 0.48),
+    "Subway_Cable_Bracket": ("CIM_Subway_Cable_Bracket", (0.54, 0.20, 0.78, 1.0), 0.42),
+    "Subway_Contact_Wire": ("CIM_Subway_Contact_Wire", (0.18, 0.18, 0.16, 1.0), 0.32),
+    "Subway_Lighting": ("CIM_Subway_Lighting_Warm", (0.92, 0.93, 0.72, 1.0), 0.22),
+    "Subway_Evacuation_Sign": ("CIM_Subway_Evacuation_Sign_Green", (0.08, 0.68, 0.24, 1.0), 0.36),
     "Subway_Station": ("CIM_Subway_Station_Blue", (0.12, 0.22, 0.48, 1.0), 0.58),
     "Bus_Stop": ("CIM_Bus_Stop_Green", (0.05, 0.55, 0.28, 1.0), 0.42),
     "Utility_Water": ("CIM_Utility_Water_Blue", (0.02, 0.34, 0.90, 1.0), 0.36),
@@ -113,6 +127,49 @@ MATERIALS = {
 }
 
 DEFAULT_MATERIAL = ("CIM_Default", (0.58, 0.58, 0.58, 1.0), 0.6)
+REFERENCE_SUBWAY_MATERIAL_PREFIXES = (
+    ("Subway_Ref01", ("CIM_Subway_Ref01_Guardrail", (0.56, 0.56, 0.52, 1.0), 0.42)),
+    ("Subway_Ref02", ("CIM_Subway_Ref02_Aggregate_Base", (0.36, 0.36, 0.34, 1.0), 0.74)),
+    ("Subway_Ref03", ("CIM_Subway_Ref03_Rubber_Isolation", (0.04, 0.04, 0.04, 1.0), 0.58)),
+    ("Subway_Ref04", ("CIM_Subway_Ref04_Concrete_Segment", (0.58, 0.59, 0.57, 1.0), 0.78)),
+    ("Subway_Ref05", ("CIM_Subway_Ref05_Steel_Plate", (0.72, 0.72, 0.68, 1.0), 0.38)),
+    ("Subway_Ref06", ("CIM_Subway_Ref06_Seal_Ring", (0.12, 0.12, 0.11, 1.0), 0.58)),
+    ("Subway_Ref07", ("CIM_Subway_Ref07_Bolt", (0.10, 0.10, 0.09, 1.0), 0.44)),
+    ("Subway_Ref08", ("CIM_Subway_Ref08_Platform_Main", (0.52, 0.52, 0.50, 1.0), 0.68)),
+    ("Subway_Ref09", ("CIM_Subway_Ref09_Platform_Support", (0.58, 0.57, 0.52, 1.0), 0.48)),
+    ("Subway_Ref10", ("CIM_Subway_Ref10_Platform_Edge", (0.76, 0.74, 0.46, 1.0), 0.42)),
+    ("Subway_Ref11", ("CIM_Subway_Ref11_Platform_Frame", (0.32, 0.32, 0.30, 1.0), 0.38)),
+    ("Subway_Ref12", ("CIM_Subway_Ref12_Platform_Panel", (0.52, 0.52, 0.50, 1.0), 0.68)),
+    ("Subway_Ref13", ("CIM_Subway_Ref13_Platform_Bracket", (0.46, 0.46, 0.42, 1.0), 0.44)),
+    ("Subway_Ref14", ("CIM_Subway_Ref14_Contact_Rail", (0.16, 0.16, 0.15, 1.0), 0.30)),
+    ("Subway_Ref15", ("CIM_Subway_Ref15_Contact_Hanger", (0.24, 0.24, 0.22, 1.0), 0.34)),
+    ("Subway_Ref16", ("CIM_Subway_Ref16_Contact_Clamp", (0.10, 0.10, 0.09, 1.0), 0.34)),
+    ("Subway_Ref17", ("CIM_Subway_Ref17_High_Voltage_Bracket", (0.50, 0.00, 1.00, 1.0), 0.42)),
+    ("Subway_Ref18", ("CIM_Subway_Ref18_Comm_Bracket_A", (1.00, 0.50, 0.62, 1.0), 0.42)),
+    ("Subway_Ref19", ("CIM_Subway_Ref19_Comm_Bracket_B", (0.74, 0.32, 0.82, 1.0), 0.42)),
+    ("Subway_Ref20", ("CIM_Subway_Ref20_Leakage_Cable_A", (0.12, 0.12, 0.12, 1.0), 0.38)),
+    ("Subway_Ref21", ("CIM_Subway_Ref21_Leakage_Cable_B", (0.14, 0.14, 0.14, 1.0), 0.38)),
+    ("Subway_Ref22", ("CIM_Subway_Ref22_Leakage_Cable_C", (0.16, 0.16, 0.16, 1.0), 0.38)),
+    ("Subway_Ref23", ("CIM_Subway_Ref23_Evacuation_Sign", (0.00, 0.36, 0.00, 1.0), 0.36)),
+    ("Subway_Ref24", ("CIM_Subway_Ref24_Evacuation_Sign_Frame", (0.05, 0.56, 0.08, 1.0), 0.34)),
+    ("Subway_Ref25", ("CIM_Subway_Ref25_Evacuation_Sign_Lamp", (0.12, 0.90, 0.26, 1.0), 0.22)),
+    ("Subway_Ref26", ("CIM_Subway_Ref26_Lighting_Fixture", (0.92, 0.90, 0.70, 1.0), 0.22)),
+    ("Subway_Ref27", ("CIM_Subway_Ref27_Lighting_Cable", (0.18, 0.18, 0.16, 1.0), 0.36)),
+    ("Subway_Ref28", ("CIM_Subway_Ref28_Lighting_Bracket", (0.34, 0.34, 0.30, 1.0), 0.36)),
+    ("Subway_Ref29", ("CIM_Subway_Ref29_Water_Bracket_A", (0.48, 0.20, 0.78, 1.0), 0.42)),
+    ("Subway_Ref30", ("CIM_Subway_Ref30_Water_Bracket_B", (0.62, 0.10, 0.90, 1.0), 0.42)),
+    ("Subway_Ref31", ("CIM_Subway_Ref31_Water_Bracket_C", (0.44, 0.24, 0.72, 1.0), 0.42)),
+    ("Subway_Ref32", ("CIM_Subway_Ref32_Water_Bracket_D", (0.50, 0.20, 0.80, 1.0), 0.42)),
+    ("Subway_Ref33", ("CIM_Subway_Ref33_Fire_Water_Bracket_A", (0.58, 0.00, 0.62, 1.0), 0.42)),
+    ("Subway_Ref34", ("CIM_Subway_Ref34_Fire_Water_Bracket_B", (0.72, 0.00, 0.70, 1.0), 0.42)),
+    ("Subway_Ref35", ("CIM_Subway_Ref35_Fire_Water_Bracket_C", (0.56, 0.10, 0.58, 1.0), 0.42)),
+    ("Subway_Ref36", ("CIM_Subway_Ref36_Fire_Water_Bracket_D", (0.66, 0.04, 0.66, 1.0), 0.42)),
+    ("Subway_Ref37", ("CIM_Subway_Ref37_Rail_Bed_Surface", (0.30, 0.30, 0.28, 1.0), 0.62)),
+    ("Subway_Ref38", ("CIM_Subway_Ref38_Rail_Aluminum", (0.74, 0.76, 0.76, 1.0), 0.28)),
+    ("Subway_Ref39", ("CIM_Subway_Ref39_Rail_Cast_Iron", (0.18, 0.18, 0.17, 1.0), 0.34)),
+    ("Subway_Ref40", ("CIM_Subway_Ref40_Rail_Chrome", (0.84, 0.86, 0.88, 1.0), 0.18)),
+    ("Subway_Ref41", ("CIM_Subway_Ref41_Rail_Fastener", (0.26, 0.26, 0.24, 1.0), 0.34)),
+)
 
 
 def clear_scene() -> None:
@@ -251,6 +308,9 @@ def create_basemap_material() -> bpy.types.Material:
 def material_for_object(obj_name: str, layer_name: str = "") -> bpy.types.Material:
     if layer_name in MATERIALS:
         return create_material(*MATERIALS[layer_name])
+    for prefix, material_spec in REFERENCE_SUBWAY_MATERIAL_PREFIXES:
+        if layer_name.startswith(prefix):
+            return create_material(*material_spec)
     if obj_name.startswith(("GIS_GoogleMap", "GIS_WorldImagery")):
         return create_basemap_material()
     if obj_name.startswith("Junction_Label"):
@@ -295,6 +355,9 @@ def attribute_sidecar_for_obj(obj_path: Path) -> Path | None:
         return ROAD_MESH_ATTRIBUTES_PATH if ROAD_MESH_ATTRIBUTES_PATH.exists() else None
     if obj_path.parent.name in {"cim3", "cim4"} and obj_path.name == "city_roads.obj":
         sidecar = SEMANTIC_DIR / obj_path.parent.name / "city_roads_mesh_attributes.json"
+        return sidecar if sidecar.exists() else None
+    if obj_path.parent.name in {"cim4"} and obj_path.name == "subway_tunnels.obj":
+        sidecar = SEMANTIC_DIR / obj_path.parent.name / "subway_tunnels_mesh_attributes.json"
         return sidecar if sidecar.exists() else None
     if obj_path.name in {"cim3_city_roads.obj", "cim4_city_roads.obj", "cim_city_roads.obj"}:
         sidecar = SEMANTIC_DIR / f"{obj_path.stem}_mesh_attributes.json"

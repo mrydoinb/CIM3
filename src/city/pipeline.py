@@ -36,7 +36,8 @@ import numpy as np
 import pandas as pd
 import shapely
 from shapely.geometry import LineString, MultiLineString, Point, MultiPoint, Polygon, MultiPolygon, GeometryCollection
-from shapely.ops import nearest_points, substring, unary_union
+from shapely.affinity import translate as shapely_translate
+from shapely.ops import linemerge, nearest_points, substring, unary_union
 import trimesh
 
 from road import generator as road_gen
@@ -127,8 +128,197 @@ GAS_LINES_PATH = first_existing_path(["**/rq*.shp"])
 
 BUILDING_DEFAULT_HEIGHT_M = 12.0
 BUILDING_LEVEL_HEIGHT_M = 3.2
-SUBWAY_TUNNEL_RADIUS_M = 2.6
+SUBWAY_TUNNEL_RADIUS_M = 3.010074
 SUBWAY_TUNNEL_DEPTH_M = -14.0
+URBAN_RAIL_TUNNEL_DEPTH_M = -12.0
+RAILWAY_TUNNEL_DEPTH_M = -8.0
+HIGH_SPEED_RAIL_TUNNEL_DEPTH_M = -6.0
+SUBWAY_TUNNEL_VERTICAL_CLEARANCE_M = 11.0
+SUBWAY_TUNNEL_INTERSECTION_TOLERANCE_M = 0.5
+SUBWAY_TUNNEL_OVERLAP_CLEARANCE_M = 1.0
+SUBWAY_CORRIDOR_MERGE_DISTANCE_M = 10.6
+SUBWAY_CORRIDOR_NEAR_OVERLAP_RATIO = 0.25
+SUBWAY_PARALLEL_SHIFT_TRIGGER_M = 18.0
+SUBWAY_PARALLEL_LATERAL_SPACING_M = 18.0
+SUBWAY_SAME_LINE_TRACK_SPACING_M = 36.0
+SUBWAY_TRACK_GAUGE_M = 1.435
+SUBWAY_SLEEPER_INTERVAL_M = 3.0
+SUBWAY_CABLE_BRACKET_INTERVAL_M = 8.0
+SUBWAY_LINING_RING_INTERVAL_M = 6.0
+SUBWAY_LINING_RING_WIDTH_M = 0.18
+SUBWAY_LINING_PANEL_SEAM_RADIUS_M = 0.018
+SUBWAY_LINING_BOLT_RADIUS_M = 0.055
+SUBWAY_LINING_BOLT_INTERVAL_M = 12.0
+SUBWAY_LIGHTING_INTERVAL_M = 18.0
+SUBWAY_EVACUATION_SIGN_INTERVAL_M = 36.0
+SUBWAY_CONTACT_HANGER_INTERVAL_M = 12.0
+SUBWAY_REFERENCE_BENCHMARK_DIMENSIONS_M = (23.147, 88.787, 6.009)
+SUBWAY_REFERENCE_COMPONENTS_41: tuple[dict[str, Any], ...] = (
+    {"component": "Ref01_Guardrail", "reference_mesh": "Mesh.001", "reference_dimensions_m": (17.261, 90.190, 0.110), "system": "guardrail"},
+    {"component": "Ref02_Aggregate_Base", "reference_mesh": "Mesh.002", "reference_dimensions_m": (22.178, 88.517, 3.947), "system": "track_base"},
+    {"component": "Ref03_Rubber_Isolation", "reference_mesh": "Mesh.003", "reference_dimensions_m": (31.091, 974.494, 4.200), "system": "rail_elastic_layer"},
+    {"component": "Ref04_Concrete_Segment", "reference_mesh": "Mesh.004", "reference_dimensions_m": (23.147, 88.787, 6.009), "system": "segmental_lining"},
+    {"component": "Ref05_Steel_Plate", "reference_mesh": "Mesh.005", "reference_dimensions_m": (11.947, 87.092, 0.210), "system": "segment_connector"},
+    {"component": "Ref06_Seal_Ring", "reference_mesh": "Mesh.006", "reference_dimensions_m": (11.937, 87.092, 0.044), "system": "segment_connector"},
+    {"component": "Ref07_Bolt", "reference_mesh": "Mesh.007", "reference_dimensions_m": (11.805, 87.009, 0.168), "system": "segment_connector"},
+    {"component": "Ref08_Platform_Main", "reference_mesh": "Mesh.008", "reference_dimensions_m": (16.505, 1.681, 1.203), "system": "evacuation_platform"},
+    {"component": "Ref09_Platform_Support", "reference_mesh": "Mesh.009", "reference_dimensions_m": (17.092, 1.790, 2.232), "system": "evacuation_platform"},
+    {"component": "Ref10_Platform_Edge_Strip", "reference_mesh": "Mesh.010", "reference_dimensions_m": (16.791, 0.094, 0.011), "system": "evacuation_platform"},
+    {"component": "Ref11_Platform_Steel_Frame", "reference_mesh": "Mesh.011", "reference_dimensions_m": (13.561, 85.772, 0.435), "system": "evacuation_platform"},
+    {"component": "Ref12_Platform_Concrete_Panel", "reference_mesh": "Mesh.012", "reference_dimensions_m": (13.548, 86.992, 0.073), "system": "evacuation_platform"},
+    {"component": "Ref13_Platform_Bracket", "reference_mesh": "Mesh.013", "reference_dimensions_m": (13.105, 85.716, 0.354), "system": "evacuation_platform"},
+    {"component": "Ref14_Contact_Rail", "reference_mesh": "Mesh.014", "reference_dimensions_m": (17.925, 88.156, 0.073), "system": "contact_network"},
+    {"component": "Ref15_Contact_Hanger", "reference_mesh": "Mesh.015", "reference_dimensions_m": (17.975, 88.106, 0.351), "system": "contact_network"},
+    {"component": "Ref16_Contact_Clamp", "reference_mesh": "Mesh.016", "reference_dimensions_m": (17.192, 88.064, 0.021), "system": "contact_network"},
+    {"component": "Ref17_High_Voltage_Cable_Bracket", "reference_mesh": "Mesh.017", "reference_dimensions_m": (14.024, 87.068, 3.724), "system": "power_cable"},
+    {"component": "Ref18_Comm_Cable_Bracket_A", "reference_mesh": "Mesh.018", "reference_dimensions_m": (22.419, 87.073, 2.282), "system": "communication_cable"},
+    {"component": "Ref19_Comm_Cable_Bracket_B", "reference_mesh": "Mesh.019", "reference_dimensions_m": (22.161, 87.043, 2.163), "system": "communication_cable"},
+    {"component": "Ref20_Leakage_Cable_A", "reference_mesh": "Mesh.020", "reference_dimensions_m": (13.564, 80.624, 0.156), "system": "leakage_cable"},
+    {"component": "Ref21_Leakage_Cable_B", "reference_mesh": "Mesh.021", "reference_dimensions_m": (13.629, 80.624, 0.219), "system": "leakage_cable"},
+    {"component": "Ref22_Leakage_Cable_C", "reference_mesh": "Mesh.022", "reference_dimensions_m": (13.621, 80.624, 0.212), "system": "leakage_cable"},
+    {"component": "Ref23_Evacuation_Sign_Panel", "reference_mesh": "Mesh.023", "reference_dimensions_m": (11.431, 51.777, 0.099), "system": "evacuation_signage"},
+    {"component": "Ref24_Evacuation_Sign_Frame", "reference_mesh": "Mesh.024", "reference_dimensions_m": (11.442, 51.817, 0.152), "system": "evacuation_signage"},
+    {"component": "Ref25_Evacuation_Sign_Lamp", "reference_mesh": "Mesh.025", "reference_dimensions_m": (11.430, 51.527, 0.088), "system": "evacuation_signage"},
+    {"component": "Ref26_Lighting_Fixture", "reference_mesh": "Mesh.026", "reference_dimensions_m": (20.784, 0.556, 0.363), "system": "lighting"},
+    {"component": "Ref27_Lighting_Cable", "reference_mesh": "Mesh.027", "reference_dimensions_m": (20.641, 0.066, 0.044), "system": "lighting"},
+    {"component": "Ref28_Lighting_Bracket", "reference_mesh": "Mesh.028", "reference_dimensions_m": (21.126, 0.616, 0.481), "system": "lighting"},
+    {"component": "Ref29_Water_System_Bracket_A", "reference_mesh": "Mesh.029", "reference_dimensions_m": (21.038, 88.033, 0.175), "system": "water_supply"},
+    {"component": "Ref30_Water_System_Bracket_B", "reference_mesh": "Mesh.030", "reference_dimensions_m": (21.059, 88.004, 0.233), "system": "water_supply"},
+    {"component": "Ref31_Water_System_Bracket_C", "reference_mesh": "Mesh.031", "reference_dimensions_m": (21.246, 88.119, 0.124), "system": "water_supply"},
+    {"component": "Ref32_Water_System_Bracket_D", "reference_mesh": "Mesh.032", "reference_dimensions_m": (21.216, 88.133, 0.107), "system": "water_supply"},
+    {"component": "Ref33_Fire_Water_Bracket_A", "reference_mesh": "Mesh.033", "reference_dimensions_m": (21.768, 88.046, 0.367), "system": "fire_water"},
+    {"component": "Ref34_Fire_Water_Bracket_B", "reference_mesh": "Mesh.034", "reference_dimensions_m": (21.572, 86.710, 0.175), "system": "fire_water"},
+    {"component": "Ref35_Fire_Water_Bracket_C", "reference_mesh": "Mesh.035", "reference_dimensions_m": (21.593, 86.680, 0.233), "system": "fire_water"},
+    {"component": "Ref36_Fire_Water_Bracket_D", "reference_mesh": "Mesh.036", "reference_dimensions_m": (21.726, 86.809, 0.121), "system": "fire_water"},
+    {"component": "Ref37_Rail_Bed_Surface", "reference_mesh": "Mesh.037", "reference_dimensions_m": (24.773, 524.558, 0.071), "system": "track"},
+    {"component": "Ref38_Rail_Aluminum_Part", "reference_mesh": "Mesh.038", "reference_dimensions_m": (24.760, 524.539, 0.096), "system": "track"},
+    {"component": "Ref39_Rail_Cast_Iron_Part", "reference_mesh": "Mesh.039", "reference_dimensions_m": (24.734, 524.507, 0.024), "system": "track"},
+    {"component": "Ref40_Rail_Chrome_Part", "reference_mesh": "Mesh.040", "reference_dimensions_m": (24.707, 524.517, 0.219), "system": "track"},
+    {"component": "Ref41_Rail_Fastener", "reference_mesh": "Mesh.041", "reference_dimensions_m": (24.953, 524.629, 0.188), "system": "track"},
+)
+SUBWAY_REFERENCE_COMPONENT_BY_NAME = {record["component"]: record for record in SUBWAY_REFERENCE_COMPONENTS_41}
+SUBWAY_REFERENCE_COMPONENT_SOURCE_MAP = {
+    "Ref01_Guardrail": "Guardrail",
+    "Ref02_Aggregate_Base": "Track_Bed",
+    "Ref03_Rubber_Isolation": "Sleeper",
+    "Ref04_Concrete_Segment": "Lining",
+    "Ref05_Steel_Plate": "Lining_Seam",
+    "Ref06_Seal_Ring": "Lining_Ring",
+    "Ref07_Bolt": "Lining_Bolt",
+    "Ref08_Platform_Main": "Evacuation_Platform",
+    "Ref09_Platform_Support": "Evacuation_Platform",
+    "Ref10_Platform_Edge_Strip": "Evacuation_Platform",
+    "Ref11_Platform_Steel_Frame": "Evacuation_Platform",
+    "Ref12_Platform_Concrete_Panel": "Evacuation_Platform",
+    "Ref13_Platform_Bracket": "Evacuation_Platform",
+    "Ref14_Contact_Rail": "Contact_Wire",
+    "Ref15_Contact_Hanger": "Contact_Wire",
+    "Ref16_Contact_Clamp": "Contact_Wire",
+    "Ref17_High_Voltage_Cable_Bracket": "Cable_Bracket",
+    "Ref18_Comm_Cable_Bracket_A": "Cable_Bracket",
+    "Ref19_Comm_Cable_Bracket_B": "Cable_Bracket",
+    "Ref20_Leakage_Cable_A": "Side_Pipe",
+    "Ref21_Leakage_Cable_B": "Side_Pipe",
+    "Ref22_Leakage_Cable_C": "Side_Pipe",
+    "Ref23_Evacuation_Sign_Panel": "Evacuation_Sign",
+    "Ref24_Evacuation_Sign_Frame": "Evacuation_Sign",
+    "Ref25_Evacuation_Sign_Lamp": "Evacuation_Sign",
+    "Ref26_Lighting_Fixture": "Lighting",
+    "Ref27_Lighting_Cable": "Lighting",
+    "Ref28_Lighting_Bracket": "Lighting",
+    "Ref29_Water_System_Bracket_A": "Side_Pipe",
+    "Ref30_Water_System_Bracket_B": "Cable_Bracket",
+    "Ref31_Water_System_Bracket_C": "Side_Pipe",
+    "Ref32_Water_System_Bracket_D": "Cable_Bracket",
+    "Ref33_Fire_Water_Bracket_A": "Side_Pipe",
+    "Ref34_Fire_Water_Bracket_B": "Cable_Bracket",
+    "Ref35_Fire_Water_Bracket_C": "Side_Pipe",
+    "Ref36_Fire_Water_Bracket_D": "Cable_Bracket",
+    "Ref37_Rail_Bed_Surface": "Track_Bed",
+    "Ref38_Rail_Aluminum_Part": "Rail",
+    "Ref39_Rail_Cast_Iron_Part": "Sleeper",
+    "Ref40_Rail_Chrome_Part": "Rail",
+    "Ref41_Rail_Fastener": "Sleeper",
+}
+SUBWAY_TEMPLATE_SECTION_PROFILE_NAME = "subway01_mesh004_hull_35pt"
+SUBWAY_TEMPLATE_SECTION_SOURCE_MESH = "Mesh.004"
+SUBWAY_TEMPLATE_SECTION_AREA_M2 = 130.277595
+SUBWAY_TEMPLATE_SECTION_CENTER_XZ_M = (135.573803, -22.152754)
+SUBWAY_TEMPLATE_SECTION_HULL_XZ_M: tuple[tuple[float, float], ...] = (
+    (124.034645, -22.054626),
+    (124.151672, -23.099791),
+    (124.693413, -23.857399),
+    (125.271690, -24.564014),
+    (126.261826, -25.039877),
+    (127.003662, -25.144846),
+    (127.189667, -25.157419),
+    (127.308205, -25.157419),
+    (143.783539, -25.155260),
+    (144.129135, -25.150301),
+    (144.893173, -25.034496),
+    (145.007614, -24.992537),
+    (145.045776, -24.977360),
+    (145.910355, -24.559237),
+    (146.512039, -23.964842),
+    (146.950638, -23.080061),
+    (147.112961, -21.988028),
+    (146.984634, -21.390465),
+    (146.919357, -21.212263),
+    (146.527649, -20.462955),
+    (146.406311, -20.269737),
+    (146.075165, -19.846846),
+    (145.376694, -19.432911),
+    (144.629181, -19.180241),
+    (144.323044, -19.169266),
+    (143.614624, -19.148090),
+    (126.949707, -19.156849),
+    (126.817001, -19.157202),
+    (126.699699, -19.164604),
+    (126.518822, -19.182215),
+    (126.001228, -19.350155),
+    (125.753166, -19.440941),
+    (125.128113, -19.856188),
+    (124.613037, -20.425905),
+    (124.140083, -21.220497),
+)
+SUBWAY_SINGLE_TUNNEL_SECTION_PROFILE_NAME = "subway01_mesh004_right_circular_single_tunnel_fit"
+SUBWAY_SINGLE_TUNNEL_SECTION_SIDE = "right"
+SUBWAY_SINGLE_TUNNEL_SECTION_SPLIT_X_M = 135.573803
+SUBWAY_SINGLE_TUNNEL_SECTION_CENTER_XZ_M = (144.079249, -22.147192)
+SUBWAY_SINGLE_TUNNEL_SECTION_RADIUS_M = 3.010074
+SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS = 48
+SUBWAY_SINGLE_TUNNEL_SECTION_AREA_M2 = 28.464536
+SUBWAY_SINGLE_TUNNEL_SECTION_SOURCE_ARC_XZ_M: tuple[tuple[float, float], ...] = (
+    (143.614624, -19.148090),
+    (144.323044, -19.169266),
+    (144.629181, -19.180241),
+    (145.376694, -19.432911),
+    (146.075165, -19.846846),
+    (146.406311, -20.269737),
+    (146.527649, -20.462955),
+    (146.919357, -21.212263),
+    (146.984634, -21.390465),
+    (147.112961, -21.988028),
+    (146.950638, -23.080061),
+    (146.512039, -23.964842),
+    (145.910355, -24.559237),
+    (145.045776, -24.977360),
+    (145.007614, -24.992537),
+    (144.893173, -25.034496),
+    (144.129135, -25.150301),
+    (143.783539, -25.155260),
+)
+SUBWAY_TEMPLATE_TRACK_BED_SECTION_BOUNDS_XZ_M = (124.485481, 146.663071, -23.925467, -19.978727)
+SUBWAY_TEMPLATE_PLATFORM_SECTION_BOUNDS_XZ_M = (124.839516, 141.344711, -24.283327, -23.080204)
+SUBWAY_TEMPLATE_CONTACT_SECTION_BOUNDS_XZ_M = (126.591156, 144.516266, -19.784359, -19.711065)
+SUBWAY_TEMPLATE_CABLE_BRACKET_SECTION_BOUNDS_XZ_M = (128.561584, 142.585541, -24.132040, -20.408028)
+SUBWAY_TEMPLATE_PIPE_SECTION_BOUNDS_XZ_M = (128.745224, 142.309692, -20.270914, -20.114948)
+SUBWAY_TEMPLATE_LIGHTING_SECTION_BOUNDS_XZ_M = (124.648254, 145.432083, -23.303722, -22.940712)
+SUBWAY_TEMPLATE_SIGN_SECTION_BOUNDS_XZ_M = (129.644440, 141.075272, -22.781256, -22.682747)
+SUBWAY_TEMPLATE_WATER_BRACKET_SECTION_BOUNDS_XZ_M = (125.044983, 146.082947, -23.926720, -23.751547)
+SUBWAY_TEMPLATE_RAIL_SURFACE_SECTION_BOUNDS_XZ_M = (120.362335, 145.055740, -24.212988, -24.142374)
+SUBWAY_TEMPLATE_RAIL_SECTION_BOUNDS_XZ_M = (120.352455, 145.088959, -24.199865, -24.104048)
+SUBWAY_TEMPLATE_FASTENER_SECTION_BOUNDS_XZ_M = (120.246849, 145.186646, -24.381388, -24.194271)
 SUBWAY_STATION_DEPTH_M = -11.0
 SUBWAY_STATION_SIZE_M = (34.0, 16.0, 7.0)
 # Road/junction generation switches. These settings are kept next to the city
@@ -272,6 +462,27 @@ ROAD_GENERATION_PROFILES = {
 }
 
 
+@dataclass(frozen=True)
+class SubwayGenerationProfile:
+    name: str
+    mesh_granularity: str
+    semantic_level: str
+    generate_station_trim: bool
+    generate_track_bed: bool
+
+
+SUBWAY_CIM4_PROFILE = SubwayGenerationProfile(
+    name="cim4",
+    mesh_granularity="source_line_component",
+    semantic_level="interval_tunnel_source_line_with_mesh_attributes",
+    generate_station_trim=False,
+    generate_track_bed=False,
+)
+SUBWAY_GENERATION_PROFILES = {
+    SUBWAY_CIM4_PROFILE.name: SUBWAY_CIM4_PROFILE,
+}
+
+
 def road_generation_profile(level: str | RoadGenerationProfile | None = None) -> RoadGenerationProfile:
     if isinstance(level, RoadGenerationProfile):
         return level
@@ -281,16 +492,39 @@ def road_generation_profile(level: str | RoadGenerationProfile | None = None) ->
     return ROAD_GENERATION_PROFILES[key]
 
 
+def subway_generation_profile(level: str | SubwayGenerationProfile | None = None) -> SubwayGenerationProfile:
+    if isinstance(level, SubwayGenerationProfile):
+        return level
+    key = str(level or SUBWAY_CIM4_PROFILE.name).strip().lower()
+    if key not in SUBWAY_GENERATION_PROFILES:
+        raise ValueError(
+            f"Unknown subway generation level: {level!r}. Expected one of: {sorted(SUBWAY_GENERATION_PROFILES)}"
+        )
+    return SUBWAY_GENERATION_PROFILES[key]
+
+
 def road_output_stem(profile: RoadGenerationProfile) -> str:
     return f"{profile.name}_city_roads"
+
+
+def subway_output_stem(profile: SubwayGenerationProfile) -> str:
+    return f"{profile.name}_subway_tunnels"
 
 
 def road_obj_path_for_profile(profile: RoadGenerationProfile) -> Path:
     return MODULE_OBJ_DIR / profile.name / "city_roads.obj"
 
 
+def subway_tunnel_obj_path_for_profile(profile: SubwayGenerationProfile) -> Path:
+    return MODULE_OBJ_DIR / profile.name / "subway_tunnels.obj"
+
+
 def road_semantic_path_for_profile(profile: RoadGenerationProfile) -> Path:
     return ROOT / "output" / "semantic" / profile.name / "city_roads_semantic.json"
+
+
+def subway_tunnel_semantic_path_for_profile(profile: SubwayGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "subway_tunnels_semantic.json"
 
 
 def road_classification_path_for_profile(profile: RoadGenerationProfile) -> Path:
@@ -301,8 +535,16 @@ def road_mesh_attributes_path_for_profile(profile: RoadGenerationProfile) -> Pat
     return ROOT / "output" / "semantic" / profile.name / "city_roads_mesh_attributes.json"
 
 
+def subway_tunnel_mesh_attributes_path_for_profile(profile: SubwayGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "subway_tunnels_mesh_attributes.json"
+
+
 def road_source_attributes_path_for_profile(profile: RoadGenerationProfile) -> Path:
     return ROOT / "output" / "semantic" / profile.name / "city_roads_source_attributes.json"
+
+
+def subway_tunnel_source_attributes_path_for_profile(profile: SubwayGenerationProfile) -> Path:
+    return ROOT / "output" / "semantic" / profile.name / "subway_tunnels_source_attributes.json"
 
 
 def junction_semantic_path_for_profile(profile: RoadGenerationProfile) -> Path:
@@ -7776,34 +8018,1492 @@ def subway_like(row) -> bool:
     layer = safe_float(row.get("layer"), 0.0)
     line_type = str(row.get("type", "")).lower()
     name = str(row.get("name", "")).lower()
+    values = " ".join(str(row.get(column, "")) for column in ("railway", "type", "name", "line_name", "raw_name")).lower()
+    if any(token in values for token in ("高铁", "高速铁路", "high_speed", "high-speed", "highspeed")):
+        return False
     if railway == "subway" or tunnel in {"yes", "true"} or layer < 0:
         return True
-    if line_type in {"subway", "light_rail"} or any(token in line_type for token in ["地铁", "轨道", "铁路", "高铁"]):
+    if line_type in {"subway", "light_rail"} or any(token in line_type for token in ["地铁", "轨道", "轻轨"]):
         return True
-    return any(token in name for token in ["地铁", "轨道", "铁路", "高铁"])
+    return any(token in name for token in ["地铁", "轨道"])
 
 
-def build_subway_tunnel_meshes(railways: gpd.GeoDataFrame) -> dict[str, trimesh.Trimesh]:
-    tunnel_meshes: list[trimesh.Trimesh] = []
+def railway_tunnel_category(row) -> str:
+    values = " ".join(
+        str(row.get(column, ""))
+        for column in ("railway", "tunnel", "layer", "type", "name", "line_name", "raw_name")
+    ).lower()
+    if any(token in values for token in ("高铁", "高速铁路", "high_speed", "high-speed", "highspeed")):
+        return "high_speed_rail"
+    if any(token in values for token in ("地铁", "subway", "u-bahn", "metro")):
+        return "subway"
+    if any(token in values for token in ("轻轨", "轨道", "light_rail")):
+        return "urban_rail"
+    if any(token in values for token in ("铁路", "rail")):
+        return "railway"
+    return "subway"
+
+
+def railway_tunnel_base_depth_m(row) -> float:
+    category = railway_tunnel_category(row)
+    if category == "high_speed_rail":
+        return HIGH_SPEED_RAIL_TUNNEL_DEPTH_M
+    if category == "urban_rail":
+        return URBAN_RAIL_TUNNEL_DEPTH_M
+    if category == "railway":
+        return RAILWAY_TUNNEL_DEPTH_M
+    return SUBWAY_TUNNEL_DEPTH_M
+
+
+def railway_geometries_intersect(a, b) -> bool:
+    if a is None or b is None or a.is_empty or b.is_empty:
+        return False
+    try:
+        if a.intersects(b):
+            return True
+        return float(a.distance(b)) <= SUBWAY_TUNNEL_INTERSECTION_TOLERANCE_M
+    except (TypeError, ValueError):
+        return False
+
+
+def railway_tunnels_need_vertical_separation(a, b) -> bool:
+    if a is None or b is None or a.is_empty or b.is_empty:
+        return False
+    try:
+        if a.touches(b):
+            intersection = a.intersection(b)
+            if not intersection.is_empty and float(intersection.length) <= 0.05:
+                return False
+        if a.intersects(b):
+            return True
+        min_centerline_distance = 2.0 * SUBWAY_TUNNEL_RADIUS_M + SUBWAY_TUNNEL_OVERLAP_CLEARANCE_M
+        return float(a.distance(b)) < min_centerline_distance
+    except (TypeError, ValueError):
+        return False
+
+
+def railway_lines_are_same_corridor(a, b) -> bool:
+    if a is None or b is None or a.is_empty or b.is_empty:
+        return False
+    try:
+        length_a = max(float(a.length), 0.001)
+        length_b = max(float(b.length), 0.001)
+        near_length_a = float(a.intersection(b.buffer(SUBWAY_CORRIDOR_MERGE_DISTANCE_M)).length)
+        near_length_b = float(b.intersection(a.buffer(SUBWAY_CORRIDOR_MERGE_DISTANCE_M)).length)
+        near_ratio = min(near_length_a / length_a, near_length_b / length_b)
+        if near_ratio < SUBWAY_CORRIDOR_NEAR_OVERLAP_RATIO:
+            return False
+        if a.intersects(b):
+            intersection = a.intersection(b)
+            if not intersection.is_empty and float(intersection.length) <= 0.05:
+                return False
+        return float(a.distance(b)) < SUBWAY_CORRIDOR_MERGE_DISTANCE_M
+    except (TypeError, ValueError):
+        return False
+
+
+def railway_line_direction(geom) -> tuple[float, float]:
+    longest_line = None
+    for line in iter_lines(geom):
+        if longest_line is None or line.length > longest_line.length:
+            longest_line = line
+    if longest_line is None:
+        return (1.0, 0.0)
+    coords = list(longest_line.coords)
+    if len(coords) < 2:
+        return (1.0, 0.0)
+    ax, ay = coords[0][0], coords[0][1]
+    bx, by = coords[-1][0], coords[-1][1]
+    dx = float(bx - ax)
+    dy = float(by - ay)
+    length = math.hypot(dx, dy)
+    if length <= 0.001:
+        return (1.0, 0.0)
+    return (dx / length, dy / length)
+
+
+def railway_lines_are_parallel(a, b) -> bool:
+    adx, ady = railway_line_direction(a)
+    bdx, bdy = railway_line_direction(b)
+    return abs(adx * bdx + ady * bdy) >= 0.85
+
+
+def subway_parallel_shift_records(railways: gpd.GeoDataFrame) -> list[dict[str, Any]]:
+    records = []
     for idx, row in railways.iterrows():
         if not subway_like(row):
             continue
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        direction = railway_line_direction(geom)
+        normal = (-direction[1], direction[0])
+        centroid = geom.centroid
+        records.append(
+            {
+                "idx": idx,
+                "geometry": geom,
+                "line_name": subway_line_name(row, subway_source_id(row, idx)),
+                "direction": direction,
+                "normal": normal,
+                "centroid": (float(centroid.x), float(centroid.y)),
+            }
+        )
+    return records
+
+
+def subway_parallel_shift_components(records: list[dict[str, Any]]) -> list[list[int]]:
+    adjacency: dict[int, set[int]] = {i: set() for i in range(len(records))}
+    for left_idx, left in enumerate(records):
+        for right_idx in range(left_idx + 1, len(records)):
+            right = records[right_idx]
+            if not railway_lines_are_parallel(left["geometry"], right["geometry"]):
+                continue
+            distance = float(left["geometry"].distance(right["geometry"]))
+            if distance >= SUBWAY_PARALLEL_SHIFT_TRIGGER_M and not left["geometry"].intersects(right["geometry"]):
+                continue
+            if not railway_lines_are_same_corridor(left["geometry"], right["geometry"]) and distance >= SUBWAY_PARALLEL_SHIFT_TRIGGER_M:
+                continue
+            adjacency[left_idx].add(right_idx)
+            adjacency[right_idx].add(left_idx)
+
+    components: list[list[int]] = []
+    seen: set[int] = set()
+    for start_idx in range(len(records)):
+        if start_idx in seen:
+            continue
+        stack = [start_idx]
+        component: list[int] = []
+        seen.add(start_idx)
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in adjacency[current]:
+                if neighbor in seen:
+                    continue
+                seen.add(neighbor)
+                stack.append(neighbor)
+        components.append(component)
+    return components
+
+
+def assign_subway_lateral_translations(
+    railways: gpd.GeoDataFrame,
+    spacing_m: float = SUBWAY_PARALLEL_LATERAL_SPACING_M,
+) -> dict[Any, tuple[float, float]]:
+    records = subway_parallel_shift_records(railways)
+    translations: dict[Any, tuple[float, float]] = {record["idx"]: (0.0, 0.0) for record in records}
+    for component in subway_parallel_shift_components(records):
+        if len(component) <= 1:
+            continue
+        base_normal = records[component[0]]["normal"]
+        if len(component) == 2:
+            first = records[component[0]]
+            second = records[component[1]]
+            try:
+                first_point, second_point = nearest_points(first["geometry"], second["geometry"])
+                dx = float(second_point.x - first_point.x)
+                dy = float(second_point.y - first_point.y)
+                if math.hypot(dx, dy) <= 0.001:
+                    dx = float(second["centroid"][0] - first["centroid"][0])
+                    dy = float(second["centroid"][1] - first["centroid"][1])
+                if math.hypot(dx, dy) > 0.001:
+                    base_normal = (dx, dy)
+            except (TypeError, ValueError):
+                pass
+        normal_length = math.hypot(base_normal[0], base_normal[1])
+        if normal_length <= 0.001:
+            continue
+        nx, ny = base_normal[0] / normal_length, base_normal[1] / normal_length
+        sorted_component = sorted(
+            component,
+            key=lambda item_idx: records[item_idx]["centroid"][0] * nx + records[item_idx]["centroid"][1] * ny,
+        )
+        count = len(sorted_component)
+        for rank, item_idx in enumerate(sorted_component):
+            delta = (rank - (count - 1) * 0.5) * spacing_m
+            translations[records[item_idx]["idx"]] = (nx * delta, ny * delta)
+    return translations
+
+
+def apply_subway_lateral_translations(
+    railways: gpd.GeoDataFrame,
+    translations: dict[Any, tuple[float, float]],
+) -> gpd.GeoDataFrame:
+    shifted = railways.copy()
+    shifted["_subway_lateral_translation_x_m"] = 0.0
+    shifted["_subway_lateral_translation_y_m"] = 0.0
+    for idx, (dx, dy) in translations.items():
+        if idx not in shifted.index:
+            continue
+        shifted.at[idx, shifted.geometry.name] = shapely_translate(shifted.at[idx, shifted.geometry.name], xoff=dx, yoff=dy)
+        shifted.at[idx, "_subway_lateral_translation_x_m"] = round(float(dx), 3)
+        shifted.at[idx, "_subway_lateral_translation_y_m"] = round(float(dy), 3)
+    return shifted
+
+
+def subway_tunnel_side_for_translation(row) -> str:
+    dx = safe_float(row.get("_subway_lateral_translation_x_m"), 0.0)
+    dy = safe_float(row.get("_subway_lateral_translation_y_m"), 0.0)
+    if math.hypot(dx, dy) <= 1e-6:
+        return ""
+    direction = railway_line_direction(row.geometry)
+    left_normal = (-direction[1], direction[0])
+    lateral = dx * left_normal[0] + dy * left_normal[1]
+    if lateral > 1e-6:
+        return "left"
+    if lateral < -1e-6:
+        return "right"
+    return ""
+
+
+def line_midpoint_axis_between_pair(a, b) -> LineString | None:
+    return line_average_axis([a, b])
+
+
+def line_average_axis(lines: list[LineString]) -> LineString | None:
+    valid_lines = [line for line in lines if line is not None and not line.is_empty and float(line.length) > 1.0]
+    if not valid_lines:
+        return None
+    try:
+        reference = max(valid_lines, key=lambda line: float(line.length))
+        reference_direction = railway_line_direction(reference)
+        length = float(reference.length)
+        if length <= 1.0:
+            return None
+        sample_count = max(8, min(240, int(length / 25.0)))
+        coords = []
+        for sample_idx in range(sample_count + 1):
+            ratio = sample_idx / sample_count
+            samples = []
+            for line in valid_lines:
+                line_direction = railway_line_direction(line)
+                line_ratio = ratio
+                if reference_direction[0] * line_direction[0] + reference_direction[1] * line_direction[1] < 0.0:
+                    line_ratio = 1.0 - ratio
+                point = line.interpolate(float(line.length) * line_ratio)
+                samples.append((float(point.x), float(point.y)))
+            coords.append(
+                (
+                    sum(point[0] for point in samples) / len(samples),
+                    sum(point[1] for point in samples) / len(samples),
+                )
+            )
+        return LineString(coords)
+    except (TypeError, ValueError):
+        return None
+
+
+def same_line_axis_components(lines: list[LineString]) -> list[list[int]]:
+    adjacency: dict[int, set[int]] = {idx: set() for idx in range(len(lines))}
+    for left_idx, left in enumerate(lines):
+        for right_idx in range(left_idx + 1, len(lines)):
+            right = lines[right_idx]
+            if not railway_lines_are_parallel(left, right):
+                continue
+            if float(left.distance(right)) >= SUBWAY_PARALLEL_SHIFT_TRIGGER_M:
+                continue
+            try:
+                left_near_length = float(left.intersection(right.buffer(SUBWAY_PARALLEL_SHIFT_TRIGGER_M)).length)
+                right_near_length = float(right.intersection(left.buffer(SUBWAY_PARALLEL_SHIFT_TRIGGER_M)).length)
+                overlap_ratio = min(left_near_length / max(float(left.length), 0.001), right_near_length / max(float(right.length), 0.001))
+            except (TypeError, ValueError):
+                overlap_ratio = 0.0
+            if overlap_ratio < 0.45:
+                continue
+            adjacency[left_idx].add(right_idx)
+            adjacency[right_idx].add(left_idx)
+
+    components: list[list[int]] = []
+    seen: set[int] = set()
+    for start_idx in range(len(lines)):
+        if start_idx in seen:
+            continue
+        stack = [start_idx]
+        component: list[int] = []
+        seen.add(start_idx)
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in adjacency[current]:
+                if neighbor in seen:
+                    continue
+                seen.add(neighbor)
+                stack.append(neighbor)
+        components.append(component)
+    return components
+
+
+def merge_same_line_axis(group: gpd.GeoDataFrame):
+    lines = []
+    for geom in group.geometry:
+        lines.extend(list(iter_lines(geom)))
+    if not lines:
+        return None
+    if len(lines) == 1:
+        return lines[0]
+
+    merged_axes = []
+    for component in same_line_axis_components(lines):
+        component_lines = [lines[idx] for idx in component]
+        if len(component_lines) == 1:
+            merged_axes.append(component_lines[0])
+            continue
+        average_axis = line_average_axis(component_lines)
+        merged_axes.append(average_axis if average_axis is not None else component_lines[0])
+
+    merged = unary_union([line for line in merged_axes if line is not None and not line.is_empty])
+    try:
+        return linemerge(merged)
+    except ValueError:
+        return merged
+
+
+def same_line_interval_axis_rows(line_name: str, group: gpd.GeoDataFrame, geometry_name: str) -> list[pd.Series]:
+    line_records = []
+    for idx, row in group.iterrows():
+        for line in iter_lines(row.geometry):
+            if line is None or line.is_empty:
+                continue
+            line_records.append(
+                {
+                    "source_index": idx,
+                    "source_id": subway_source_id(row, idx),
+                    "row": row,
+                    "line": line,
+                    "length": float(line.length),
+                }
+            )
+    if not line_records:
+        return []
+
+    lines = [record["line"] for record in line_records]
+    raw_intervals = []
+    for component in same_line_axis_components(lines):
+        component_records = [line_records[idx] for idx in component]
+        representative_record = max(component_records, key=lambda record: record["length"])
+        component_lines = [record["line"] for record in component_records]
+        if len(component_lines) == 1:
+            interval_axis = component_lines[0]
+        else:
+            average_axis = line_average_axis(component_lines)
+            interval_axis = average_axis if average_axis is not None else representative_record["line"]
+        raw_intervals.append(
+            {
+                "axis": interval_axis,
+                "records": component_records,
+                "representative_record": representative_record,
+                "length": float(interval_axis.length),
+            }
+        )
+
+    accepted_intervals = []
+    for interval in sorted(raw_intervals, key=lambda item: item["length"], reverse=True):
+        duplicate = False
+        for accepted in accepted_intervals:
+            try:
+                near_length = float(interval["axis"].intersection(accepted["axis"].buffer(SUBWAY_PARALLEL_SHIFT_TRIGGER_M)).length)
+                near_ratio = near_length / max(float(interval["axis"].length), 0.001)
+            except (TypeError, ValueError):
+                near_ratio = 0.0
+            if near_ratio >= 0.8:
+                duplicate = True
+                break
+        if not duplicate:
+            accepted_intervals.append(interval)
+
+    accepted_intervals.sort(key=lambda item: min(record["source_index"] for record in item["records"]))
+    output_rows: list[pd.Series] = []
+    for interval_idx, interval in enumerate(accepted_intervals, start=1):
+        interval_axis = interval["axis"]
+        component_records = interval["records"]
+        representative_record = interval["representative_record"]
+        representative = representative_record["row"].copy()
+        source_ids = [str(record["source_id"]) for record in component_records]
+        source_indices = [str(record["source_index"]) for record in component_records]
+        interval_source_id = "_".join(source_ids)
+        tunnel_row = representative.copy()
+        tunnel_row[geometry_name] = interval_axis
+        tunnel_row["OBJECTID"] = f"{interval_source_id}_I{interval_idx:03d}"
+        tunnel_row["name"] = f"{line_name}_区间{interval_idx:03d}"
+        tunnel_row["_subway_line_name"] = line_name
+        tunnel_row["_subway_interval_index"] = interval_idx
+        tunnel_row["_subway_tunnel_side"] = ""
+        tunnel_row["_subway_corridor_source_count"] = int(len(component_records))
+        tunnel_row["_subway_corridor_source_indices"] = ",".join(source_indices)
+        tunnel_row["_subway_lateral_translation_x_m"] = 0.0
+        tunnel_row["_subway_lateral_translation_y_m"] = 0.0
+        tunnel_row["_subway_same_line_representative_policy"] = "source_track_line_is_single_tunnel_centerline"
+        output_rows.append(tunnel_row)
+    return output_rows
+
+
+def subway_tunnel_generation_corridors(railways: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    candidates = railways[[subway_like(row) for _, row in railways.iterrows()]].copy()
+    if candidates.empty:
+        return candidates
+
+    translations = assign_subway_lateral_translations(candidates)
+    candidates = apply_subway_lateral_translations(candidates, translations)
+
+    corridor_rows: list[pd.Series] = []
+    for source_idx, row in candidates.iterrows():
+        source_id = subway_source_id(row, source_idx)
+        line_name = subway_line_name(row, source_id)
+        corridor = row.copy()
+        corridor["_subway_line_name"] = line_name
+        corridor["_subway_interval_index"] = int(len(corridor_rows) + 1)
+        corridor["_subway_tunnel_side"] = subway_tunnel_side_for_translation(row)
+        corridor["_subway_corridor_source_count"] = 1
+        corridor["_subway_corridor_source_indices"] = str(source_idx)
+        corridor["_subway_lateral_translation_x_m"] = safe_float(row.get("_subway_lateral_translation_x_m"), 0.0)
+        corridor["_subway_lateral_translation_y_m"] = safe_float(row.get("_subway_lateral_translation_y_m"), 0.0)
+        corridor["_subway_same_line_representative_policy"] = (
+            "parallel_tracks_laterally_shifted" if corridor["_subway_tunnel_side"] else "source_track_line_is_single_tunnel_centerline"
+        )
+        corridor_rows.append(corridor)
+
+    corridors = gpd.GeoDataFrame(corridor_rows, geometry=candidates.geometry.name, crs=candidates.crs)
+    corridors.index = pd.RangeIndex(start=0, stop=len(corridors), step=1)
+    return corridors
+
+
+def subway_corridor_source_indices(railways: gpd.GeoDataFrame) -> list[Any]:
+    candidates: list[dict[str, Any]] = []
+    for idx, row in railways.iterrows():
+        if not subway_like(row):
+            continue
+        candidates.append(
+            {
+                "idx": idx,
+                "geometry": row.geometry,
+                "length": float(row.geometry.length) if row.geometry is not None and not row.geometry.is_empty else 0.0,
+                "line_name": subway_line_name(row, subway_source_id(row, idx)),
+            }
+        )
+
+    accepted: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: item["length"], reverse=True):
+        duplicate = False
+        for existing in accepted:
+            if railway_lines_are_same_corridor(candidate["geometry"], existing["geometry"]):
+                duplicate = True
+                break
+        if not duplicate:
+            accepted.append(candidate)
+    return [item["idx"] for item in accepted]
+
+
+def filter_subway_tunnel_corridors(railways: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    indices = subway_corridor_source_indices(railways)
+    return railways.loc[indices].copy()
+
+
+def assign_railway_tunnel_depths(railways: gpd.GeoDataFrame) -> dict[Any, float]:
+    records_by_line: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for idx, row in railways.iterrows():
+        if not subway_like(row):
+            continue
+        source_id = subway_source_id(row, idx)
+        line_name = subway_depth_group_name(row, source_id)
+        category = railway_tunnel_category(row)
+        records_by_line[line_name].append(
+            {
+                "idx": idx,
+                "geometry": row.geometry,
+                "source_id": source_id,
+                "line_name": line_name,
+                "category": category,
+                "depth_m": railway_tunnel_base_depth_m(row),
+            }
+        )
+
+    line_records: list[dict[str, Any]] = []
+    for line_name, records in records_by_line.items():
+        geometries = [record["geometry"] for record in records if record["geometry"] is not None and not record["geometry"].is_empty]
+        line_records.append(
+            {
+                "line_name": line_name,
+                "records": records,
+                "geometry": unary_union(geometries) if geometries else None,
+                "category": records[0]["category"],
+                "depth_m": min(float(record["depth_m"]) for record in records),
+            }
+        )
+
+    assigned: list[dict[str, Any]] = []
+    for record in line_records:
+        depth_m = float(record["depth_m"])
+        while True:
+            conflicting_depths = [
+                float(other["depth_m"])
+                for other in assigned
+                if record["line_name"] != other["line_name"]
+                and record["category"] in {"subway", "urban_rail"}
+                and other["category"] in {"subway", "urban_rail"}
+                and railway_tunnels_need_vertical_separation(record["geometry"], other["geometry"])
+                and abs(depth_m - float(other["depth_m"])) < SUBWAY_TUNNEL_VERTICAL_CLEARANCE_M
+            ]
+            if not conflicting_depths:
+                break
+            depth_m = min(depth_m, min(conflicting_depths)) - SUBWAY_TUNNEL_VERTICAL_CLEARANCE_M
+        record["depth_m"] = depth_m
+        assigned.append(record)
+
+    depths: dict[Any, float] = {}
+    for line_record in line_records:
+        for record in line_record["records"]:
+            depths[record["idx"]] = float(line_record["depth_m"])
+    return depths
+
+
+def subway_depth_group_name(row, fallback: Any) -> str:
+    explicit_line_name = row.get("_subway_line_name")
+    if explicit_line_name is not None and not pd.isna(explicit_line_name) and str(explicit_line_name).strip():
+        return str(explicit_line_name).strip()
+    return subway_line_name(row, fallback)
+
+
+def subway_source_id(row, fallback: Any) -> str:
+    for column in ("OBJECTID", "objectid", "osm_id", "Id", "id"):
+        value = row.get(column)
+        if value is not None and not pd.isna(value):
+            return str(value)
+    return str(fallback)
+
+
+def subway_line_name(row, fallback: Any) -> str:
+    for column in ("name", "line_name", "raw_name"):
+        value = row.get(column)
+        text = str(value).strip() if value is not None and not pd.isna(value) else ""
+        if text:
+            return text
+    return f"Subway_{fallback}"
+
+
+def subway_line_matches_filter(row, idx: Any, line_filter: str | None) -> bool:
+    token = str(line_filter or "").strip().casefold()
+    if not token:
+        return True
+    source_id = subway_source_id(row, idx)
+    values = [
+        row.get("_subway_line_name"),
+        subway_line_name(row, source_id),
+        row.get("name"),
+        row.get("line_name"),
+        row.get("raw_name"),
+    ]
+    return any(token in str(value).strip().casefold() for value in values if value is not None and not pd.isna(value))
+
+
+def subway_tunnel_object_name(row, source_id: str, line_name: str) -> str:
+    return f"Subway_Tunnel_{object_name_token(line_name, 'Line')}_{object_name_token(source_id, 'Source')}"
+
+
+def subway_reference_component_names() -> list[str]:
+    return [str(record["component"]) for record in SUBWAY_REFERENCE_COMPONENTS_41]
+
+
+def subway_reference_component_dimension_ratios(component: str) -> tuple[float, float, float] | None:
+    record = SUBWAY_REFERENCE_COMPONENT_BY_NAME.get(component)
+    if record is None:
+        return None
+    dims = record["reference_dimensions_m"]
+    return tuple(
+        round(float(dims[idx]) / max(float(SUBWAY_REFERENCE_BENCHMARK_DIMENSIONS_M[idx]), 0.001), 6)
+        for idx in range(3)
+    )
+
+
+def subway_tunnel_component_object_names(row, source_id: str, line_name: str) -> list[str]:
+    base_name = subway_tunnel_object_name(row, source_id, line_name)
+    return [f"{base_name}_{component}" for component in subway_reference_component_names()]
+
+
+def segment_frame(a, b) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
+    p0 = np.array([float(a[0]), float(a[1]), 0.0], dtype=float)
+    p1 = np.array([float(b[0]), float(b[1]), 0.0], dtype=float)
+    vector = p1 - p0
+    length = float(np.linalg.norm(vector))
+    if length <= 0.05:
+        return None
+    tangent = vector / length
+    normal = np.array([-tangent[1], tangent[0], 0.0], dtype=float)
+    up = np.array([0.0, 0.0, 1.0], dtype=float)
+    return tangent, normal, up, length
+
+
+def subway_template_section_offsets(expand_m: float = 0.0) -> list[tuple[float, float]]:
+    radius = max(SUBWAY_SINGLE_TUNNEL_SECTION_RADIUS_M + float(expand_m), 0.001)
+    offsets: list[tuple[float, float]] = []
+    for section_idx in range(SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS):
+        angle = 2.0 * math.pi * section_idx / SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS
+        lateral = math.cos(angle) * radius
+        vertical = math.sin(angle) * radius
+        offsets.append((lateral, vertical))
+    return offsets
+
+
+def subway_single_tunnel_bounds_xz(bounds_xz: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    min_x, max_x, min_z, max_z = [float(value) for value in bounds_xz]
+    if SUBWAY_SINGLE_TUNNEL_SECTION_SIDE == "right":
+        min_x = max(min_x, SUBWAY_SINGLE_TUNNEL_SECTION_SPLIT_X_M)
+    else:
+        max_x = min(max_x, SUBWAY_SINGLE_TUNNEL_SECTION_SPLIT_X_M)
+    if max_x - min_x <= 0.05:
+        half_center_x = SUBWAY_SINGLE_TUNNEL_SECTION_CENTER_XZ_M[0]
+        min_x = half_center_x - 0.025
+        max_x = half_center_x + 0.025
+    return min_x, max_x, min_z, max_z
+
+
+def subway_template_section_rule(bounds_xz: tuple[float, float, float, float]) -> dict[str, float]:
+    center_x, center_z = SUBWAY_SINGLE_TUNNEL_SECTION_CENTER_XZ_M
+    min_x, max_x, min_z, max_z = subway_single_tunnel_bounds_xz(bounds_xz)
+    return {
+        "lateral_offset_m": ((min_x + max_x) * 0.5) - center_x,
+        "vertical_offset_m": ((min_z + max_z) * 0.5) - center_z,
+        "width_m": max(max_x - min_x, 0.05),
+        "height_m": max(max_z - min_z, 0.05),
+    }
+
+
+def subway_template_section_surface_between(
+    name: str,
+    start,
+    end,
+    color,
+    expand_m: float = 0.0,
+) -> trimesh.Trimesh | None:
+    frame = segment_frame(start, end)
+    if frame is None:
+        return None
+    _, normal, up, _ = frame
+    p0 = np.array([float(start[0]), float(start[1]), float(start[2])], dtype=float)
+    p1 = np.array([float(end[0]), float(end[1]), float(end[2])], dtype=float)
+    section = subway_template_section_offsets(expand_m)
+    vertices = []
+    for center in (p0, p1):
+        for lateral, vertical in section:
+            vertices.append(center + normal * lateral + up * vertical)
+    faces = []
+    count = len(section)
+    for section_idx in range(count):
+        next_idx = (section_idx + 1) % count
+        faces.append([section_idx, next_idx, count + next_idx])
+        faces.append([section_idx, count + next_idx, count + section_idx])
+    mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+    mesh.metadata["name"] = name
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def subway_template_radius_at_angle(angle_deg: float) -> float:
+    return SUBWAY_SINGLE_TUNNEL_SECTION_RADIUS_M
+
+
+def subway_tube_surface_between(
+    name: str,
+    start,
+    end,
+    radius: float,
+    color,
+    sections: int = 28,
+) -> trimesh.Trimesh | None:
+    frame = segment_frame(start, end)
+    if frame is None:
+        return None
+    _, normal, up, _ = frame
+    p0 = np.array([float(start[0]), float(start[1]), float(start[2])], dtype=float)
+    p1 = np.array([float(end[0]), float(end[1]), float(end[2])], dtype=float)
+    vertices = []
+    for center in (p0, p1):
+        for section_idx in range(sections):
+            angle = 2.0 * math.pi * section_idx / sections
+            vertices.append(center + math.cos(angle) * radius * normal + math.sin(angle) * radius * up)
+    faces = []
+    for section_idx in range(sections):
+        next_idx = (section_idx + 1) % sections
+        faces.append([section_idx, next_idx, sections + next_idx])
+        faces.append([section_idx, sections + next_idx, sections + section_idx])
+    mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces), process=False)
+    mesh.metadata["name"] = name
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def cylinder_surface_between(
+    name: str,
+    start,
+    end,
+    radius: float,
+    color,
+    sections: int = 12,
+) -> trimesh.Trimesh | None:
+    return subway_tube_surface_between(name, start, end, radius, color, sections=sections)
+
+
+def oriented_box_between(
+    name: str,
+    start,
+    end,
+    length_m: float,
+    width_m: float,
+    height_m: float,
+    lateral_offset_m: float,
+    z_center_m: float,
+    color,
+) -> trimesh.Trimesh | None:
+    frame = segment_frame(start, end)
+    if frame is None:
+        return None
+    tangent, normal, up, _ = frame
+    p0 = np.array([float(start[0]), float(start[1]), z_center_m], dtype=float)
+    p1 = np.array([float(end[0]), float(end[1]), z_center_m], dtype=float)
+    center = (p0 + p1) * 0.5 + normal * lateral_offset_m
+    transform = np.eye(4)
+    transform[:3, 0] = tangent
+    transform[:3, 1] = normal
+    transform[:3, 2] = up
+    transform[:3, 3] = center
+    mesh = trimesh.creation.box(extents=(length_m, width_m, height_m), transform=transform)
+    mesh.metadata["name"] = name
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def subway_tunnel_wall_point(
+    center_xy,
+    z_center_m: float,
+    normal: np.ndarray,
+    up: np.ndarray,
+    angle_deg: float,
+    radius_m: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    angle = math.radians(angle_deg)
+    radial = normal * math.cos(angle) + up * math.sin(angle)
+    template_radius = subway_template_radius_at_angle(angle_deg)
+    radius_delta = 0.0 if radius_m is None else float(radius_m) - SUBWAY_TUNNEL_RADIUS_M
+    radius = max(template_radius + radius_delta, 0.001)
+    center = np.array([float(center_xy[0]), float(center_xy[1]), z_center_m], dtype=float)
+    return center + radial * radius, radial
+
+
+def subway_component_metadata(
+    object_name: str,
+    component: str,
+    profile: SubwayGenerationProfile,
+    source_id: str,
+    line_name: str,
+    source_index: Any,
+    tunnel_depth_m: float,
+    tunnel_category: str,
+    part_count: int,
+    lateral_translation_x_m: float = 0.0,
+    lateral_translation_y_m: float = 0.0,
+) -> dict[str, Any]:
+    reference_record = SUBWAY_REFERENCE_COMPONENT_BY_NAME.get(component)
+    tunnel_side = ""
+    if abs(float(lateral_translation_x_m)) > 1e-6 or abs(float(lateral_translation_y_m)) > 1e-6:
+        tunnel_side = "left" if float(lateral_translation_x_m) >= 0.0 else "right"
+    metadata = {
+        "name": object_name,
+        "layer_name": f"Subway_{component}",
+        "component": component,
+        "cim_domain": "subway",
+        "cim_entity_type": "subway_interval_tunnel_component",
+        "cim_generation_level": profile.name,
+        "cim_monomer": True,
+        "source_subway_id": source_id,
+        "line_name": line_name,
+        "railway_tunnel_category": tunnel_category,
+        "source_index": str(source_index),
+        "part_count": part_count,
+        "tunnel_depth_m": tunnel_depth_m,
+        "tunnel_side": tunnel_side,
+        "lateral_translation_x_m": lateral_translation_x_m,
+        "lateral_translation_y_m": lateral_translation_y_m,
+        "outer_radius_m": SUBWAY_TUNNEL_RADIUS_M,
+        "section_profile": SUBWAY_SINGLE_TUNNEL_SECTION_PROFILE_NAME,
+        "section_source_mesh": SUBWAY_TEMPLATE_SECTION_SOURCE_MESH,
+        "section_half": SUBWAY_SINGLE_TUNNEL_SECTION_SIDE,
+        "section_radius_m": SUBWAY_SINGLE_TUNNEL_SECTION_RADIUS_M,
+        "section_circle_segment_count": SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS,
+        "section_source_arc_vertex_count": len(SUBWAY_SINGLE_TUNNEL_SECTION_SOURCE_ARC_XZ_M),
+        "section_hull_vertex_count": SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS,
+        "section_hull_area_m2": SUBWAY_SINGLE_TUNNEL_SECTION_AREA_M2,
+        "construction_method": "subway01_circular_single_tunnel_rule_sweep",
+    }
+    if reference_record is not None:
+        metadata.update(
+            {
+                "reference_mesh": reference_record["reference_mesh"],
+                "reference_system": reference_record["system"],
+                "reference_dimensions_m": list(reference_record["reference_dimensions_m"]),
+                "reference_benchmark_dimensions_m": list(SUBWAY_REFERENCE_BENCHMARK_DIMENSIONS_M),
+                "reference_dimension_ratios": list(subway_reference_component_dimension_ratios(component) or ()),
+            }
+        )
+    return metadata
+
+
+def add_mesh(meshes: list[trimesh.Trimesh], mesh: trimesh.Trimesh | None) -> None:
+    if mesh is not None and len(mesh.vertices) > 0:
+        meshes.append(mesh)
+
+
+def marker_sphere(name: str, center, radius: float, color, subdivisions: int = 1) -> trimesh.Trimesh:
+    mesh = trimesh.creation.icosphere(subdivisions=subdivisions, radius=radius)
+    mesh.apply_translation(np.array(center, dtype=float))
+    mesh.metadata["name"] = name
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def expand_subway_reference_component_meshes(
+    component_meshes: dict[str, list[trimesh.Trimesh]],
+) -> dict[str, list[trimesh.Trimesh]]:
+    reference_meshes: dict[str, list[trimesh.Trimesh]] = {}
+    for component in subway_reference_component_names():
+        source_component = SUBWAY_REFERENCE_COMPONENT_SOURCE_MAP.get(component, component)
+        reference_meshes[component] = list(component_meshes.get(source_component, []))
+    return reference_meshes
+
+
+def build_subway_tunnel_meshes(
+    railways: gpd.GeoDataFrame,
+    profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
+    depth_by_index: dict[Any, float] | None = None,
+) -> dict[str, trimesh.Trimesh]:
+    profile = subway_generation_profile(profile)
+    depth_by_index = depth_by_index or assign_railway_tunnel_depths(railways)
+    tunnel_meshes: dict[str, trimesh.Trimesh] = {}
+    track_bed_rule = subway_template_section_rule(SUBWAY_TEMPLATE_TRACK_BED_SECTION_BOUNDS_XZ_M)
+    platform_rule = subway_template_section_rule(SUBWAY_TEMPLATE_PLATFORM_SECTION_BOUNDS_XZ_M)
+    contact_rule = subway_template_section_rule(SUBWAY_TEMPLATE_CONTACT_SECTION_BOUNDS_XZ_M)
+    cable_rule = subway_template_section_rule(SUBWAY_TEMPLATE_CABLE_BRACKET_SECTION_BOUNDS_XZ_M)
+    pipe_rule = subway_template_section_rule(SUBWAY_TEMPLATE_PIPE_SECTION_BOUNDS_XZ_M)
+    lighting_rule = subway_template_section_rule(SUBWAY_TEMPLATE_LIGHTING_SECTION_BOUNDS_XZ_M)
+    sign_rule = subway_template_section_rule(SUBWAY_TEMPLATE_SIGN_SECTION_BOUNDS_XZ_M)
+    water_rule = subway_template_section_rule(SUBWAY_TEMPLATE_WATER_BRACKET_SECTION_BOUNDS_XZ_M)
+    rail_surface_rule = subway_template_section_rule(SUBWAY_TEMPLATE_RAIL_SURFACE_SECTION_BOUNDS_XZ_M)
+    rail_rule = subway_template_section_rule(SUBWAY_TEMPLATE_RAIL_SECTION_BOUNDS_XZ_M)
+    fastener_rule = subway_template_section_rule(SUBWAY_TEMPLATE_FASTENER_SECTION_BOUNDS_XZ_M)
+    for idx, row in railways.iterrows():
+        if not subway_like(row):
+            continue
+        source_id = subway_source_id(row, idx)
+        line_name = subway_line_name(row, source_id)
+        tunnel_name = subway_tunnel_object_name(row, source_id, line_name)
+        tunnel_depth_m = float(depth_by_index.get(idx, railway_tunnel_base_depth_m(row)))
+        tunnel_category = railway_tunnel_category(row)
+        lateral_translation_x_m = safe_float(row.get("_subway_lateral_translation_x_m"), 0.0)
+        lateral_translation_y_m = safe_float(row.get("_subway_lateral_translation_y_m"), 0.0)
+        component_meshes: dict[str, list[trimesh.Trimesh]] = {
+            "Lining": [],
+            "Lining_Ring": [],
+            "Lining_Seam": [],
+            "Lining_Bolt": [],
+            "Track_Bed": [],
+            "Rail": [],
+            "Sleeper": [],
+            "Evacuation_Platform": [],
+            "Guardrail": [],
+            "Side_Pipe": [],
+            "Cable_Bracket": [],
+            "Contact_Wire": [],
+            "Lighting": [],
+            "Evacuation_Sign": [],
+        }
+        part_count = 0
         for line in iter_lines(row.geometry):
             coords = list(line.coords)
             for part_idx, (a, b) in enumerate(zip(coords, coords[1:])):
-                mesh = cylinder_between(
-                    f"Subway_Tunnel_{idx}_{part_idx}",
-                    (a[0], a[1], SUBWAY_TUNNEL_DEPTH_M),
-                    (b[0], b[1], SUBWAY_TUNNEL_DEPTH_M),
-                    SUBWAY_TUNNEL_RADIUS_M,
-                    COLORS["subway_tunnel"],
-                    sections=24,
-                )
-                if mesh is None:
+                frame = segment_frame(a, b)
+                if frame is None:
                     continue
-                tunnel_meshes.append(mesh)
-    combined = combine_mesh_list("Subway_Tunnel_All", tunnel_meshes, COLORS["subway_tunnel"])
-    return {combined.metadata["name"]: combined} if combined is not None else {}
+                tangent, normal, up, segment_length = frame
+                lining = subway_template_section_surface_between(
+                    f"{tunnel_name}_Lining_Part_{part_idx}",
+                    (a[0], a[1], tunnel_depth_m),
+                    (b[0], b[1], tunnel_depth_m),
+                    COLORS["subway_tunnel"],
+                )
+                add_mesh(component_meshes["Lining"], lining)
+
+                ring_count = max(1, int(segment_length // SUBWAY_LINING_RING_INTERVAL_M))
+                segment_start = np.array([float(a[0]), float(a[1]), tunnel_depth_m], dtype=float)
+                for ring_idx in range(ring_count):
+                    distance = min(segment_length, (ring_idx + 0.5) * SUBWAY_LINING_RING_INTERVAL_M)
+                    ring_center = segment_start + tangent * distance
+                    ring_start = ring_center - tangent * (SUBWAY_LINING_RING_WIDTH_M * 0.5)
+                    ring_end = ring_center + tangent * (SUBWAY_LINING_RING_WIDTH_M * 0.5)
+                    ring = subway_template_section_surface_between(
+                        f"{tunnel_name}_Lining_Ring_{part_idx}_{ring_idx}",
+                        ring_start,
+                        ring_end,
+                        [184, 186, 184, 255],
+                        expand_m=0.04,
+                    )
+                    add_mesh(component_meshes["Lining_Ring"], ring)
+
+                    stagger_deg = 36.0 if ring_idx % 2 else 0.0
+                    seam_angles = (-144.0, -108.0, -72.0, -36.0, 36.0, 72.0, 108.0, 144.0)
+                    seam_length = min(SUBWAY_LINING_RING_INTERVAL_M * 0.72, max(segment_length * 0.2, 0.6))
+                    for seam_idx, seam_angle in enumerate(seam_angles):
+                        wall_point, _radial = subway_tunnel_wall_point(
+                            ring_center[:2],
+                            tunnel_depth_m,
+                            normal,
+                            up,
+                            seam_angle + stagger_deg,
+                            SUBWAY_TUNNEL_RADIUS_M - 0.08,
+                        )
+                        seam = cylinder_surface_between(
+                            f"{tunnel_name}_Lining_Seam_{part_idx}_{ring_idx}_{seam_idx}",
+                            wall_point - tangent * (seam_length * 0.5),
+                            wall_point + tangent * (seam_length * 0.5),
+                            SUBWAY_LINING_PANEL_SEAM_RADIUS_M,
+                            [238, 238, 232, 255],
+                            sections=6,
+                        )
+                        add_mesh(component_meshes["Lining_Seam"], seam)
+
+                    if ring_idx % max(1, int(SUBWAY_LINING_BOLT_INTERVAL_M // SUBWAY_LINING_RING_INTERVAL_M)) == 0:
+                        bolt_angles = (-150.0, -120.0, -90.0, -60.0, 60.0, 90.0, 120.0, 150.0)
+                        for bolt_idx, bolt_angle in enumerate(bolt_angles):
+                            wall_point, radial = subway_tunnel_wall_point(
+                                ring_center[:2],
+                                tunnel_depth_m,
+                                normal,
+                                up,
+                                bolt_angle + stagger_deg,
+                                SUBWAY_TUNNEL_RADIUS_M - 0.10,
+                            )
+                            bolt = marker_sphere(
+                                f"{tunnel_name}_Lining_Bolt_{part_idx}_{ring_idx}_{bolt_idx}",
+                                wall_point,
+                                SUBWAY_LINING_BOLT_RADIUS_M,
+                                [70, 70, 66, 255],
+                                subdivisions=1,
+                            )
+                            add_mesh(component_meshes["Lining_Bolt"], bolt)
+
+                track_surface_z = tunnel_depth_m + rail_surface_rule["vertical_offset_m"]
+                track_bed_height = min(max(track_bed_rule["height_m"] * 0.16, 0.52), 0.72)
+                track_bed_width = min(track_bed_rule["width_m"], SUBWAY_REFERENCE_BENCHMARK_DIMENSIONS_M[0] - 0.80)
+                bed_z = track_surface_z - track_bed_height * 0.5
+                track_bed = oriented_box_between(
+                    f"{tunnel_name}_Track_Bed_Part_{part_idx}",
+                    a,
+                    b,
+                    segment_length,
+                    track_bed_width,
+                    track_bed_height,
+                    track_bed_rule["lateral_offset_m"],
+                    bed_z,
+                    [150, 150, 145, 255],
+                )
+                add_mesh(component_meshes["Track_Bed"], track_bed)
+
+                rail_z = tunnel_depth_m + rail_rule["vertical_offset_m"] + 0.035
+                rail_offset = SUBWAY_TRACK_GAUGE_M * 0.5
+                for rail_side, lateral_offset in (("L", -rail_offset), ("R", rail_offset)):
+                    rail_lateral = track_bed_rule["lateral_offset_m"] + lateral_offset
+                    rail_start = np.array([float(a[0]), float(a[1]), rail_z]) + normal * rail_lateral
+                    rail_end = np.array([float(b[0]), float(b[1]), rail_z]) + normal * rail_lateral
+                    rail = cylinder_surface_between(
+                        f"{tunnel_name}_Rail_{rail_side}_Part_{part_idx}",
+                        rail_start,
+                        rail_end,
+                        0.055,
+                        [55, 55, 55, 255],
+                        sections=10,
+                    )
+                    add_mesh(component_meshes["Rail"], rail)
+
+                sleeper_count = max(1, int(segment_length // SUBWAY_SLEEPER_INTERVAL_M))
+                sleeper_start = np.array([float(a[0]), float(a[1]), 0.0], dtype=float)
+                for sleeper_idx in range(sleeper_count):
+                    distance = min(segment_length, (sleeper_idx + 0.5) * SUBWAY_SLEEPER_INTERVAL_M)
+                    center_xy = sleeper_start + tangent * distance
+                    sleeper = oriented_box_between(
+                        f"{tunnel_name}_Sleeper_{part_idx}_{sleeper_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.30,
+                        0.30,
+                        min(max(fastener_rule["width_m"] * 0.08, 1.75), 2.20),
+                        min(max(fastener_rule["height_m"], 0.12), 0.20),
+                        track_bed_rule["lateral_offset_m"],
+                        tunnel_depth_m + fastener_rule["vertical_offset_m"],
+                        [45, 45, 45, 255],
+                    )
+                    add_mesh(component_meshes["Sleeper"], sleeper)
+
+                platform_width = min(platform_rule["width_m"], SUBWAY_REFERENCE_BENCHMARK_DIMENSIONS_M[0] - 1.00)
+                platform_height = min(max(platform_rule["height_m"], 0.32), 1.20)
+                platform_z = tunnel_depth_m + platform_rule["vertical_offset_m"]
+                platform = oriented_box_between(
+                    f"{tunnel_name}_Evacuation_Platform_Part_{part_idx}",
+                    a,
+                    b,
+                    segment_length,
+                    platform_width,
+                    platform_height,
+                    platform_rule["lateral_offset_m"],
+                    platform_z,
+                    [132, 132, 128, 255],
+                )
+                add_mesh(component_meshes["Evacuation_Platform"], platform)
+
+                platform_top_z = platform_z + platform_height * 0.5
+                guardrail_lateral = platform_rule["lateral_offset_m"] + platform_width * 0.5 - 0.45
+                for rail_level, z_offset in enumerate((0.45, 0.82)):
+                    guardrail_z = platform_top_z + z_offset
+                    guardrail = cylinder_surface_between(
+                        f"{tunnel_name}_Guardrail_Rail_{part_idx}_{rail_level}",
+                        np.array([float(a[0]), float(a[1]), guardrail_z]) + normal * guardrail_lateral,
+                        np.array([float(b[0]), float(b[1]), guardrail_z]) + normal * guardrail_lateral,
+                        0.035,
+                        [128, 128, 122, 255],
+                        sections=8,
+                    )
+                    add_mesh(component_meshes["Guardrail"], guardrail)
+                post_count = max(1, int(segment_length // SUBWAY_CABLE_BRACKET_INTERVAL_M))
+                for post_idx in range(post_count):
+                    distance = min(segment_length, (post_idx + 0.5) * SUBWAY_CABLE_BRACKET_INTERVAL_M)
+                    center_xy = sleeper_start + tangent * distance
+                    post = oriented_box_between(
+                        f"{tunnel_name}_Guardrail_Post_{part_idx}_{post_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.12,
+                        0.12,
+                        0.08,
+                        0.82,
+                        guardrail_lateral,
+                        platform_top_z + 0.41,
+                        [128, 128, 122, 255],
+                    )
+                    add_mesh(component_meshes["Guardrail"], post)
+
+                pipe_z = tunnel_depth_m + pipe_rule["vertical_offset_m"]
+                pipe_radius = min(max(pipe_rule["height_m"] * 0.45, 0.055), 0.12)
+                pipe_span = max(pipe_rule["width_m"] * 0.32, 2.40)
+                for pipe_side, lateral_offset in (
+                    ("L", pipe_rule["lateral_offset_m"] - pipe_span),
+                    ("C", pipe_rule["lateral_offset_m"]),
+                    ("R", pipe_rule["lateral_offset_m"] + pipe_span),
+                ):
+                    pipe_start = np.array([float(a[0]), float(a[1]), pipe_z]) + normal * lateral_offset
+                    pipe_end = np.array([float(b[0]), float(b[1]), pipe_z]) + normal * lateral_offset
+                    pipe = cylinder_surface_between(
+                        f"{tunnel_name}_Side_Pipe_{pipe_side}_Part_{part_idx}",
+                        pipe_start,
+                        pipe_end,
+                        pipe_radius,
+                        [110, 110, 105, 255],
+                        sections=12,
+                    )
+                    add_mesh(component_meshes["Side_Pipe"], pipe)
+
+                water_z = tunnel_depth_m + water_rule["vertical_offset_m"]
+                water_span = max(water_rule["width_m"] * 0.34, 2.20)
+                for pipe_side, lateral_offset in (
+                    ("WL", water_rule["lateral_offset_m"] - water_span),
+                    ("WR", water_rule["lateral_offset_m"] + water_span),
+                ):
+                    water_pipe = cylinder_surface_between(
+                        f"{tunnel_name}_Side_Pipe_{pipe_side}_Part_{part_idx}",
+                        np.array([float(a[0]), float(a[1]), water_z]) + normal * lateral_offset,
+                        np.array([float(b[0]), float(b[1]), water_z]) + normal * lateral_offset,
+                        0.075,
+                        [95, 106, 112, 255],
+                        sections=10,
+                    )
+                    add_mesh(component_meshes["Side_Pipe"], water_pipe)
+
+                bracket_count = max(1, int(segment_length // SUBWAY_CABLE_BRACKET_INTERVAL_M))
+                bracket_span = max(cable_rule["width_m"] * 0.40, 2.80)
+                bracket_level_offsets = (
+                    cable_rule["vertical_offset_m"] - cable_rule["height_m"] * 0.24,
+                    cable_rule["vertical_offset_m"],
+                    cable_rule["vertical_offset_m"] + cable_rule["height_m"] * 0.24,
+                )
+                for bracket_idx in range(bracket_count):
+                    distance = min(segment_length, (bracket_idx + 0.5) * SUBWAY_CABLE_BRACKET_INTERVAL_M)
+                    center_xy = sleeper_start + tangent * distance
+                    for bracket_side, lateral_offset, color in (
+                        ("L", cable_rule["lateral_offset_m"] - bracket_span, [168, 110, 138, 255]),
+                        ("R", cable_rule["lateral_offset_m"] + bracket_span, [120, 58, 190, 255]),
+                    ):
+                        for level_idx, z_offset in enumerate(bracket_level_offsets):
+                            bracket = oriented_box_between(
+                                f"{tunnel_name}_Cable_Bracket_{bracket_side}_{part_idx}_{bracket_idx}_{level_idx}",
+                                center_xy,
+                                center_xy + tangent * 0.18,
+                                0.18,
+                                0.72,
+                                0.08,
+                                lateral_offset,
+                                tunnel_depth_m + z_offset,
+                                color,
+                            )
+                            add_mesh(component_meshes["Cable_Bracket"], bracket)
+
+                contact_z = tunnel_depth_m + contact_rule["vertical_offset_m"]
+                contact_lateral = contact_rule["lateral_offset_m"]
+                contact = cylinder_surface_between(
+                    f"{tunnel_name}_Contact_Wire_Part_{part_idx}",
+                    np.array([float(a[0]), float(a[1]), contact_z]) + normal * contact_lateral,
+                    np.array([float(b[0]), float(b[1]), contact_z]) + normal * contact_lateral,
+                    0.045,
+                    [50, 50, 48, 255],
+                    sections=8,
+                )
+                add_mesh(component_meshes["Contact_Wire"], contact)
+                hanger_count = max(1, int(segment_length // SUBWAY_CONTACT_HANGER_INTERVAL_M))
+                for hanger_idx in range(hanger_count):
+                    distance = min(segment_length, (hanger_idx + 0.5) * SUBWAY_CONTACT_HANGER_INTERVAL_M)
+                    center_xy = sleeper_start + tangent * distance
+                    hanger = oriented_box_between(
+                        f"{tunnel_name}_Contact_Hanger_{part_idx}_{hanger_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.16,
+                        0.16,
+                        0.08,
+                        0.72,
+                        contact_lateral,
+                        contact_z + 0.18,
+                        [76, 76, 72, 255],
+                    )
+                    add_mesh(component_meshes["Contact_Wire"], hanger)
+
+                lighting_count = max(1, int(segment_length // SUBWAY_LIGHTING_INTERVAL_M))
+                lighting_z = tunnel_depth_m + lighting_rule["vertical_offset_m"]
+                lighting_lateral = lighting_rule["lateral_offset_m"]
+                for light_idx in range(lighting_count):
+                    distance = min(segment_length, (light_idx + 0.5) * SUBWAY_LIGHTING_INTERVAL_M)
+                    center_xy = sleeper_start + tangent * distance
+                    light = oriented_box_between(
+                        f"{tunnel_name}_Lighting_{part_idx}_{light_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.42,
+                        0.38,
+                        0.18,
+                        min(max(lighting_rule["height_m"] * 0.35, 0.10), 0.18),
+                        lighting_lateral,
+                        lighting_z,
+                        [235, 238, 210, 255],
+                    )
+                    add_mesh(component_meshes["Lighting"], light)
+
+                sign_count = max(1, int(segment_length // SUBWAY_EVACUATION_SIGN_INTERVAL_M))
+                sign_z = tunnel_depth_m + sign_rule["vertical_offset_m"]
+                sign_lateral = sign_rule["lateral_offset_m"]
+                for sign_idx in range(sign_count):
+                    distance = min(segment_length, (sign_idx + 0.5) * SUBWAY_EVACUATION_SIGN_INTERVAL_M)
+                    center_xy = sleeper_start + tangent * distance
+                    sign = oriented_box_between(
+                        f"{tunnel_name}_Evacuation_Sign_{part_idx}_{sign_idx}",
+                        center_xy,
+                        center_xy + tangent * 0.55,
+                        0.55,
+                        0.08,
+                        0.28,
+                        sign_lateral,
+                        sign_z,
+                        [60, 170, 90, 255],
+                    )
+                    add_mesh(component_meshes["Evacuation_Sign"], sign)
+                part_count += 1
+        reference_component_meshes = expand_subway_reference_component_meshes(component_meshes)
+        for component, meshes in reference_component_meshes.items():
+            object_name = f"{tunnel_name}_{component}"
+            color = COLORS["subway_tunnel"] if component == "Ref04_Concrete_Segment" else None
+            combined = combine_mesh_list(object_name, meshes, color)
+            if combined is None:
+                continue
+            combined.metadata.update(
+                subway_component_metadata(
+                    object_name,
+                    component,
+                    profile,
+                    source_id,
+                    line_name,
+                    idx,
+                    tunnel_depth_m,
+                    tunnel_category,
+                    part_count,
+                    lateral_translation_x_m,
+                    lateral_translation_y_m,
+                )
+            )
+            tunnel_meshes[object_name] = combined
+    return tunnel_meshes
+
+
+def subway_tunnel_semantic_record(
+    row,
+    idx: Any,
+    origin: tuple[float, float],
+    depth_by_index: dict[Any, float] | None = None,
+) -> dict[str, Any]:
+    source_id = subway_source_id(row, idx)
+    line_name = subway_line_name(row, source_id)
+    object_name = subway_tunnel_object_name(row, source_id, line_name)
+    component_object_names = subway_tunnel_component_object_names(row, source_id, line_name)
+    tunnel_depth_m = float((depth_by_index or {}).get(idx, railway_tunnel_base_depth_m(row)))
+    tunnel_category = railway_tunnel_category(row)
+    tunnel_side = str(row.get("_subway_tunnel_side") or "")
+    lateral_translation_x_m = safe_float(row.get("_subway_lateral_translation_x_m"), 0.0)
+    lateral_translation_y_m = safe_float(row.get("_subway_lateral_translation_y_m"), 0.0)
+    same_line_track_spacing_m = safe_float(row.get("_subway_same_line_track_spacing_m"), SUBWAY_SAME_LINE_TRACK_SPACING_M)
+    length_m = 0.0
+    segment_count = 0
+    for line in iter_lines(row.geometry):
+        length_m += float(line.length)
+        coords = list(line.coords)
+        segment_count += max(0, len(coords) - 1)
+    return {
+        "object_name": object_name,
+        "component_object_names": component_object_names,
+        "source_subway_id": source_id,
+        "source_index": str(idx),
+        "line_name": line_name,
+        "interval_name": line_name,
+        "component": "Subway_Tunnel",
+        "cim_domain": "subway",
+        "cim_entity_type": "subway_interval_tunnel",
+        "railway_tunnel_category": tunnel_category,
+        "tunnel_side": tunnel_side,
+        "construction_method": "subway01_circular_single_tunnel_rule_sweep",
+        "geometry_basis": "railway_centerline",
+        "section_profile": SUBWAY_SINGLE_TUNNEL_SECTION_PROFILE_NAME,
+        "section_source_mesh": SUBWAY_TEMPLATE_SECTION_SOURCE_MESH,
+        "section_half": SUBWAY_SINGLE_TUNNEL_SECTION_SIDE,
+        "section_radius_m": SUBWAY_SINGLE_TUNNEL_SECTION_RADIUS_M,
+        "section_circle_segment_count": SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS,
+        "section_source_arc_vertex_count": len(SUBWAY_SINGLE_TUNNEL_SECTION_SOURCE_ARC_XZ_M),
+        "section_hull_vertex_count": SUBWAY_SINGLE_TUNNEL_SECTION_SEGMENTS,
+        "section_hull_area_m2": SUBWAY_SINGLE_TUNNEL_SECTION_AREA_M2,
+        "length_m": round(length_m, 3),
+        "source_segment_count": segment_count,
+        "tunnel_depth_m": round(tunnel_depth_m, 3),
+        "lateral_translation_x_m": round(lateral_translation_x_m, 3),
+        "lateral_translation_y_m": round(lateral_translation_y_m, 3),
+        "same_line_track_spacing_m": round(same_line_track_spacing_m, 3),
+        "outer_radius_m": SUBWAY_TUNNEL_RADIUS_M,
+        "coordinate": {
+            "model_crs": TARGET_CRS,
+            "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
+        },
+    }
+
+
+def build_subway_tunnel_semantic(
+    railways: gpd.GeoDataFrame,
+    origin: tuple[float, float],
+    profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
+    depth_by_index: dict[Any, float] | None = None,
+) -> dict[str, Any]:
+    profile = subway_generation_profile(profile)
+    depth_by_index = depth_by_index or assign_railway_tunnel_depths(railways)
+    records = [
+        subway_tunnel_semantic_record(row, idx, origin, depth_by_index)
+        for idx, row in railways.iterrows()
+        if subway_like(row)
+    ]
+    return {
+        "project": "cim_road_poc",
+        "model": subway_output_stem(profile),
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+            "generate_station_trim": profile.generate_station_trim,
+            "generate_track_bed": profile.generate_track_bed,
+        },
+        "unit": "meter",
+        "coordinate": {
+            "model_crs": TARGET_CRS,
+            "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
+        },
+        "objects": records,
+        "objects_by_name": {str(record["object_name"]): record for record in records},
+    }
+
+
+def write_subway_tunnel_semantic(
+    railways: gpd.GeoDataFrame,
+    origin: tuple[float, float],
+    profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
+    path: Path | None = None,
+    depth_by_index: dict[Any, float] | None = None,
+) -> dict[str, Any]:
+    profile = subway_generation_profile(profile)
+    semantic = build_subway_tunnel_semantic(railways, origin, profile, depth_by_index)
+    output_path = path or subway_tunnel_semantic_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(semantic, f, ensure_ascii=False, indent=2)
+    return semantic
+
+
+def subway_tunnel_mesh_attribute_record(object_name: str, mesh: trimesh.Trimesh) -> dict[str, Any]:
+    metadata = dict(mesh.metadata or {})
+    record: dict[str, Any] = {
+        "object_name": str(object_name),
+        "layer_name": str(metadata.get("layer_name") or "Subway_Tunnel"),
+        "component": str(metadata.get("component") or ""),
+        "mesh_vertex_count": int(len(mesh.vertices)),
+        "mesh_face_count": int(len(mesh.faces)),
+        "mesh_area_m2": round(float(mesh.area), 3),
+        "cim_domain": str(metadata.get("cim_domain") or "subway"),
+        "cim_entity_type": str(metadata.get("cim_entity_type") or "subway_interval_tunnel"),
+    }
+    for key in (
+        "cim_generation_level",
+        "cim_monomer",
+        "source_subway_id",
+        "line_name",
+        "tunnel_side",
+        "railway_tunnel_category",
+        "source_index",
+        "part_count",
+        "tunnel_depth_m",
+        "lateral_translation_x_m",
+        "lateral_translation_y_m",
+        "outer_radius_m",
+        "construction_method",
+        "section_profile",
+        "section_source_mesh",
+        "section_half",
+        "section_radius_m",
+        "section_circle_segment_count",
+        "section_source_arc_vertex_count",
+        "section_hull_vertex_count",
+        "section_hull_area_m2",
+        "reference_mesh",
+        "reference_system",
+        "reference_dimensions_m",
+        "reference_benchmark_dimensions_m",
+        "reference_dimension_ratios",
+    ):
+        if key in metadata and metadata.get(key) is not None:
+            record[key] = json_safe_attribute_value(metadata.get(key))
+    return record
+
+
+def build_subway_tunnel_mesh_attributes(
+    tunnel_meshes: dict[str, trimesh.Trimesh],
+    profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
+) -> dict[str, Any]:
+    profile = subway_generation_profile(profile)
+    records = [
+        subway_tunnel_mesh_attribute_record(name, mesh)
+        for name, mesh in sorted(tunnel_meshes.items())
+        if mesh is not None and len(mesh.vertices) > 0
+    ]
+    layer_counts = Counter(str(record.get("layer_name") or "unknown") for record in records)
+    return {
+        "project": "cim_road_poc",
+        "model": f"{subway_output_stem(profile)}_mesh_attributes",
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+        },
+        "policy": "subway interval tunnels are exported as source-line monomers; attributes are reattached as Blender/FBX custom properties",
+        "object_count": len(records),
+        "source_line_count": len({str(record.get("source_subway_id") or "") for record in records}),
+        "layer_object_counts": dict(sorted(layer_counts.items())),
+        "objects": records,
+        "objects_by_name": {str(record["object_name"]): record for record in records},
+    }
+
+
+def write_subway_tunnel_mesh_attributes(
+    tunnel_meshes: dict[str, trimesh.Trimesh],
+    profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    profile = subway_generation_profile(profile)
+    attributes = build_subway_tunnel_mesh_attributes(tunnel_meshes, profile)
+    output_path = path or subway_tunnel_mesh_attributes_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(attributes, f, ensure_ascii=False, indent=2)
+    return attributes
+
+
+def build_subway_tunnel_source_attributes(
+    railways: gpd.GeoDataFrame,
+    source_attribute_columns: list[str],
+    profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
+    depth_by_index: dict[Any, float] | None = None,
+) -> dict[str, Any]:
+    profile = subway_generation_profile(profile)
+    depth_by_index = depth_by_index or assign_railway_tunnel_depths(railways)
+    source_columns = [column for column in source_attribute_columns if column in railways.columns]
+    records: list[dict[str, Any]] = []
+    for idx, row in railways.iterrows():
+        if not subway_like(row):
+            continue
+        source_id = subway_source_id(row, idx)
+        line_name = subway_line_name(row, source_id)
+        object_name = subway_tunnel_object_name(row, source_id, line_name)
+        component_object_names = subway_tunnel_component_object_names(row, source_id, line_name)
+        tunnel_depth_m = float(depth_by_index.get(idx, railway_tunnel_base_depth_m(row)))
+        lateral_translation_x_m = safe_float(row.get("_subway_lateral_translation_x_m"), 0.0)
+        lateral_translation_y_m = safe_float(row.get("_subway_lateral_translation_y_m"), 0.0)
+        source_attributes = {str(column): json_safe_value(row.get(column)) for column in source_columns}
+        records.append(
+            {
+                "object_name": object_name,
+                "component_object_names": component_object_names,
+                "source_subway_id": source_id,
+                "line_name": line_name,
+                "railway_tunnel_category": railway_tunnel_category(row),
+                "tunnel_depth_m": round(tunnel_depth_m, 3),
+                "lateral_translation_x_m": round(lateral_translation_x_m, 3),
+                "lateral_translation_y_m": round(lateral_translation_y_m, 3),
+                "source_attributes": source_attributes,
+            }
+        )
+    records_by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        records_by_name[str(record.get("line_name") or "")].append(record)
+    return {
+        "project": "cim_road_poc",
+        "model": f"{subway_output_stem(profile)}_source_attributes",
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+        },
+        "association_key": "line_name",
+        "source_attribute_columns": source_columns,
+        "object_count": len(records),
+        "unique_name_count": len(records_by_name),
+        "objects": records,
+        "records_by_name": dict(sorted(records_by_name.items())),
+    }
+
+
+def write_subway_tunnel_source_attributes(
+    railways: gpd.GeoDataFrame,
+    source_attribute_columns: list[str],
+    profile: SubwayGenerationProfile = SUBWAY_CIM4_PROFILE,
+    path: Path | None = None,
+    depth_by_index: dict[Any, float] | None = None,
+) -> dict[str, Any]:
+    profile = subway_generation_profile(profile)
+    attributes = build_subway_tunnel_source_attributes(railways, source_attribute_columns, profile, depth_by_index)
+    output_path = path or subway_tunnel_source_attributes_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(attributes, f, ensure_ascii=False, indent=2)
+    return attributes
 
 
 def is_subway_station(row) -> bool:
@@ -7960,6 +9660,83 @@ def generate_roads_only(level: str | RoadGenerationProfile | None = None) -> dic
     }
 
 
+def generate_subway_tunnels_only(
+    level: str | SubwayGenerationProfile | None = None,
+    line_filter: str | None = None,
+) -> dict[str, Any]:
+    profile = subway_generation_profile(level)
+    tunnel_obj_path = subway_tunnel_obj_path_for_profile(profile)
+    tunnel_semantic_path = subway_tunnel_semantic_path_for_profile(profile)
+    tunnel_mesh_attributes_path = subway_tunnel_mesh_attributes_path_for_profile(profile)
+    tunnel_source_attributes_path = subway_tunnel_source_attributes_path_for_profile(profile)
+
+    print(f"Subway tunnel generation level: {profile.name}", flush=True)
+    print(f"[1/4] Loading railway layer from {RAIL_LINES_PATH}...", flush=True)
+    railways = load_layer(RAIL_LINES_PATH)
+    source_attribute_columns = [str(column) for column in railways.columns if str(column) != str(railways.geometry.name)]
+
+    print(f"[2/4] Localizing {len(railways)} railway records...", flush=True)
+    origin = compute_origin(railways)
+    railways = localize(railways, origin)
+    tunnel_corridors = subway_tunnel_generation_corridors(railways)
+    if line_filter:
+        selected_indices = [
+            idx
+            for idx, row in tunnel_corridors.iterrows()
+            if subway_line_matches_filter(row, idx, line_filter)
+        ]
+        tunnel_corridors = tunnel_corridors.loc[selected_indices].copy()
+        print(
+            f"[2/4] Applied subway line filter {line_filter!r}: {len(tunnel_corridors)} corridors selected.",
+            flush=True,
+        )
+    print(
+        f"[2/4] Selected {len(tunnel_corridors)} subway tunnel corridors from {len(railways)} railway records.",
+        flush=True,
+    )
+
+    print("[3/4] Building subway interval tunnel meshes...", flush=True)
+    tunnel_depths = assign_railway_tunnel_depths(tunnel_corridors)
+    tunnel_meshes = build_subway_tunnel_meshes(tunnel_corridors, profile, tunnel_depths)
+
+    print("[4/4] Exporting subway tunnel OBJ and semantics...", flush=True)
+    tunnel_obj_path.parent.mkdir(parents=True, exist_ok=True)
+    if tunnel_meshes:
+        scene_from_meshes(tunnel_meshes).export(tunnel_obj_path)
+    elif tunnel_obj_path.exists():
+        tunnel_obj_path.unlink()
+
+    tunnel_semantic = write_subway_tunnel_semantic(tunnel_corridors, origin, profile, tunnel_semantic_path, tunnel_depths)
+    tunnel_mesh_attributes = write_subway_tunnel_mesh_attributes(tunnel_meshes, profile, tunnel_mesh_attributes_path)
+    tunnel_source_attributes = write_subway_tunnel_source_attributes(
+        tunnel_corridors,
+        source_attribute_columns,
+        profile,
+        tunnel_source_attributes_path,
+        tunnel_depths,
+    )
+
+    print("CIM subway tunnel OBJ generated:")
+    print(f"- subway tunnels OBJ: {tunnel_obj_path if tunnel_meshes else 'skipped (no geometry)'}")
+    print(f"- subway tunnel mesh objects: {len(tunnel_meshes)}")
+    print(f"- subway tunnel semantic objects: {len(tunnel_semantic['objects'])} -> {tunnel_semantic_path}")
+    print(
+        "- subway tunnel mesh attributes: "
+        f"{tunnel_mesh_attributes['object_count']} -> {tunnel_mesh_attributes_path}"
+    )
+    print(
+        "- subway tunnel source attributes: "
+        f"{tunnel_source_attributes['object_count']} -> {tunnel_source_attributes_path}"
+    )
+    return {
+        "subway_tunnel_obj_path": tunnel_obj_path if tunnel_meshes else None,
+        "subway_tunnel_meshes": tunnel_meshes,
+        "subway_tunnel_semantic": tunnel_semantic,
+        "subway_tunnel_mesh_attributes": tunnel_mesh_attributes,
+        "subway_tunnel_source_attributes": tunnel_source_attributes,
+    }
+
+
 def main() -> None:
     print(f"[1/6] Loading raw layers from {RAW_DIR}...", flush=True)
     roads = load_layer(road_gen.RAW_ROADS)
@@ -7996,10 +9773,11 @@ def main() -> None:
     utility_meshes, utility_records = (
         build_utility_pipe_meshes(utility_layers, roads) if GENERATE_UTILITY_PIPES else ({}, [])
     )
+    tunnel_corridors = subway_tunnel_generation_corridors(railways) if GENERATE_SUBWAY_TUNNELS else railways.iloc[0:0].copy()
     modules = {
         "roads": road_meshes,
         "buildings": build_building_meshes(buildings),
-        "subway_tunnels": build_subway_tunnel_meshes(railways) if GENERATE_SUBWAY_TUNNELS else {},
+        "subway_tunnels": build_subway_tunnel_meshes(tunnel_corridors) if GENERATE_SUBWAY_TUNNELS else {},
         "subway_stations": subway_station_meshes,
         "bus_stops": bus_stop_meshes,
         "utility_pipes": utility_meshes,
