@@ -368,6 +368,8 @@ D:\ProgramData\miniconda3\envs\cim-road\python.exe scripts\02_generate_cim_subwa
 D:\ProgramData\miniconda3\envs\cim-road\python.exe scripts\02_generate_cim_subway_tunnels.py --source full --level cim4 --line "线路名称"
 ```
 
+轨道区间隧道只交付一套完整模型。结构、轨道、机电、通信和疏散构件在同一 FBX 中保持为独立模型对象，并写入 `professional_system` 专业属性，可在 Blender 中按专业选择、隐藏和检查，不再单独保存轨道专业模型。
+
 导出轨道区间隧道 FBX：
 
 ```powershell

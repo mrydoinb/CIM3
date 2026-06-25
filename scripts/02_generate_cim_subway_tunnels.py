@@ -39,9 +39,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--level",
-        choices=["cim4"],
+        choices=["cim3", "cim4"],
         default="cim4",
-        help="Subway tunnel generation detail level. Default: cim4.",
+        help="Subway tunnel generation detail level: cim3 excludes evacuation; cim4 includes it. Default: cim4.",
     )
     parser.add_argument(
         "--data-dir",
@@ -88,6 +88,6 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         raise SystemExit(1)

@@ -1,0 +1,210 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F7FAFE"/>
+      <stop offset="100%" stop-color="#EDF4FB"/>
+    </linearGradient>
+    <linearGradient id="titleLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1D4ED8"/>
+      <stop offset="55%" stop-color="#0891B2"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#16385E" flood-opacity="0.13"/>
+    </filter>
+    <marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#3B82F6"/>
+    </marker>
+    <marker id="arrowCyan" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#0891B2"/>
+    </marker>
+    <style>
+      .cn { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; }
+      .step { font-size: 18px; font-weight: 700; letter-spacing: 1px; }
+      .card-title { font-size: 27px; font-weight: 700; fill: #102A43; }
+      .card-text { font-size: 19px; fill: #486581; }
+      .small { font-size: 17px; fill: #526D82; }
+      .band-title { font-size: 23px; font-weight: 700; fill: #123B64; }
+      .band-text { font-size: 18px; fill: #355B7D; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <circle cx="1770" cy="80" r="210" fill="#DCEEFF" opacity="0.48"/>
+  <circle cx="115" cy="1020" r="250" fill="#DDF7EF" opacity="0.45"/>
+
+  <!-- Title -->
+  <rect x="72" y="54" width="132" height="40" rx="20" fill="#DBEAFE"/>
+  <text x="138" y="81" text-anchor="middle" class="cn step" fill="#1D4ED8">当前已实施</text>
+  <text x="72" y="145" class="cn" font-size="48" font-weight="800" fill="#0B2540">CIM 自动化建模实施技术流程</text>
+  <text x="72" y="185" class="cn" font-size="22" fill="#5A7184">以专业规则和空间拓扑计算为核心，同步生成三维模型、源属性与对象关系语义</text>
+  <rect x="72" y="205" width="1776" height="5" rx="2.5" fill="url(#titleLine)"/>
+
+  <!-- Main arrows -->
+  <line x1="295" y1="389" x2="327" y2="389" stroke="#3B82F6" stroke-width="5" marker-end="url(#arrowBlue)"/>
+  <line x1="567" y1="389" x2="599" y2="389" stroke="#3B82F6" stroke-width="5" marker-end="url(#arrowBlue)"/>
+  <line x1="879" y1="389" x2="911" y2="389" stroke="#3B82F6" stroke-width="5" marker-end="url(#arrowBlue)"/>
+  <line x1="1191" y1="389" x2="1223" y2="389" stroke="#0891B2" stroke-width="5" marker-end="url(#arrowCyan)"/>
+  <line x1="1503" y1="389" x2="1535" y2="389" stroke="#0891B2" stroke-width="5" marker-end="url(#arrowCyan)"/>
+
+  <!-- Card 1 -->
+  <g filter="url(#shadow)">
+    <rect x="75" y="250" width="220" height="278" rx="24" fill="#FFFFFF" stroke="#B7D3FA" stroke-width="2"/>
+  </g>
+  <rect x="75" y="250" width="220" height="11" rx="5.5" fill="#2563EB"/>
+  <circle cx="118" cy="305" r="24" fill="#DBEAFE"/>
+  <text x="118" y="313" text-anchor="middle" class="cn" font-size="23" font-weight="800" fill="#1D4ED8">01</text>
+  <text x="105" y="359" class="cn card-title">工程数据接入</text>
+  <text x="105" y="404" class="cn card-text">
+    <tspan x="105" dy="0">道路、轨道、站点</tspan>
+    <tspan x="105" dy="31">地下管线等图层</tspan>
+    <tspan x="105" dy="38" fill="#1D4ED8" font-weight="700">SHP / GeoJSON</tspan>
+  </text>
+  <rect x="104" y="487" width="162" height="27" rx="13.5" fill="#EFF6FF"/>
+  <text x="185" y="507" text-anchor="middle" class="cn small" fill="#2563EB">源几何与属性保留</text>
+
+  <!-- Card 2 -->
+  <g filter="url(#shadow)">
+    <rect x="337" y="250" width="230" height="278" rx="24" fill="#FFFFFF" stroke="#B7D3FA" stroke-width="2"/>
+  </g>
+  <rect x="337" y="250" width="230" height="11" rx="5.5" fill="#2878D0"/>
+  <circle cx="380" cy="305" r="24" fill="#DBEAFE"/>
+  <text x="380" y="313" text-anchor="middle" class="cn" font-size="23" font-weight="800" fill="#2563EB">02</text>
+  <text x="367" y="359" class="cn card-title">数据规范化</text>
+  <text x="367" y="402" class="cn card-text">
+    <tspan x="367" dy="0">坐标统一 EPSG:4547</tspan>
+    <tspan x="367" dy="31">项目局部原点转换</tspan>
+    <tspan x="367" dy="31">几何清理与属性统一</tspan>
+  </text>
+  <rect x="366" y="487" width="172" height="27" rx="13.5" fill="#EFF6FF"/>
+  <text x="452" y="507" text-anchor="middle" class="cn small" fill="#2563EB">空间定位可还原</text>
+
+  <!-- Card 3 -->
+  <g filter="url(#shadow)">
+    <rect x="609" y="250" width="270" height="278" rx="24" fill="#FFFFFF" stroke="#AFCFE9" stroke-width="2"/>
+  </g>
+  <rect x="609" y="250" width="270" height="11" rx="5.5" fill="#0E7490"/>
+  <circle cx="652" cy="305" r="24" fill="#CFFAFE"/>
+  <text x="652" y="313" text-anchor="middle" class="cn" font-size="23" font-weight="800" fill="#0E7490">03</text>
+  <text x="639" y="359" class="cn card-title">专业规则与拓扑</text>
+  <text x="639" y="402" class="cn card-text">
+    <tspan x="639" dy="0">道路等级与 A1–D6 断面</tspan>
+    <tspan x="639" dy="31">路口识别、聚类与连接</tspan>
+    <tspan x="639" dy="31">隧道、管线专业参数</tspan>
+  </text>
+  <rect x="638" y="487" width="212" height="27" rx="13.5" fill="#ECFEFF"/>
+  <text x="744" y="507" text-anchor="middle" class="cn small" fill="#0E7490">规则驱动空间关系</text>
+
+  <!-- Card 4 -->
+  <g filter="url(#shadow)">
+    <rect x="921" y="250" width="270" height="278" rx="24" fill="#FFFFFF" stroke="#A7D8D2" stroke-width="2"/>
+  </g>
+  <rect x="921" y="250" width="270" height="11" rx="5.5" fill="#0F9F8B"/>
+  <circle cx="964" cy="305" r="24" fill="#D1FAE5"/>
+  <text x="964" y="313" text-anchor="middle" class="cn" font-size="23" font-weight="800" fill="#047857">04</text>
+  <text x="951" y="359" class="cn card-title">几何与分级生成</text>
+  <text x="951" y="400" class="cn card-text">
+    <tspan x="951" dy="0" fill="#0E7490" font-weight="700">Shapely</tspan>
+    <tspan>：平面拓扑构造</tspan>
+    <tspan x="951" dy="31" fill="#047857" font-weight="700">Trimesh</tspan>
+    <tspan>：三维网格生成</tspan>
+    <tspan x="951" dy="31">CIM3 / CIM4 配置控制</tspan>
+  </text>
+  <rect x="950" y="487" width="212" height="27" rx="13.5" fill="#ECFDF5"/>
+  <text x="1056" y="507" text-anchor="middle" class="cn small" fill="#047857">几何与规则保持对应</text>
+
+  <!-- Card 5 -->
+  <g filter="url(#shadow)">
+    <rect x="1233" y="250" width="270" height="278" rx="24" fill="#FFFFFF" stroke="#ABDACE" stroke-width="2"/>
+  </g>
+  <rect x="1233" y="250" width="270" height="11" rx="5.5" fill="#059669"/>
+  <circle cx="1276" cy="305" r="24" fill="#D1FAE5"/>
+  <text x="1276" y="313" text-anchor="middle" class="cn" font-size="23" font-weight="800" fill="#047857">05</text>
+  <text x="1263" y="359" class="cn card-title">模型与语义成果</text>
+  <rect x="1263" y="389" width="96" height="67" rx="14" fill="#EFF6FF" stroke="#BFD7F5"/>
+  <text x="1311" y="416" text-anchor="middle" class="cn" font-size="19" font-weight="700" fill="#1D4ED8">OBJ</text>
+  <text x="1311" y="441" text-anchor="middle" class="cn" font-size="16" fill="#52708A">三维网格</text>
+  <rect x="1371" y="389" width="103" height="67" rx="14" fill="#ECFDF5" stroke="#B7E4D5"/>
+  <text x="1422.5" y="416" text-anchor="middle" class="cn" font-size="19" font-weight="700" fill="#047857">JSON</text>
+  <text x="1422.5" y="441" text-anchor="middle" class="cn" font-size="16" fill="#52708A">属性与关系</text>
+  <text x="1263" y="489" class="cn small">
+    <tspan x="1263" dy="0">源属性、对象分类、路口关系</tspan>
+    <tspan x="1263" dy="25">模型对象属性同步输出</tspan>
+  </text>
+
+  <!-- Card 6 -->
+  <g filter="url(#shadow)">
+    <rect x="1545" y="250" width="300" height="278" rx="24" fill="#FFFFFF" stroke="#A8D7CD" stroke-width="2"/>
+  </g>
+  <rect x="1545" y="250" width="300" height="11" rx="5.5" fill="#047857"/>
+  <circle cx="1588" cy="305" r="24" fill="#D1FAE5"/>
+  <text x="1588" y="313" text-anchor="middle" class="cn" font-size="23" font-weight="800" fill="#047857">06</text>
+  <text x="1575" y="359" class="cn card-title">平台转换与应用</text>
+  <text x="1575" y="400" class="cn card-text">
+    <tspan x="1575" dy="0" font-weight="700" fill="#047857">Blender 后台</tspan>
+    <tspan x="1575" dy="31">OBJ → FBX、材质处理</tspan>
+    <tspan x="1575" dy="31">模型对象属性挂接</tspan>
+  </text>
+  <rect x="1574" y="487" width="242" height="27" rx="13.5" fill="#ECFDF5"/>
+  <text x="1695" y="507" text-anchor="middle" class="cn small" fill="#047857">三维平台与专题应用接口</text>
+
+  <!-- Through capabilities -->
+  <rect x="75" y="596" width="1770" height="170" rx="26" fill="#FFFFFF" stroke="#C8D8E8" stroke-width="2"/>
+  <rect x="75" y="596" width="235" height="170" rx="26" fill="#E9F2FF"/>
+  <text x="192.5" y="652" text-anchor="middle" class="cn band-title">贯穿能力</text>
+  <text x="192.5" y="686" text-anchor="middle" class="cn small">保障模型可解释</text>
+  <text x="192.5" y="713" text-anchor="middle" class="cn small">关系可追溯</text>
+
+  <rect x="342" y="624" width="425" height="112" rx="20" fill="#F6FAFF" stroke="#C9DCF4"/>
+  <circle cx="384" cy="680" r="24" fill="#DBEAFE"/>
+  <path d="M374 681 L382 689 L397 671" fill="none" stroke="#2563EB" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="420" y="666" class="cn band-title">统一对象标识与语义追溯</text>
+  <text x="420" y="701" class="cn band-text">源要素 → 规则 → 模型对象 → 空间关系</text>
+
+  <rect x="790" y="624" width="455" height="112" rx="20" fill="#F4FCFC" stroke="#BDE4E0"/>
+  <circle cx="832" cy="680" r="24" fill="#CFFAFE"/>
+  <path d="M821 680 h22 M832 669 v22" stroke="#0891B2" stroke-width="4" stroke-linecap="round"/>
+  <text x="868" y="666" class="cn band-title">规则配置与 CIM 分级控制</text>
+  <text x="868" y="701" class="cn band-text">专业参数、构件深度、CIM3 / CIM4 配置</text>
+
+  <rect x="1268" y="624" width="544" height="112" rx="20" fill="#F3FCF8" stroke="#BFE4D1"/>
+  <circle cx="1310" cy="680" r="24" fill="#D1FAE5"/>
+  <circle cx="1310" cy="680" r="9" fill="none" stroke="#059669" stroke-width="3"/>
+  <path d="M1310 663 v8 M1310 689 v8 M1293 680 h8 M1319 680 h8" stroke="#059669" stroke-width="3" stroke-linecap="round"/>
+  <text x="1346" y="666" class="cn band-title">全局坐标与局部模型协同</text>
+  <text x="1346" y="701" class="cn band-text">EPSG:4547 + 局部原点 + origin_xy 空间还原</text>
+
+  <!-- Future band -->
+  <rect x="75" y="812" width="1770" height="174" rx="28" fill="#F7FBFA" stroke="#64BFA7" stroke-width="2.5" stroke-dasharray="12 9"/>
+  <rect x="75" y="812" width="262" height="174" rx="28" fill="#DFF6EE"/>
+  <text x="206" y="866" text-anchor="middle" class="cn band-title" fill="#086C5B">后续增强接口</text>
+  <text x="206" y="901" text-anchor="middle" class="cn small">在现有链路上扩展</text>
+  <text x="206" y="930" text-anchor="middle" class="cn small">不替代当前核心</text>
+
+  <rect x="374" y="844" width="330" height="110" rx="19" fill="#FFFFFF" stroke="#B9E2D5"/>
+  <text x="539" y="883" text-anchor="middle" class="cn band-title" fill="#087A67">精密构件能力</text>
+  <text x="539" y="919" text-anchor="middle" class="cn band-text">Build123d · Manifold</text>
+
+  <line x1="720" y1="899" x2="758" y2="899" stroke="#20A78C" stroke-width="4" marker-end="url(#arrowCyan)"/>
+
+  <rect x="774" y="844" width="330" height="110" rx="19" fill="#FFFFFF" stroke="#B9E2D5"/>
+  <text x="939" y="883" text-anchor="middle" class="cn band-title" fill="#087A67">标准道路数据</text>
+  <text x="939" y="919" text-anchor="middle" class="cn band-text">libOpenDRIVE 评估接入</text>
+
+  <line x1="1120" y1="899" x2="1158" y2="899" stroke="#20A78C" stroke-width="4" marker-end="url(#arrowCyan)"/>
+
+  <rect x="1174" y="844" width="300" height="110" rx="19" fill="#FFFFFF" stroke="#B9E2D5"/>
+  <text x="1324" y="883" text-anchor="middle" class="cn band-title" fill="#087A67">超融合数据库</text>
+  <text x="1324" y="919" text-anchor="middle" class="cn band-text">统一对象 · 关系 · 版本</text>
+
+  <line x1="1490" y1="899" x2="1528" y2="899" stroke="#20A78C" stroke-width="4" marker-end="url(#arrowCyan)"/>
+
+  <rect x="1544" y="844" width="268" height="110" rx="19" fill="#FFFFFF" stroke="#B9E2D5"/>
+  <text x="1678" y="883" text-anchor="middle" class="cn band-title" fill="#087A67">数字孪生专项</text>
+  <text x="1678" y="919" text-anchor="middle" class="cn band-text">场景 · 指标 · 分析</text>
+
+  <!-- Footer -->
+  <text x="960" y="1038" text-anchor="middle" class="cn" font-size="20" font-weight="700" fill="#284B63">
+    核心链路：数据标准 → 专业规则 → 空间拓扑 → 分级几何 → 对象语义 → 应用接口
+  </text>
+</svg>

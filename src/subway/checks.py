@@ -15,7 +15,9 @@ import geopandas as gpd
 from city.pipeline import (
     ROOT,
     RAIL_LINES_PATH,
+    SUBWAY_TUNNEL_LINING_THICKNESS_M,
     SUBWAY_TUNNEL_OVERLAP_CLEARANCE_M,
+    SUBWAY_TUNNEL_OUTER_RADIUS_M,
     SUBWAY_TUNNEL_RADIUS_M,
     SUBWAY_SAME_LINE_TRACK_SPACING_M,
     apply_subway_lateral_translations,
@@ -65,7 +67,7 @@ def build_subway_tunnel_separation_check(railways: gpd.GeoDataFrame) -> dict[str
         for idx, row in tunnel_corridors.iterrows()
     ]
 
-    min_clear_center_distance = 2.0 * SUBWAY_TUNNEL_RADIUS_M + SUBWAY_TUNNEL_OVERLAP_CLEARANCE_M
+    min_clear_center_distance = 2.0 * SUBWAY_TUNNEL_OUTER_RADIUS_M + SUBWAY_TUNNEL_OVERLAP_CLEARANCE_M
     issues: list[dict[str, Any]] = []
     same_line_issues: list[dict[str, Any]] = []
     min_3d_clearance_m: float | None = None
@@ -154,7 +156,9 @@ def build_subway_tunnel_separation_check(railways: gpd.GeoDataFrame) -> dict[str
         "status": "pass" if not issues else "fail",
         "policy": "subway tunnel candidates keep their lateral shifts and side labels when parallel tracks are detected",
         "parameters": {
-            "outer_radius_m": SUBWAY_TUNNEL_RADIUS_M,
+            "inner_clear_radius_m": SUBWAY_TUNNEL_RADIUS_M,
+            "lining_thickness_m": SUBWAY_TUNNEL_LINING_THICKNESS_M,
+            "outer_radius_m": SUBWAY_TUNNEL_OUTER_RADIUS_M,
             "minimum_center_distance_m": round(min_clear_center_distance, 3),
         },
         "summary": {

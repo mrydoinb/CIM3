@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--blender", help="Full path to blender.exe. Overrides BLENDER_EXE and PATH lookup.")
     parser.add_argument(
         "--level",
-        choices=["cim4"],
+        choices=["cim3", "cim4"],
         default="cim4",
         help="Subway tunnel generation detail level to export. Default: cim4.",
     )

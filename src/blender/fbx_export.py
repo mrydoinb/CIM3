@@ -356,8 +356,8 @@ def attribute_sidecar_for_obj(obj_path: Path) -> Path | None:
     if obj_path.parent.name in {"cim3", "cim4"} and obj_path.name == "city_roads.obj":
         sidecar = SEMANTIC_DIR / obj_path.parent.name / "city_roads_mesh_attributes.json"
         return sidecar if sidecar.exists() else None
-    if obj_path.parent.name in {"cim4"} and obj_path.name == "subway_tunnels.obj":
-        sidecar = SEMANTIC_DIR / obj_path.parent.name / "subway_tunnels_mesh_attributes.json"
+    if obj_path.parent.name in {"cim3", "cim4"} and obj_path.stem.startswith("subway_tunnels"):
+        sidecar = SEMANTIC_DIR / obj_path.parent.name / f"{obj_path.stem}_mesh_attributes.json"
         return sidecar if sidecar.exists() else None
     if obj_path.name in {"cim3_city_roads.obj", "cim4_city_roads.obj", "cim_city_roads.obj"}:
         sidecar = SEMANTIC_DIR / f"{obj_path.stem}_mesh_attributes.json"

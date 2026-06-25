@@ -20,7 +20,7 @@ from blender.fbx_export import MODULE_FBX_DIR, MODULE_OBJ_DIR, export_obj_to_fbx
 
 def subway_level() -> str:
     level = str(os.environ.get("CIM_SUBWAY_LEVEL", "cim4")).strip().lower()
-    return level if level == "cim4" else "cim4"
+    return level if level in {"cim3", "cim4"} else "cim4"
 
 
 def main() -> None:
