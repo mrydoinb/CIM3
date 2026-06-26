@@ -23,7 +23,7 @@ Output:
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import json
 import math
@@ -79,7 +79,13 @@ from city.utility_pipes import (
     build_city_utility_pipe_qc,
     build_city_utility_pipe_semantic,
     build_utility_pipe_meshes,
+    utility_mesh_attributes_path_for_level,
+    utility_obj_path_for_level,
+    utility_qc_path_for_level,
+    utility_semantic_path_for_level,
+    validate_utility_subway_vertical_clearance,
     write_city_utility_pipe_qc,
+    write_city_utility_pipe_mesh_attributes,
     write_city_utility_pipe_semantic,
 )
 
@@ -108,6 +114,7 @@ CITY_MARKING_QC_PATH = ROOT / "output" / "qc_report" / "cim_city_marking_alignme
 CITY_UTILITY_QC_PATH = ROOT / "output" / "qc_report" / "cim_city_utility_pipe_qc.json"
 TARGET_CRS = road_gen.TARGET_CRS
 SOURCE_PROJECTED_CRS = "EPSG:4547"
+ROAD_SURFACE_BASE_Z_M = 3.0
 
 
 def first_existing_path(patterns: list[str], base_dir: Path = RAW_DIR) -> Path | None:
@@ -125,6 +132,123 @@ RAIL_STATIONS_PATH = first_existing_path(["**/轨道站点2000.shp", "**/*站点
 WATER_LINES_PATH = first_existing_path(["**/供水管线.shp"])
 SEWER_LINES_PATH = first_existing_path(["**/污水管线.shp"])
 GAS_LINES_PATH = first_existing_path(["**/rq*.shp"])
+SEWER_NODE_POINTS_PATH = first_existing_path(["**/污水管点.shp", "**/*管点.shp"])
+PROJECTED_ROAD_REFERENCE_PATH = first_existing_path(["road50kms/*.shp", "**/道路修改50kms.shp", "**/*道路修改*.shp"])
+
+
+def _bounds_size(bounds: np.ndarray) -> tuple[float, float]:
+    return float(bounds[2] - bounds[0]), float(bounds[3] - bounds[1])
+
+
+def road_projected_translation_xy(roads: gpd.GeoDataFrame) -> tuple[float, float] | None:
+    if roads.empty:
+        return None
+    bounds = roads.total_bounds
+    if float(bounds[0]) > 100000.0 and float(bounds[1]) > 100000.0:
+        return None
+    if PROJECTED_ROAD_REFERENCE_PATH is None or PROJECTED_ROAD_REFERENCE_PATH == road_gen.RAW_ROADS:
+        return None
+
+    reference = load_layer(PROJECTED_ROAD_REFERENCE_PATH)
+    if reference.empty:
+        return None
+
+    width, height = _bounds_size(bounds)
+    ref_width, ref_height = _bounds_size(reference.total_bounds)
+    tolerance = max(5.0, 0.02 * max(width, height, ref_width, ref_height))
+    if abs(width - ref_width) > tolerance or abs(height - ref_height) > tolerance:
+        return None
+
+    return float(reference.total_bounds[0] - bounds[0]), float(reference.total_bounds[1] - bounds[1])
+
+
+def align_layer_to_road_coordinates(
+    layer: gpd.GeoDataFrame,
+    roads: gpd.GeoDataFrame,
+) -> gpd.GeoDataFrame:
+    if layer.empty:
+        return layer
+    translation = road_projected_translation_xy(roads)
+    if translation is None:
+        return layer
+    bounds = layer.total_bounds
+    if float(bounds[0]) < 100000.0 and float(bounds[1]) < 100000.0:
+        return layer
+    xoff, yoff = translation
+    result = layer.copy()
+    result["geometry"] = result.geometry.apply(
+        lambda geom: None
+        if geom is None or geom.is_empty
+        else shapely_translate(geom, xoff=-xoff, yoff=-yoff)
+    )
+    result = result[result.geometry.notna()].copy()
+    result.attrs["coordinate_normalization"] = "translated_projected_to_road_local"
+    result.attrs["coordinate_translation_xy_m"] = (-xoff, -yoff)
+    result.attrs["road_coordinate_reference_path"] = str(PROJECTED_ROAD_REFERENCE_PATH)
+    return result
+
+
+def align_layers_to_road_coordinates(
+    roads: gpd.GeoDataFrame,
+    *layers: gpd.GeoDataFrame,
+) -> tuple[gpd.GeoDataFrame, ...]:
+    translation = road_projected_translation_xy(roads)
+    if translation is not None:
+        xoff, yoff = translation
+        print(
+            "[coordinates] Using road local coordinates as model basis; "
+            f"projected layers are shifted by xoff={-xoff:.3f}, yoff={-yoff:.3f}",
+            flush=True,
+        )
+    return tuple(align_layer_to_road_coordinates(layer, roads) for layer in layers)
+
+
+def normalize_roads_to_projected(roads: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if roads.empty:
+        return roads
+    translation = road_projected_translation_xy(roads)
+    if translation is None:
+        roads.attrs["coordinate_normalization"] = "already_projected_or_without_reference"
+        return roads
+    xoff, yoff = translation
+    result = roads.copy()
+    result["geometry"] = result.geometry.apply(
+        lambda geom: None
+        if geom is None or geom.is_empty
+        else shapely_translate(geom, xoff=xoff, yoff=yoff)
+    )
+    result = result[result.geometry.notna()].copy()
+    result.attrs["coordinate_normalization"] = "translated_local_to_projected"
+    result.attrs["coordinate_translation_xy_m"] = (xoff, yoff)
+    result.attrs["coordinate_reference_path"] = str(PROJECTED_ROAD_REFERENCE_PATH)
+    print(
+        "[coordinates] Translated local road coordinates to projected CRS "
+        f"using {PROJECTED_ROAD_REFERENCE_PATH}: xoff={xoff:.3f}, yoff={yoff:.3f}",
+        flush=True,
+    )
+    return result
+
+
+def compute_shared_model_origin(
+    roads: gpd.GeoDataFrame | None = None,
+    railways: gpd.GeoDataFrame | None = None,
+    water_lines: gpd.GeoDataFrame | None = None,
+    sewer_lines: gpd.GeoDataFrame | None = None,
+    gas_lines: gpd.GeoDataFrame | None = None,
+    sewer_points: gpd.GeoDataFrame | None = None,
+) -> tuple[float, float]:
+    layers = [
+        layer
+        for layer in (roads, railways, water_lines, sewer_lines, gas_lines, sewer_points)
+        if layer is not None and not layer.empty
+    ]
+    if layers:
+        return compute_origin(*layers)
+    return (0.0, 0.0)
+
+
+def compute_road_model_origin(roads: gpd.GeoDataFrame) -> tuple[float, float]:
+    return compute_origin(roads)
 
 BUILDING_DEFAULT_HEIGHT_M = 12.0
 BUILDING_LEVEL_HEIGHT_M = 3.2
@@ -738,6 +862,9 @@ JUNCTION_ROADSIDE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M = 0.0
 JUNCTION_MARKING_RETREAT_M = 0.35
+SHORT_JUNCTION_DIRECT_SURFACE_MIN_GAP_M = 18.0
+SHORT_JUNCTION_DIRECT_SURFACE_MAX_GAP_M = 48.0
+SHORT_JUNCTION_DIRECT_SURFACE_MIN_OUTSIDE_RATIO = 0.35
 JUNCTION_COMPONENT_WIDTH_BUCKET_M = 0.05
 JUNCTION_CHAINAGE_EPSILON_M = 0.02
 JUNCTION_APPROACH_MARKING_MAX_OFFSET_M = 52.0
@@ -767,6 +894,7 @@ class RoadGenerationProfile:
     name: str
     mesh_granularity: str
     generate_assets: bool
+    generate_trees: bool
     generate_lane_markings: bool
     generate_junction_markings: bool
     generate_side_component_connectors: bool
@@ -778,6 +906,7 @@ CIM4_PROFILE = RoadGenerationProfile(
     name="cim4",
     mesh_granularity="component",
     generate_assets=True,
+    generate_trees=str(os.environ.get("CIM_ROAD_GENERATE_TREES", "")).strip().lower() not in {"0", "false", "no", "off"},
     generate_lane_markings=True,
     generate_junction_markings=True,
     generate_side_component_connectors=True,
@@ -788,6 +917,7 @@ CIM3_PROFILE = RoadGenerationProfile(
     name="cim3",
     mesh_granularity="component",
     generate_assets=False,
+    generate_trees=False,
     generate_lane_markings=False,
     generate_junction_markings=True,
     generate_side_component_connectors=True,
@@ -839,6 +969,19 @@ def road_generation_profile(level: str | RoadGenerationProfile | None = None) ->
     if key not in ROAD_GENERATION_PROFILES:
         raise ValueError(f"Unknown road generation level: {level!r}. Expected one of: {sorted(ROAD_GENERATION_PROFILES)}")
     return ROAD_GENERATION_PROFILES[key]
+
+
+def road_generation_profile_with_tree_switch(
+    level: str | RoadGenerationProfile | None = None,
+    *,
+    generate_trees: bool | None = None,
+) -> RoadGenerationProfile:
+    profile = road_generation_profile(level)
+    if generate_trees is None or profile.name != CIM4_PROFILE.name:
+        return profile
+    if profile.generate_trees == generate_trees:
+        return profile
+    return replace(profile, generate_trees=generate_trees)
 
 
 def subway_generation_profile(level: str | SubwayGenerationProfile | None = None) -> SubwayGenerationProfile:
@@ -1082,9 +1225,12 @@ def prepare_roads_for_surfaces(roads: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     prepared["lane_count"] = road_gen.normalize_corridor_lane_counts(prepared)
     prepared["is_bridge"] = prepared["bridge"].apply(road_gen.check_is_bridge) if "bridge" in prepared.columns else False
     prepared["bridge_clearance"] = prepared["road_class"].apply(road_gen.get_bridge_clearance)
-    prepared["ground_z_start"] = 0.0
-    prepared["ground_z_end"] = 0.0
-    prepared["road_z_start"] = prepared["bridge_clearance"].where(prepared["is_bridge"], 0.0)
+    prepared["ground_z_start"] = ROAD_SURFACE_BASE_Z_M
+    prepared["ground_z_end"] = ROAD_SURFACE_BASE_Z_M
+    prepared["road_z_start"] = (
+        ROAD_SURFACE_BASE_Z_M
+        + prepared["bridge_clearance"].where(prepared["is_bridge"], 0.0)
+    )
     prepared["road_z_end"] = prepared["road_z_start"]
     prepared["road_z_mean"] = prepared["road_z_start"]
     prepared["elevation"] = prepared["road_z_mean"]
@@ -1817,6 +1963,25 @@ def component_z_offset(component_type: str, rule: Any) -> float:
     if component_type == "non_motor_lane":
         return 0.004
     return 0.0
+
+
+def road_surface_z_for_row(row) -> float:
+    return float(row.get("road_z_mean", row.get("elevation", ROAD_SURFACE_BASE_Z_M)) or ROAD_SURFACE_BASE_Z_M)
+
+
+def junction_surface_base_z(prepared_roads: gpd.GeoDataFrame, members: Iterable[Any]) -> float:
+    values: list[float] = []
+    for member in members or []:
+        try:
+            road_idx = member[0]
+        except Exception:
+            continue
+        if road_idx not in prepared_roads.index:
+            continue
+        values.append(road_surface_z_for_row(prepared_roads.loc[road_idx]))
+    if not values:
+        return ROAD_SURFACE_BASE_Z_M
+    return round(float(sum(values) / len(values)), 6)
 
 
 def clamp_junction_chainage(line: LineString, distance: float) -> float | None:
@@ -3945,6 +4110,7 @@ def build_rounded_junction_surface_geometries(
 
 
 def build_rounded_junction_surface_meshes(
+    prepared_roads: gpd.GeoDataFrame,
     surface_geometries: list[dict[str, Any]],
     subtract_geometries_by_surface: dict[int, list[Any]] | None = None,
     add_geometries_by_surface: dict[int, list[Any]] | None = None,
@@ -3979,7 +4145,7 @@ def build_rounded_junction_surface_meshes(
             continue
         mesh = road_gen.polygon_to_top_mesh(
             geom,
-            JUNCTION_SURFACE_Z_OFFSET_M,
+            junction_surface_base_z(prepared_roads, surface.get("members", [])) + JUNCTION_SURFACE_Z_OFFSET_M,
             f"Junction_Surface_{idx}",
             visual_color=COLORS["road_surface_main"],
         )
@@ -4096,7 +4262,7 @@ def one_sided_sidewalk_protection_meshes(
                 continue
             mesh = road_gen.polygon_to_top_mesh(
                 geom,
-                component_z_offset("sidewalk", item["rule"]),
+                road_surface_z_for_row(item["row"]) + component_z_offset("sidewalk", item["rule"]),
                 f"Sidewalk_Junction_One_Sided_{surface_idx}_{item_idx}",
                 visual_color=COLORS["sidewalk"],
             )
@@ -4413,6 +4579,89 @@ def merge_distance_ranges(
         else:
             merged.append((start, end))
     return merged
+
+
+@dataclass(frozen=True)
+class RoadClipSegment:
+    line: LineString
+    distance_offset: float
+    use_junction_clip_mask: bool = True
+    short_junction_surface_fallback: bool = False
+
+
+def short_junction_direct_surface_gap_threshold_m(row: pd.Series, rule: Any) -> float:
+    try:
+        class_clip = road_gen.road_class_clip_distance(row, rule)
+    except Exception:
+        class_clip = JUNCTION_PATCH_MIN_THROAT_M
+    try:
+        drivable_width = drivable_width_for_row(row, rule)
+    except Exception:
+        drivable_width = float(getattr(rule, "road_width", 0.0) or 0.0)
+    threshold = max(
+        SHORT_JUNCTION_DIRECT_SURFACE_MIN_GAP_M,
+        float(class_clip) * 1.4,
+        float(drivable_width) * 1.15,
+    )
+    return min(SHORT_JUNCTION_DIRECT_SURFACE_MAX_GAP_M, threshold)
+
+
+def should_use_direct_road_surface_for_short_junction_gap(
+    row: pd.Series,
+    line: LineString,
+    rule: Any,
+    clip_ranges: list[tuple[float, float]],
+    outside_segments: list[tuple[LineString, float]],
+) -> bool:
+    if line is None or line.is_empty or not clip_ranges:
+        return False
+    junction_distances = sorted(
+        {
+            max(0.0, min(float(line.length), float(distance)))
+            for distance in road_gen.row_junction_distances(row)
+        }
+    )
+    if len(junction_distances) < 2:
+        return False
+    adjacent_gap = min(
+        right - left
+        for left, right in zip(junction_distances, junction_distances[1:])
+        if right >= left
+    )
+    threshold = short_junction_direct_surface_gap_threshold_m(row, rule)
+    if adjacent_gap > threshold or float(line.length) > threshold * 1.25:
+        return False
+    longest_outside = max((float(segment.length) for segment, _ in outside_segments), default=0.0)
+    return longest_outside <= threshold * SHORT_JUNCTION_DIRECT_SURFACE_MIN_OUTSIDE_RATIO
+
+
+def road_clip_segments_for_profile(
+    row: pd.Series,
+    line: LineString,
+    rule: Any,
+    clip_profile: str,
+    clip_ranges: list[tuple[float, float]],
+) -> list[RoadClipSegment]:
+    if not clip_ranges:
+        return [RoadClipSegment(line, 0.0)]
+
+    outside_segments = road_gen.line_segments_outside_ranges(line, clip_ranges)
+    if clip_profile == "drivable" and should_use_direct_road_surface_for_short_junction_gap(
+        row,
+        line,
+        rule,
+        clip_ranges,
+        outside_segments,
+    ):
+        return [
+            RoadClipSegment(
+                line,
+                0.0,
+                use_junction_clip_mask=False,
+                short_junction_surface_fallback=True,
+            )
+        ]
+    return [RoadClipSegment(segment, offset) for segment, offset in outside_segments]
 
 
 def add_adjusted_clip_range(
@@ -5240,6 +5489,7 @@ def simple_junction_outer_sidewalk_connection_meshes(
         if geom is None or geom.is_empty:
             continue
         max_curb_height = 0.12
+        surface_base_z = junction_surface_base_z(prepared_roads, surface.get("members", []))
         for road_idx, _ in surface.get("members", []):
             if road_idx not in prepared_roads.index:
                 continue
@@ -5247,7 +5497,7 @@ def simple_junction_outer_sidewalk_connection_meshes(
             max_curb_height = max(max_curb_height, float(getattr(rule, "curb_height", 0.12) or 0.12))
         mesh = road_gen.polygon_to_top_mesh(
             geom,
-            max(0.08, max_curb_height + 0.01),
+            surface_base_z + max(0.08, max_curb_height + 0.01),
             f"Sidewalk_Junction_Outer_Curve_{surface_idx}",
             visual_color=COLORS["sidewalk"],
         )
@@ -5406,7 +5656,7 @@ def simple_junction_through_component_connection_meshes(
             layer_name = component_layer_name_for_row(component_type, row_a)
             mesh = road_gen.polygon_to_top_mesh(
                 geom,
-                component_z_offset(component_type, rule_a),
+                road_surface_z_for_row(row_a) + component_z_offset(component_type, rule_a),
                 f"{layer_name}_Through_Connector_{surface_idx}_{road_idx_a}_{component_idx}",
                 visual_color=COMPONENT_COLORS.get(layer_name, COLORS["road_surface"]),
             )
@@ -6442,6 +6692,7 @@ def build_road_surface_meshes(
     )
     ramp_merge_marking_controls_by_road: dict[Any, list[dict[str, Any]]] = {}
     junction_surface_meshes = build_rounded_junction_surface_meshes(
+        prepared_roads,
         junction_surface_geometries,
         subtract_geometries_by_surface=one_sided_sidewalk_subtract,
     )
@@ -6519,9 +6770,9 @@ def build_road_surface_meshes(
         white_edge_suppression = carriageway_boundary_edge_suppression(spans)
         for line_idx, line in enumerate(iter_lines(row.geometry)):
             line_spans = spans
-            segment_cache: dict[str, list[tuple[LineString, float]]] = {}
+            segment_cache: dict[str, list[RoadClipSegment]] = {}
 
-            def clipped_segments_for(clip_profile: str) -> list[tuple[LineString, float]]:
+            def clipped_segments_for(clip_profile: str) -> list[RoadClipSegment]:
                 if clip_profile not in segment_cache:
                     profile_ranges = {
                         "drivable": drivable_clip_ranges,
@@ -6530,10 +6781,12 @@ def build_road_surface_meshes(
                         "marking": marking_clip_ranges,
                     }.get(clip_profile, {})
                     clip_ranges = profile_ranges.get(road_idx, [])
-                    segment_cache[clip_profile] = (
-                        road_gen.line_segments_outside_ranges(line, clip_ranges)
-                        if clip_ranges
-                        else [(line, 0.0)]
+                    segment_cache[clip_profile] = road_clip_segments_for_profile(
+                        row,
+                        line,
+                        rule,
+                        clip_profile,
+                        clip_ranges,
                     )
                 return segment_cache[clip_profile]
 
@@ -6549,10 +6802,14 @@ def build_road_surface_meshes(
                     clip_profile = "divider"
                 else:
                     clip_profile = "roadside"
-                for segment_idx, (segment, distance_offset) in enumerate(clipped_segments_for(clip_profile)):
+                for segment_idx, clip_segment in enumerate(clipped_segments_for(clip_profile)):
+                    segment = clip_segment.line
+                    distance_offset = clip_segment.distance_offset
                     if segment is None or segment.is_empty:
                         continue
-                    if component_type in JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES:
+                    if not clip_segment.use_junction_clip_mask:
+                        component_clip_mask = None
+                    elif component_type in JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES:
                         component_clip_mask = side_component_conflict_clip_geom
                     elif component_type in RAISED_COMPONENT_TYPES:
                         component_clip_mask = side_component_conflict_clip_geom
@@ -6591,7 +6848,9 @@ def build_road_surface_meshes(
             # 2. Lane markings are generated on the marking profile so they
             # stop earlier than road surfaces near intersections.
             if profile.generate_lane_markings:
-                for segment, distance_offset in clipped_segments_for("marking"):
+                for clip_segment in clipped_segments_for("marking"):
+                    segment = clip_segment.line
+                    distance_offset = clip_segment.distance_offset
                     if segment is None or segment.is_empty:
                         continue
                     for component_idx, (component, left_offset, right_offset) in enumerate(line_spans):
@@ -6622,7 +6881,9 @@ def build_road_surface_meshes(
             # together with raised roadside components; divider curbs use the
             # divider profile so medians reach the stop line.
             if profile.generate_curbs:
-                for segment, distance_offset in clipped_segments_for("roadside"):
+                for clip_segment in clipped_segments_for("roadside"):
+                    segment = clip_segment.line
+                    distance_offset = clip_segment.distance_offset
                     if segment is None or segment.is_empty:
                         continue
                     add_component_curbs(
@@ -6635,7 +6896,9 @@ def build_road_surface_meshes(
                         clip_mask=side_component_conflict_clip_geom,
                         exclude_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
                     )
-                for segment, distance_offset in clipped_segments_for("divider"):
+                for clip_segment in clipped_segments_for("divider"):
+                    segment = clip_segment.line
+                    distance_offset = clip_segment.distance_offset
                     if segment is None or segment.is_empty:
                         continue
                     add_component_curbs(
@@ -6663,18 +6926,19 @@ def build_road_surface_meshes(
                     apply_road_feature_metadata(mesh, row, rule, component_type="street_light")
                     mesh.metadata["cim_entity_type"] = "road_asset"
                     asset_mesh_groups.setdefault(road_gen.asset_mesh_group_name(mesh), []).append(mesh)
-                for mesh in road_gen.build_tree_meshes(
-                    row,
-                    rule,
-                    blocked_distance_ranges=tree_blocked_ranges,
-                ):
-                    if mesh_center_inside_polygon(mesh, junction_asset_filter_geom):
-                        continue
-                    name = f"{mesh.metadata.get('name', 'Tree')}_{road_idx}_{line_idx}"
-                    mesh.metadata["name"] = name
-                    apply_road_feature_metadata(mesh, row, rule, component_type="tree")
-                    mesh.metadata["cim_entity_type"] = "road_asset"
-                    asset_mesh_groups.setdefault(road_gen.asset_mesh_group_name(mesh), []).append(mesh)
+                if profile.generate_trees:
+                    for mesh in road_gen.build_tree_meshes(
+                        row,
+                        rule,
+                        blocked_distance_ranges=tree_blocked_ranges,
+                    ):
+                        if mesh_center_inside_polygon(mesh, junction_asset_filter_geom):
+                            continue
+                        name = f"{mesh.metadata.get('name', 'Tree')}_{road_idx}_{line_idx}"
+                        mesh.metadata["name"] = name
+                        apply_road_feature_metadata(mesh, row, rule, component_type="tree")
+                        mesh.metadata["cim_entity_type"] = "road_asset"
+                        asset_mesh_groups.setdefault(road_gen.asset_mesh_group_name(mesh), []).append(mesh)
 
     if profile.generate_junction_markings:
         junction_marking_stats.update(
@@ -6930,6 +7194,7 @@ def build_city_road_semantic(
             "mesh_granularity": profile.mesh_granularity,
             "semantic_level": profile.semantic_level,
             "generate_assets": profile.generate_assets,
+            "generate_trees": profile.generate_trees,
             "generate_lane_markings": profile.generate_lane_markings,
             "generate_junction_markings": profile.generate_junction_markings,
             "generate_side_component_connectors": profile.generate_side_component_connectors,
@@ -7909,6 +8174,7 @@ def build_city_junction_score(
     prepared_roads: gpd.GeoDataFrame,
     road_meshes: dict[str, trimesh.Trimesh],
     junction_semantic: dict[str, Any] | None = None,
+    road_profile: RoadGenerationProfile | None = None,
 ) -> dict[str, Any]:
     """Score visible junction geometry, markings, assets, and semantics."""
     records = [road_cross_section_record(row) for _, row in prepared_roads.iterrows()]
@@ -8010,7 +8276,13 @@ def build_city_junction_score(
     layer_ratio = score_ratio(sum(1 for layer in expected_layers if layer in present_layers), len(expected_layers))
     light_present = any(layer.startswith("Street_Light") for layer in present_layers)
     tree_present = any(layer.startswith("Tree") for layer in present_layers)
-    asset_ratio = 1.0 if not GENERATE_ROAD_ASSETS else (0.5 if light_present else 0.0) + (0.5 if tree_present else 0.0)
+    tree_assets_enabled = bool(road_profile.generate_trees) if road_profile is not None else True
+    asset_checks: list[bool] = []
+    if GENERATE_ROAD_ASSETS:
+        asset_checks.append(light_present)
+        if tree_assets_enabled:
+            asset_checks.append(tree_present)
+    asset_ratio = 1.0 if not asset_checks else sum(1.0 for present in asset_checks if present) / len(asset_checks)
     topology_ratio = (
         score_ratio(semantic_junction_count, junction_count)
         * score_ratio(topology_complete_count, semantic_junction_count)
@@ -8129,8 +8401,9 @@ def write_city_junction_score(
     prepared_roads: gpd.GeoDataFrame,
     road_meshes: dict[str, trimesh.Trimesh],
     junction_semantic: dict[str, Any] | None = None,
+    road_profile: RoadGenerationProfile | None = None,
 ) -> dict[str, Any]:
-    report = build_city_junction_score(prepared_roads, road_meshes, junction_semantic)
+    report = build_city_junction_score(prepared_roads, road_meshes, junction_semantic, road_profile)
     CITY_JUNCTION_SCORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CITY_JUNCTION_SCORE_PATH.open("w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -10551,6 +10824,11 @@ def subway_tunnel_semantic_record(
         length_m += float(line.length)
         coords = list(line.coords)
         segment_count += max(0, len(coords) - 1)
+    horizontal_bounds = (
+        [round(float(value), 3) for value in row.geometry.bounds]
+        if row.geometry is not None and not row.geometry.is_empty
+        else None
+    )
     return {
         "object_name": object_name,
         "component_object_names": component_object_names,
@@ -10577,6 +10855,11 @@ def subway_tunnel_semantic_record(
         "length_m": round(length_m, 3),
         "source_segment_count": segment_count,
         "tunnel_depth_m": round(tunnel_depth_m, 3),
+        "tunnel_top_z_m": round(tunnel_depth_m + SUBWAY_TUNNEL_OUTER_RADIUS_M, 3),
+        "tunnel_bottom_z_m": round(tunnel_depth_m - SUBWAY_TUNNEL_OUTER_RADIUS_M, 3),
+        "horizontal_bounds_xy_m": horizontal_bounds,
+        "absolute_z_datum": "model_local_z_meter",
+        "road_surface_base_z_m": ROAD_SURFACE_BASE_Z_M,
         "lateral_translation_x_m": round(lateral_translation_x_m, 3),
         "lateral_translation_y_m": round(lateral_translation_y_m, 3),
         "same_line_track_spacing_m": round(same_line_track_spacing_m, 3),
@@ -10586,6 +10869,8 @@ def subway_tunnel_semantic_record(
         "coordinate": {
             "model_crs": TARGET_CRS,
             "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
+            "absolute_z_datum": "model_local_z_meter",
+            "road_surface_base_z_m": ROAD_SURFACE_BASE_Z_M,
         },
     }
 
@@ -10620,6 +10905,8 @@ def build_subway_tunnel_semantic(
         "coordinate": {
             "model_crs": TARGET_CRS,
             "local_origin": {"x": origin[0], "y": origin[1], "z": 0.0},
+            "absolute_z_datum": "model_local_z_meter",
+            "road_surface_base_z_m": ROAD_SURFACE_BASE_Z_M,
         },
         "objects": records,
         "objects_by_name": {str(record["object_name"]): record for record in records},
@@ -10922,8 +11209,12 @@ def road_generation_log(message: str) -> None:
     print(f"[roads] {message}", flush=True)
 
 
-def generate_roads_only(level: str | RoadGenerationProfile | None = None) -> dict[str, Any]:
-    profile = road_generation_profile(level)
+def generate_roads_only(
+    level: str | RoadGenerationProfile | None = None,
+    *,
+    generate_trees: bool | None = None,
+) -> dict[str, Any]:
+    profile = road_generation_profile_with_tree_switch(level, generate_trees=generate_trees)
     road_obj_path = road_obj_path_for_profile(profile)
     road_semantic_path = road_semantic_path_for_profile(profile)
     road_classification_path = road_classification_path_for_profile(profile)
@@ -10931,11 +11222,12 @@ def generate_roads_only(level: str | RoadGenerationProfile | None = None) -> dic
     road_source_attributes_path = road_source_attributes_path_for_profile(profile)
     junction_semantic_path = junction_semantic_path_for_profile(profile)
     print(f"Road generation level: {profile.name}", flush=True)
+    print(f"Road tree generation: {'enabled' if profile.generate_trees else 'disabled'}", flush=True)
     print(f"[1/5] Loading road layer from {road_gen.RAW_ROADS}...", flush=True)
     roads = load_layer(road_gen.RAW_ROADS)
     source_attribute_columns = [str(column) for column in roads.columns if str(column) != str(roads.geometry.name)]
     print(f"[2/5] Localizing {len(roads)} road records...", flush=True)
-    origin = compute_origin(roads)
+    origin = compute_road_model_origin(roads)
     roads = localize(roads, origin)
 
     print("[3/5] Preparing road topology and junction distances...", flush=True)
@@ -10967,7 +11259,12 @@ def generate_roads_only(level: str | RoadGenerationProfile | None = None) -> dic
     marking_qc = None
     if RUN_GENERATION_QC:
         road_score = write_city_road_model_score(prepared_roads_for_qc, road_meshes)
-        junction_score = write_city_junction_score(prepared_roads_for_qc, road_meshes, junction_semantic)
+        junction_score = write_city_junction_score(
+            prepared_roads_for_qc,
+            road_meshes,
+            junction_semantic,
+            profile,
+        )
         marking_qc = write_city_marking_alignment_qc(prepared_roads_for_qc)
 
     print("CIM road OBJ generated:")
@@ -11023,10 +11320,12 @@ def generate_subway_tunnels_only(
     print(f"Subway professional systems: {', '.join(sorted(professional_systems))}", flush=True)
     print(f"[1/4] Loading railway layer from {RAIL_LINES_PATH}...", flush=True)
     railways = load_layer(RAIL_LINES_PATH)
+    roads = load_layer(road_gen.RAW_ROADS)
+    (railways,) = align_layers_to_road_coordinates(roads, railways)
     source_attribute_columns = [str(column) for column in railways.columns if str(column) != str(railways.geometry.name)]
 
     print(f"[2/4] Localizing {len(railways)} railway records...", flush=True)
-    origin = compute_origin(railways)
+    origin = compute_road_model_origin(roads)
     railways = localize(railways, origin)
     tunnel_corridors = subway_tunnel_generation_corridors(railways)
     if line_filter:
@@ -11100,6 +11399,127 @@ def generate_subway_tunnels_only(
     }
 
 
+def build_sewer_only_utility_layer_sets(
+    water_lines: gpd.GeoDataFrame,
+    sewer_lines: gpd.GeoDataFrame,
+    gas_lines: gpd.GeoDataFrame,
+    sewer_points: gpd.GeoDataFrame,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select the reduced utility data set used for underground pipe output."""
+
+    return (
+        [{"pipe_type": "Sewer", "layer": sewer_lines}],
+        [{"pipe_type": "Sewer", "layer": sewer_points}],
+    )
+
+
+def generate_utility_pipes_only(level: str = "cim4") -> dict[str, Any]:
+    detail_level = str(level or "cim4").strip().lower()
+    utility_obj_path = utility_obj_path_for_level(detail_level)
+    utility_semantic_path = utility_semantic_path_for_level(detail_level)
+    utility_mesh_attributes_path = utility_mesh_attributes_path_for_level(detail_level)
+    utility_qc_path = utility_qc_path_for_level(detail_level)
+
+    print(f"Utility pipe generation level: {detail_level}", flush=True)
+    print(f"[1/4] Loading road and utility layers from {RAW_DIR}...", flush=True)
+    roads = load_layer(road_gen.RAW_ROADS)
+    sewer_lines = load_layer(SEWER_LINES_PATH)
+    sewer_points = load_layer(SEWER_NODE_POINTS_PATH)
+    railways = load_layer(RAIL_LINES_PATH)
+
+    print("[2/4] Localizing utility layers...", flush=True)
+    sewer_lines, sewer_points, railways = align_layers_to_road_coordinates(
+        roads,
+        sewer_lines,
+        sewer_points,
+        railways,
+    )
+    origin = compute_road_model_origin(roads)
+    roads = localize(roads, origin)
+    sewer_lines = localize(sewer_lines, origin)
+    sewer_points = localize(sewer_points, origin)
+    railways = localize(railways, origin)
+
+    empty_utility_layer = gpd.GeoDataFrame(geometry=[], crs=sewer_lines.crs)
+    utility_layers, utility_node_layers = build_sewer_only_utility_layer_sets(
+        empty_utility_layer,
+        sewer_lines,
+        empty_utility_layer,
+        sewer_points,
+    )
+
+    print("[3/4] Building utility pipes and MEP wells...", flush=True)
+    utility_meshes, utility_records = build_utility_pipe_meshes(
+        utility_layers,
+        roads,
+        utility_node_layers,
+        detail_level,
+    )
+    tunnel_corridors = subway_tunnel_generation_corridors(railways)
+    tunnel_depths = assign_railway_tunnel_depths(tunnel_corridors)
+    subway_records = [
+        subway_tunnel_semantic_record(row, idx, origin, tunnel_depths)
+        for idx, row in tunnel_corridors.iterrows()
+        if subway_like(row)
+    ]
+    subway_clearance = validate_utility_subway_vertical_clearance(
+        utility_records,
+        subway_records,
+    )
+    if not subway_clearance["vertical_order_ok"]:
+        print(
+            "[ERROR] Utility/subway vertical-order violations detected: "
+            f"{subway_clearance['violation_count']} pair(s).",
+            flush=True,
+        )
+
+    print("[4/4] Exporting utility OBJ and semantics...", flush=True)
+    utility_obj_path.parent.mkdir(parents=True, exist_ok=True)
+    if utility_meshes:
+        scene_from_meshes(utility_meshes).export(utility_obj_path)
+    elif utility_obj_path.exists():
+        utility_obj_path.unlink()
+
+    utility_semantic = write_city_utility_pipe_semantic(
+        utility_records,
+        origin,
+        detail_level,
+        utility_semantic_path,
+        subway_clearance,
+    )
+    utility_mesh_attributes = write_city_utility_pipe_mesh_attributes(
+        utility_meshes,
+        utility_records,
+        detail_level,
+        utility_mesh_attributes_path,
+    )
+    utility_qc = None
+    if RUN_GENERATION_QC:
+        utility_qc = write_city_utility_pipe_qc(utility_records, detail_level, utility_qc_path)
+
+    well_count = sum(1 for record in utility_records if record.get("object_type") == "MEP_Well")
+    ring_replaced_count = sum(
+        1 for record in utility_records if record.get("quality_flags", {}).get("source_ring_replaced_by_well")
+    )
+    print("CIM utility pipe OBJ generated:")
+    print(f"- utility OBJ: {utility_obj_path if utility_meshes else 'skipped (no geometry)'}")
+    print(f"- utility mesh objects: {len(utility_meshes)}")
+    print(f"- utility semantic objects: {len(utility_semantic['objects'])} -> {utility_semantic_path}")
+    print(f"- utility MEP wells: {well_count} ({ring_replaced_count} from source rings)")
+    print(f"- utility mesh attributes: {utility_mesh_attributes['object_count']} -> {utility_mesh_attributes_path}")
+    if RUN_GENERATION_QC:
+        print(f"- utility pipe qc: {utility_qc['score']} ({utility_qc['grade']}) -> {utility_qc_path}")
+    else:
+        print("- qc reports: skipped (set CIM_ROAD_RUN_QC=1 to enable)")
+    return {
+        "utility_obj_path": utility_obj_path if utility_meshes else None,
+        "utility_meshes": utility_meshes,
+        "utility_semantic": utility_semantic,
+        "utility_mesh_attributes": utility_mesh_attributes,
+        "utility_qc": utility_qc,
+    }
+
+
 def main() -> None:
     print(f"[1/6] Loading raw layers from {RAW_DIR}...", flush=True)
     roads = load_layer(road_gen.RAW_ROADS)
@@ -11110,10 +11530,19 @@ def main() -> None:
     water_lines = load_layer(WATER_LINES_PATH)
     sewer_lines = load_layer(SEWER_LINES_PATH)
     gas_lines = load_layer(GAS_LINES_PATH)
+    sewer_points = load_layer(SEWER_NODE_POINTS_PATH)
     transport = combine_layers(bus_stops, railway_stations)
 
     print("[2/6] Localizing layers...", flush=True)
-    origin = compute_origin(roads, buildings, transport, railways, water_lines, sewer_lines, gas_lines)
+    railways, water_lines, sewer_lines, gas_lines, sewer_points = align_layers_to_road_coordinates(
+        roads,
+        railways,
+        water_lines,
+        sewer_lines,
+        gas_lines,
+        sewer_points,
+    )
+    origin = compute_road_model_origin(roads)
     roads = localize(roads, origin)
     buildings = localize(buildings, origin)
     transport = localize(transport, origin)
@@ -11121,26 +11550,48 @@ def main() -> None:
     water_lines = localize(water_lines, origin)
     sewer_lines = localize(sewer_lines, origin)
     gas_lines = localize(gas_lines, origin)
+    sewer_points = localize(sewer_points, origin)
 
     print("[3/6] Building transit meshes...", flush=True)
     subway_station_meshes, bus_stop_meshes = build_transit_node_meshes(transport)
-    utility_layers = [
-        {"pipe_type": "Water", "layer": water_lines},
-        {"pipe_type": "Sewer", "layer": sewer_lines},
-        {"pipe_type": "Gas", "layer": gas_lines},
-    ]
+    utility_layers, utility_node_layers = build_sewer_only_utility_layer_sets(
+        water_lines,
+        sewer_lines,
+        gas_lines,
+        sewer_points,
+    )
     print("[4/6] Building road cross-section meshes...", flush=True)
     prepared_roads_for_qc = prepare_roads_for_surfaces(roads)
     road_meshes = build_road_surface_meshes(prepared_roads_for_qc)
     print("[5/6] Building optional rail and utility meshes...", flush=True)
     utility_meshes, utility_records = (
-        build_utility_pipe_meshes(utility_layers, roads) if GENERATE_UTILITY_PIPES else ({}, [])
+        build_utility_pipe_meshes(utility_layers, roads, utility_node_layers) if GENERATE_UTILITY_PIPES else ({}, [])
     )
     tunnel_corridors = subway_tunnel_generation_corridors(railways) if GENERATE_SUBWAY_TUNNELS else railways.iloc[0:0].copy()
+    tunnel_depths = assign_railway_tunnel_depths(tunnel_corridors) if GENERATE_SUBWAY_TUNNELS else {}
+    subway_records = [
+        subway_tunnel_semantic_record(row, idx, origin, tunnel_depths)
+        for idx, row in tunnel_corridors.iterrows()
+        if subway_like(row)
+    ]
+    subway_clearance = validate_utility_subway_vertical_clearance(
+        utility_records,
+        subway_records,
+    )
+    if not subway_clearance["vertical_order_ok"]:
+        print(
+            "[ERROR] Utility/subway vertical-order violations detected: "
+            f"{subway_clearance['violation_count']} pair(s).",
+            flush=True,
+        )
     modules = {
         "roads": road_meshes,
         "buildings": build_building_meshes(buildings),
-        "subway_tunnels": build_subway_tunnel_meshes(tunnel_corridors) if GENERATE_SUBWAY_TUNNELS else {},
+        "subway_tunnels": (
+            build_subway_tunnel_meshes(tunnel_corridors, depth_by_index=tunnel_depths)
+            if GENERATE_SUBWAY_TUNNELS
+            else {}
+        ),
         "subway_stations": subway_station_meshes,
         "bus_stops": bus_stop_meshes,
         "utility_pipes": utility_meshes,
@@ -11156,14 +11607,23 @@ def main() -> None:
     road_classification = write_city_road_classification(road_semantic)
     road_mesh_attributes = write_city_road_mesh_attributes(road_meshes)
     junction_semantic = write_city_junction_semantic(prepared_roads_for_qc, origin)
-    utility_semantic = write_city_utility_pipe_semantic(utility_records, origin)
+    utility_semantic = write_city_utility_pipe_semantic(
+        utility_records,
+        origin,
+        subway_clearance=subway_clearance,
+    )
     road_score = None
     junction_score = None
     marking_qc = None
     utility_qc = None
     if RUN_GENERATION_QC:
         road_score = write_city_road_model_score(prepared_roads_for_qc, road_meshes)
-        junction_score = write_city_junction_score(prepared_roads_for_qc, road_meshes, junction_semantic)
+        junction_score = write_city_junction_score(
+            prepared_roads_for_qc,
+            road_meshes,
+            junction_semantic,
+            profile,
+        )
         marking_qc = write_city_marking_alignment_qc(prepared_roads_for_qc)
         utility_qc = write_city_utility_pipe_qc(utility_records)
 

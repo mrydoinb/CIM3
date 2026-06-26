@@ -60,8 +60,8 @@ MODULE_EXPORTS = {
         MODULE_FBX_DIR / "cim_city_bus_stops.fbx",
     ),
     "utility_pipes": (
-        MODULE_OBJ_DIR / "cim_city_utility_pipes.obj",
-        MODULE_FBX_DIR / "cim_city_utility_pipes.fbx",
+        MODULE_OBJ_DIR / "cim4" / "city_utility_pipes.obj",
+        MODULE_FBX_DIR / "cim4" / "city_utility_pipes.fbx",
     ),
 }
 
@@ -120,10 +120,11 @@ MATERIALS = {
     "Subway_Station": ("CIM_Subway_Station_Blue", (0.12, 0.22, 0.48, 1.0), 0.58),
     "Bus_Stop": ("CIM_Bus_Stop_Green", (0.05, 0.55, 0.28, 1.0), 0.42),
     "Utility_Water": ("CIM_Utility_Water_Blue", (0.02, 0.34, 0.90, 1.0), 0.36),
-    "Utility_Sewer": ("CIM_Utility_Sewer_Brown", (0.36, 0.23, 0.12, 1.0), 0.66),
+    "Utility_Sewer": ("CIM_Utility_Sewer_Magenta_Gloss", (0.82, 0.09, 0.88, 1.0), 0.24),
     "Utility_Gas": ("CIM_Utility_Gas_Orange", (0.90, 0.42, 0.08, 1.0), 0.42),
     "Utility_Power": ("CIM_Utility_Power_Yellow", (0.94, 0.68, 0.06, 1.0), 0.28),
     "Utility_Telecom": ("CIM_Utility_Telecom_Magenta", (0.88, 0.12, 0.64, 1.0), 0.34),
+    "Utility_MEP_Well": ("CIM_Utility_MEP_Well_Concrete", (0.34, 0.36, 0.38, 1.0), 0.62),
 }
 
 DEFAULT_MATERIAL = ("CIM_Default", (0.58, 0.58, 0.58, 1.0), 0.6)
@@ -358,6 +359,9 @@ def attribute_sidecar_for_obj(obj_path: Path) -> Path | None:
         return sidecar if sidecar.exists() else None
     if obj_path.parent.name in {"cim3", "cim4"} and obj_path.stem.startswith("subway_tunnels"):
         sidecar = SEMANTIC_DIR / obj_path.parent.name / f"{obj_path.stem}_mesh_attributes.json"
+        return sidecar if sidecar.exists() else None
+    if obj_path.parent.name in {"cim3", "cim4"} and obj_path.name == "city_utility_pipes.obj":
+        sidecar = SEMANTIC_DIR / obj_path.parent.name / "city_utility_pipes_mesh_attributes.json"
         return sidecar if sidecar.exists() else None
     if obj_path.name in {"cim3_city_roads.obj", "cim4_city_roads.obj", "cim_city_roads.obj"}:
         sidecar = SEMANTIC_DIR / f"{obj_path.stem}_mesh_attributes.json"

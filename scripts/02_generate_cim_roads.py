@@ -4,10 +4,13 @@
 """Generate the CIM road OBJ and semantics.
 
 Separate junction debug models are opt-in with CIM_ROAD_EXPORT_JUNCTION_DEBUG=1.
+Tree generation for cim4 is controlled with --trees / --no-trees or the
+CIM_ROAD_GENERATE_TREES environment variable.
 
 Examples:
     python scripts/02_generate_cim_roads.py --source expressway2 --level cim4
     python scripts/02_generate_cim_roads.py --source full --level both
+    python scripts/02_generate_cim_roads.py --source expressway2 --level cim4 --no-trees
     python scripts/02_generate_cim_roads.py --roads-file path/to/roads.shp
 """
 
@@ -60,6 +63,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="Explicit road vector file. Overrides the selected preset road layer.",
     )
+    tree_group = parser.add_mutually_exclusive_group()
+    tree_group.add_argument(
+        "--trees",
+        dest="trees",
+        action="store_true",
+        help="Enable cim4 tree generation. Default: enabled.",
+    )
+    tree_group.add_argument(
+        "--no-trees",
+        dest="trees",
+        action="store_false",
+        help="Disable cim4 tree generation.",
+    )
+    parser.set_defaults(trees=None)
     parser.add_argument(
         "--data-dir",
         type=Path,
@@ -101,9 +118,13 @@ def main(argv: list[str] | None = None) -> int:
 
     os.environ["CIM_ROAD_DATA_DIR"] = str(data_dir)
     os.environ["CIM_ROAD_ROADS_FILE"] = str(roads_file)
+    if args.trees is not None:
+        os.environ["CIM_ROAD_GENERATE_TREES"] = "1" if args.trees else "0"
     print(f"Source preset: {args.source}", flush=True)
     levels = ["cim3", "cim4"] if args.level == "both" else [args.level]
     print(f"Road generation level: {args.level}", flush=True)
+    if args.trees is not None:
+        print(f"CIM4 tree generation: {'enabled' if args.trees else 'disabled'}", flush=True)
     print(f"Source data directory: {data_dir}", flush=True)
     print(f"Road source file: {roads_file}", flush=True)
 
@@ -114,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     for level in levels:
         if len(levels) > 1:
             print(f"\n=== Generating {level.upper()} roads ===", flush=True)
-        generate_roads_only(level)
+        generate_roads_only(level, generate_trees=args.trees)
     return 0
 
 
