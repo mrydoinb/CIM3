@@ -3024,12 +3024,48 @@ def junction_crosswalk_lateral_range_for_row(row: pd.Series, rule: Any) -> tuple
     if not components:
         components = fallback_cross_section_components(rule)
     spans = component_spans(components)
+    if road_gen.row_section_code(row) == "D6":
+        d6_offsets = junction_d6_crosswalk_lateral_range_for_spans(spans)
+        if d6_offsets is not None:
+            return d6_offsets
     fill_offsets = junction_stop_line_fill_lateral_offsets_for_spans(spans)
     if fill_offsets is not None:
         return float(fill_offsets[0]), float(fill_offsets[1])
 
     across_width = junction_marking_across_width(drivable_width_for_row(row, rule))
     return -across_width / 2.0, across_width / 2.0
+
+
+def junction_d6_crosswalk_lateral_range_for_spans(
+    spans: list[tuple[dict[str, Any], float, float]],
+) -> tuple[float, float] | None:
+    sidewalk_spans = [
+        (float(left), float(right))
+        for component, left, right in spans
+        if str(component.get("type", "")) == "sidewalk" and float(right) - float(left) > 0.05
+    ]
+    if len(sidewalk_spans) != 1:
+        return None
+
+    drivable_spans = [
+        (float(left), float(right))
+        for component, left, right in spans
+        if str(component.get("type", "")) in JUNCTION_STOP_LINE_COMPONENT_TYPES and float(right) - float(left) > 0.05
+    ]
+    if not drivable_spans:
+        drivable_spans = [
+            (float(left), float(right))
+            for component, left, right in spans
+            if str(component.get("type", "")) in DRIVABLE_COMPONENT_TYPES and float(right) - float(left) > 0.05
+        ]
+    if not drivable_spans:
+        return None
+
+    left_offset = min(left for left, _ in drivable_spans)
+    right_offset = max(right for _, right in drivable_spans)
+    if right_offset - left_offset <= 0.05:
+        return None
+    return left_offset, right_offset
 
 
 def crosswalk_stripe_layout_for_range(left_offset: float, right_offset: float) -> list[float]:
@@ -4175,6 +4211,37 @@ def build_rounded_junction_surface_meshes(
     return meshes
 
 
+def junction_surface_boundary_distance_for_arm(
+    line: LineString,
+    surface_geom,
+    arm: dict[str, Any],
+) -> float | None:
+    if line is None or line.is_empty or surface_geom is None or surface_geom.is_empty:
+        return None
+    side_sign = -1.0 if float(arm.get("line_direction_sign", 0.0) or 0.0) < 0.0 else 1.0
+    node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", 0.0) or 0.0))
+    ranges = line_intersection_distance_ranges(line, surface_geom)
+    if node_distance is not None:
+        containing = [
+            (start, end)
+            for start, end in ranges
+            if float(start) - JUNCTION_CHAINAGE_EPSILON_M <= float(node_distance) <= float(end) + JUNCTION_CHAINAGE_EPSILON_M
+        ]
+        if containing:
+            start, end = min(containing, key=lambda item: abs((item[0] + item[1]) * 0.5 - float(node_distance)))
+            return float(start) if side_sign < 0.0 else float(end)
+
+    candidates = [
+        float(start) if side_sign < 0.0 else float(end)
+        for start, end in ranges
+    ]
+    if not candidates:
+        return None
+    if node_distance is None:
+        return min(candidates)
+    return min(candidates, key=lambda value: abs(float(value) - float(node_distance)))
+
+
 def one_sided_sidewalk_protection_geometries_by_surface(
     prepared_roads: gpd.GeoDataFrame,
     rules: dict[str, Any],
@@ -4183,8 +4250,9 @@ def one_sided_sidewalk_protection_geometries_by_surface(
     protected: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for surface in surface_geometries:
         surface_idx = int(surface.get("index", -1))
+        surface_geom = surface.get("geometry")
         point = surface.get("point")
-        if surface_idx < 0 or point is None or getattr(point, "is_empty", False):
+        if surface_idx < 0 or surface_geom is None or surface_geom.is_empty or point is None or getattr(point, "is_empty", False):
             continue
         try:
             arms = junction_arm_records(prepared_roads, rules, point, surface.get("members", []))
@@ -4222,14 +4290,16 @@ def one_sided_sidewalk_protection_geometries_by_surface(
             component_idx, _sidewalk_component, left_offset, right_offset = sidewalk_spans[0]
             if not (right_offset <= -0.05 or left_offset >= 0.05):
                 continue
-            boundary_distance = junction_sidewalk_connector_distance(
-                line,
-                row,
-                rule,
-                arm,
-                arms,
-                outward_extra_m=JUNCTION_ROADSIDE_SEAM_OVERLAP_M,
-            )
+            boundary_distance = junction_surface_boundary_distance_for_arm(line, surface_geom, arm)
+            if boundary_distance is None:
+                boundary_distance = junction_sidewalk_connector_distance(
+                    line,
+                    row,
+                    rule,
+                    arm,
+                    arms,
+                    outward_extra_m=JUNCTION_ROADSIDE_SEAM_OVERLAP_M,
+                )
             stop_distance = junction_approach_element_stop_distance(line, row, rule, arm, arms)
             if boundary_distance is None or stop_distance is None:
                 continue
@@ -4243,18 +4313,18 @@ def one_sided_sidewalk_protection_geometries_by_surface(
                 continue
             if segment is None or segment.is_empty:
                 continue
-            geom = swept_band_polygon(segment, left_offset, right_offset)
-            if geom is None or geom.is_empty:
+            sidewalk_geom = swept_band_polygon(segment, left_offset, right_offset)
+            if sidewalk_geom is None or sidewalk_geom.is_empty:
                 continue
             try:
-                geom = road_gen.clean_polygonal(geom)
+                sidewalk_geom = road_gen.clean_polygonal(sidewalk_geom)
             except Exception:
                 pass
-            if geom is None or geom.is_empty:
+            if sidewalk_geom is None or sidewalk_geom.is_empty:
                 continue
             protected[surface_idx].append(
                 {
-                    "geometry": geom,
+                    "geometry": sidewalk_geom,
                     "road_idx": road_idx,
                     "row": row,
                     "rule": rule,
@@ -6197,6 +6267,7 @@ def simple_junction_outer_sidewalk_connection_geometries(
     rules: dict[str, Any],
     point: Point,
     members: list[tuple[Any, float]],
+    surface_geom=None,
     endpoint_overlap_m: float = 0.0,
 ) -> tuple[list[Any], list[Any]]:
     if point is None or getattr(point, "is_empty", False):
@@ -6224,14 +6295,20 @@ def simple_junction_outer_sidewalk_connection_geometries(
             components = fallback_cross_section_components(rule)
         spans = component_spans(components)
         side_sign = -1.0 if float(arm.get("line_direction_sign", 0.0) or 0.0) < 0.0 else 1.0
-        boundary_distance = junction_sidewalk_connector_distance(
-            line,
-            row,
-            rule,
-            arm,
-            arms,
-            outward_extra_m=endpoint_overlap_m,
+        boundary_distance = (
+            junction_surface_boundary_distance_for_arm(line, surface_geom, arm)
+            if surface_geom is not None and not getattr(surface_geom, "is_empty", False)
+            else None
         )
+        if boundary_distance is None:
+            boundary_distance = junction_sidewalk_connector_distance(
+                line,
+                row,
+                rule,
+                arm,
+                arms,
+                outward_extra_m=endpoint_overlap_m,
+            )
         stop_distance = junction_approach_element_stop_distance(line, row, rule, arm, arms)
         if boundary_distance is None:
             continue
@@ -6365,6 +6442,7 @@ def simple_junction_outer_sidewalk_connection_meshes(
             rules,
             point,
             surface.get("members", []),
+            surface_geom=surface.get("geometry"),
             endpoint_overlap_m=JUNCTION_SIDE_COMPONENT_CONNECTOR_OVERLAP_M,
         )
         if not sidewalk_geometries:

@@ -529,6 +529,48 @@ def source_cross_section_components_for_row(row: pd.Series) -> list[dict[str, An
     return [dict(component) for component in raw_components if float(component.get("width", 0.0) or 0.0) > 0.01]
 
 
+def normalize_outer_sidewalk_components(
+    components: list[dict[str, Any]],
+    section_code: str | None = None,
+) -> list[dict[str, Any]]:
+    """Keep sidewalks as the outermost components except for D6 one-side roads."""
+    normalized = [
+        dict(component)
+        for component in components
+        if float(component.get("width", 0.0) or 0.0) > 0.01
+    ]
+    if not normalized or safe_str(section_code).upper() == "D6":
+        return normalized
+
+    def is_sidewalk(component: dict[str, Any]) -> bool:
+        return str(component.get("type", "")) == "sidewalk"
+
+    if not any(is_sidewalk(component) for component in normalized):
+        return normalized
+
+    if not is_sidewalk(normalized[0]):
+        sidewalk_idx = next(
+            (idx for idx, component in enumerate(normalized) if is_sidewalk(component)),
+            None,
+        )
+        if sidewalk_idx is not None:
+            normalized.insert(0, normalized.pop(sidewalk_idx))
+
+    if not is_sidewalk(normalized[-1]):
+        sidewalk_indices = [
+            idx
+            for idx, component in enumerate(normalized)
+            if is_sidewalk(component)
+        ]
+        movable_indices = [idx for idx in sidewalk_indices if idx != 0]
+        if movable_indices:
+            normalized.append(normalized.pop(movable_indices[-1]))
+        elif sidewalk_indices:
+            normalized.append(dict(normalized[sidewalk_indices[-1]]))
+
+    return normalized
+
+
 def row_target_total_width(row: pd.Series, section_rule: dict[str, Any] | None = None) -> float | None:
     # The section-rule library is sourced from the authored PPT cross-sections.
     # When a road carries a recognized section code, keep its modeled width tied
@@ -559,9 +601,11 @@ def cross_section_components_for_row(row: pd.Series) -> list[dict[str, Any]]:
         return []
 
     components = [dict(component) for component in raw_components if float(component.get("width", 0.0) or 0.0) > 0.01]
-    base_width = component_total_width(components)
     source_code = safe_str(section_rule.get("source_section_id")) if section_rule else None
     model_code = safe_str(section_rule.get("section_id")) if section_rule else None
+    normalized_section_code = source_code or model_code or row_section_code(row)
+    components = normalize_outer_sidewalk_components(components, normalized_section_code)
+    base_width = component_total_width(components)
     target_width = row_target_total_width(row, source_section_rule or section_rule)
     if (
         source_code

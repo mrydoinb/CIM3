@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 import unittest
 
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,12 +14,16 @@ if str(SRC) not in sys.path:
 
 from city.pipeline import (  # noqa: E402
     build_city_sidewalk_topology_qc,
+    component_spans,
+    junction_d6_crosswalk_lateral_range_for_spans,
+    junction_surface_boundary_distance_for_arm,
     mesh_xy_footprint,
     trim_shared_sidewalk_overlaps,
     trim_sidewalk_pair_overlaps_by_priority,
     trim_sidewalk_meshes_against_conflicts,
 )
 from road import generator as road_gen  # noqa: E402
+from road.rules import normalize_outer_sidewalk_components  # noqa: E402
 
 
 def top_mesh(name: str, geom: Polygon, layer_name: str = "Sidewalk"):
@@ -120,6 +124,67 @@ class SidewalkGeometryQcTests(unittest.TestCase):
         minor_footprint = mesh_xy_footprint(road_meshes["Minor-Sidewalk"])
         self.assertAlmostEqual(float(major_footprint.area), 8.0, places=4)
         self.assertLess(float(major_footprint.intersection(minor_footprint).area), 1e-6)
+
+    def test_d6_crosswalk_lateral_range_excludes_one_sided_sidewalk(self):
+        spans = component_spans(
+            [
+                {"type": "sidewalk", "width": 2.0},
+                {"type": "main_carriageway", "width": 6.0},
+            ]
+        )
+
+        self.assertEqual(junction_d6_crosswalk_lateral_range_for_spans(spans), (-3.0, 3.0))
+
+    def test_d6_sidewalk_protection_uses_real_junction_boundary(self):
+        line = LineString([(0.0, 0.0), (10.0, 0.0)])
+        surface = Polygon([(3.0, -2.0), (7.0, -2.0), (7.0, 2.0), (3.0, 2.0)])
+
+        before = junction_surface_boundary_distance_for_arm(
+            line,
+            surface,
+            {"node_distance_m": 5.0, "line_direction_sign": -1.0},
+        )
+        after = junction_surface_boundary_distance_for_arm(
+            line,
+            surface,
+            {"node_distance_m": 5.0, "line_direction_sign": 1.0},
+        )
+
+        self.assertAlmostEqual(before, 3.0)
+        self.assertAlmostEqual(after, 7.0)
+
+    def test_non_d6_cross_section_keeps_sidewalk_outermost(self):
+        components = [
+            {"type": "sidewalk", "width": 8.75},
+            {"type": "service_lane", "width": 8.0},
+            {"type": "side_divider", "width": 2.0},
+            {"type": "main_carriageway", "width": 12.25},
+            {"type": "median", "width": 2.0},
+            {"type": "main_carriageway", "width": 12.25},
+            {"type": "sidewalk", "width": 8.75},
+            {"type": "non_motor_lane", "width": 10.0},
+        ]
+
+        normalized = normalize_outer_sidewalk_components(components, "C4")
+
+        self.assertEqual(normalized[0]["type"], "sidewalk")
+        self.assertEqual(normalized[-1]["type"], "sidewalk")
+        self.assertEqual(normalized[-2]["type"], "non_motor_lane")
+        self.assertEqual(sum(1 for component in normalized if component["type"] == "sidewalk"), 2)
+        self.assertAlmostEqual(
+            sum(float(component["width"]) for component in normalized),
+            sum(float(component["width"]) for component in components),
+        )
+
+    def test_d6_cross_section_keeps_one_sided_sidewalk(self):
+        components = [
+            {"type": "main_carriageway", "width": 5.0},
+            {"type": "sidewalk", "width": 2.0},
+        ]
+
+        normalized = normalize_outer_sidewalk_components(components, "D6")
+
+        self.assertEqual([component["type"] for component in normalized], ["main_carriageway", "sidewalk"])
 
 
 if __name__ == "__main__":
