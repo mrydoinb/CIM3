@@ -38,6 +38,7 @@ import shapely
 from shapely.geometry import LineString, MultiLineString, Point, MultiPoint, Polygon, MultiPolygon, GeometryCollection
 from shapely.affinity import translate as shapely_translate
 from shapely.ops import linemerge, nearest_points, substring, unary_union
+from shapely.strtree import STRtree
 import trimesh
 
 from road import generator as road_gen
@@ -796,6 +797,12 @@ GENERATE_JUNCTION_STOP_LINES = False
 GENERATE_JUNCTION_APPROACH_SURFACES = False
 ENABLE_SIMPLE_ROUNDED_JUNCTIONS = True
 RUN_GENERATION_QC = str(os.environ.get("CIM_ROAD_RUN_QC", "")).strip().lower() in {"1", "true", "yes", "on"}
+RUN_SIDEWALK_TOPOLOGY_QC = RUN_GENERATION_QC or str(os.environ.get("CIM_ROAD_RUN_SIDEWALK_QC", "")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 GENERATE_JUNCTION_DEBUG_MODELS = (
     str(os.environ.get("CIM_ROAD_EXPORT_JUNCTION_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on"}
 )
@@ -840,6 +847,12 @@ JUNCTION_CONNECTOR_LOCAL_MARGIN_M = 6.0
 OUTPUT_JUNCTION_SURFACE_CLOSE_M = 0.18
 OUTPUT_ROAD_COMPONENT_CLOSE_M = 0.18
 OUTPUT_ROADSIDE_COMPONENT_CLOSE_M = 0.18
+SIDEWALK_CONFLICT_CLEARANCE_M = 0.02
+SIDEWALK_CONFLICT_OVERLAP_TOLERANCE_M2 = 0.01
+SIDEWALK_MIN_FRAGMENT_AREA_M2 = 0.05
+SIDEWALK_CONNECTIVITY_TOLERANCE_M = 0.25
+SIDEWALK_NEAR_GAP_MAX_M = 1.2
+SIDEWALK_OVERLAP_AREA_TOLERANCE_M2 = 0.01
 JUNCTION_SIDE_COMPONENT_CONNECTOR_OVERLAP_M = 1.2 # 相邻道路组件连接处的重叠距离
 JUNCTION_RAMP_MERGE_BRANCH_THROAT_MIN_M = 10.0
 JUNCTION_RAMP_MERGE_BRANCH_THROAT_MAX_M = 24.0
@@ -863,7 +876,10 @@ JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M = 0.0
 JUNCTION_MARKING_RETREAT_M = 0.35
 SHORT_JUNCTION_GAP_AS_JUNCTION_MAX_LENGTH_M = 8.0
-SHORT_JUNCTION_CONNECTOR_AS_JUNCTION_MAX_LENGTH_M = 48.0
+SHORT_JUNCTION_CONNECTOR_AS_JUNCTION_MAX_LENGTH_M = 10.0
+JUNCTION_TARGET_OUTER_SIDEWALK_SOURCE_IDS = {"0"}
+JUNCTION_TARGET_OUTER_SIDEWALK_LANDING_MAX_M = 2.0
+JUNCTION_TARGET_OUTER_SIDEWALK_CONTROL_MAX_OUTWARD_M = 2.5
 JUNCTION_COMPONENT_WIDTH_BUCKET_M = 0.05
 JUNCTION_CHAINAGE_EPSILON_M = 0.02
 JUNCTION_APPROACH_MARKING_MAX_OFFSET_M = 52.0
@@ -1073,6 +1089,10 @@ def road_classification_path_for_profile(profile: RoadGenerationProfile) -> Path
 
 def road_mesh_attributes_path_for_profile(profile: RoadGenerationProfile) -> Path:
     return ROOT / "output" / "semantic" / profile.name / "city_roads_mesh_attributes.json"
+
+
+def road_sidewalk_qc_path_for_profile(profile: RoadGenerationProfile) -> Path:
+    return ROOT / "output" / "qc_report" / profile.name / "city_roads_sidewalk_qc.json"
 
 
 def subway_tunnel_mesh_attributes_path_for_profile(
@@ -4211,16 +4231,10 @@ def one_sided_sidewalk_protection_geometries_by_surface(
                 outward_extra_m=JUNCTION_ROADSIDE_SEAM_OVERLAP_M,
             )
             stop_distance = junction_approach_element_stop_distance(line, row, rule, arm, arms)
-            if boundary_distance is None:
+            if boundary_distance is None or stop_distance is None:
                 continue
-            node_distance = clamp_junction_chainage(line, float(arm.get("node_distance_m", line.project(point)) or 0.0))
-            distances = [float(boundary_distance)]
-            if stop_distance is not None:
-                distances.append(float(stop_distance))
-            if node_distance is not None:
-                distances.append(float(node_distance))
-            start = max(0.0, min(distances))
-            end = min(float(line.length), max(distances))
+            start = max(0.0, min(float(boundary_distance), float(stop_distance)))
+            end = min(float(line.length), max(float(boundary_distance), float(stop_distance)))
             if end - start <= 0.05:
                 continue
             try:
@@ -4418,6 +4432,31 @@ def mesh_xy_center_point(mesh: trimesh.Trimesh) -> Point | None:
 def mesh_xy_footprint(mesh: trimesh.Trimesh):
     if mesh is None or len(mesh.vertices) == 0:
         return None
+    vertices = np.asarray(mesh.vertices)
+    face_polygons = []
+    for face in np.asarray(mesh.faces):
+        coords = [
+            (float(vertices[int(vertex_idx)][0]), float(vertices[int(vertex_idx)][1]))
+            for vertex_idx in face
+        ]
+        if len(coords) < 3:
+            continue
+        try:
+            polygon = Polygon(coords)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            if polygon is not None and not polygon.is_empty and float(polygon.area) > 1e-8:
+                face_polygons.append(polygon)
+        except Exception:
+            continue
+    if face_polygons:
+        try:
+            footprint = road_gen.clean_polygonal(unary_union(face_polygons))
+            if footprint is not None and not footprint.is_empty:
+                return footprint
+        except Exception:
+            pass
+
     points = []
     seen = set()
     for vertex in mesh.vertices:
@@ -4432,6 +4471,68 @@ def mesh_xy_footprint(mesh: trimesh.Trimesh):
         return Polygon(points).convex_hull
     except Exception:
         return None
+
+
+def mesh_top_z(mesh: trimesh.Trimesh, default: float = 0.0) -> float:
+    if mesh is None or len(mesh.vertices) == 0:
+        return float(default)
+    try:
+        return float(np.mean(np.asarray(mesh.vertices)[:, 2]))
+    except Exception:
+        return float(default)
+
+
+def mesh_visual_color(mesh: trimesh.Trimesh) -> list[int] | None:
+    try:
+        colors = np.asarray(mesh.visual.face_colors)
+        if len(colors) > 0:
+            return colors[0].tolist()
+    except Exception:
+        pass
+    return None
+
+
+def polygonal_parts_above_area(geom, min_area_m2: float):
+    if geom is None or geom.is_empty:
+        return None
+    parts = [
+        polygon
+        for polygon in iter_polygons(geom)
+        if polygon is not None and not polygon.is_empty and float(polygon.area) >= float(min_area_m2)
+    ]
+    if not parts:
+        return None
+    try:
+        return road_gen.clean_polygonal(unary_union(parts))
+    except Exception:
+        return None
+
+
+def remesh_planar_footprint_like(mesh: trimesh.Trimesh, geom, name: str | None = None) -> trimesh.Trimesh | None:
+    geom = polygonal_parts_above_area(geom, SIDEWALK_MIN_FRAGMENT_AREA_M2)
+    if geom is None or geom.is_empty:
+        return None
+    metadata = dict(mesh.metadata or {})
+    output_name = str(name or metadata.get("name") or "mesh")
+    result = road_gen.polygon_to_top_mesh(
+        geom,
+        mesh_top_z(mesh),
+        output_name,
+        visual_color=mesh_visual_color(mesh),
+    )
+    if result is None or len(result.vertices) == 0:
+        return None
+    result.metadata.update(metadata)
+    result.metadata["name"] = output_name
+    return result
+
+
+def bounds_gap_distance_m(bounds_a: tuple[float, float, float, float], bounds_b: tuple[float, float, float, float]) -> float:
+    minx_a, miny_a, maxx_a, maxy_a = bounds_a
+    minx_b, miny_b, maxx_b, maxy_b = bounds_b
+    dx = max(float(minx_a) - float(maxx_b), float(minx_b) - float(maxx_a), 0.0)
+    dy = max(float(miny_a) - float(maxy_b), float(miny_b) - float(maxy_a), 0.0)
+    return math.hypot(dx, dy)
 
 
 def mesh_center_inside_polygon(mesh: trimesh.Trimesh, geom) -> bool:
@@ -4499,6 +4600,532 @@ def filter_non_expressway_meshes_without_polygon_overlap(
             continue
         kept.append(mesh)
     return kept, removed
+
+
+SIDEWALK_CONFLICT_LAYERS = {
+    "Junction_Surface",
+    "Road_Surface_Main",
+    "Road_Surface_Service",
+    "Road_Surface_Branch",
+    "Non_Motor_Lane",
+    "Parking_Lane",
+}
+
+
+def mesh_footprint_polygon_parts(
+    mesh: trimesh.Trimesh,
+    *,
+    min_area_m2: float = SIDEWALK_MIN_FRAGMENT_AREA_M2,
+) -> list[Polygon]:
+    footprint = mesh_xy_footprint(mesh)
+    if footprint is None or footprint.is_empty:
+        return []
+    return [
+        polygon
+        for polygon in iter_polygons(footprint)
+        if polygon is not None and not polygon.is_empty and float(polygon.area) >= float(min_area_m2)
+    ]
+
+
+def footprint_union_for_meshes(meshes: Iterable[trimesh.Trimesh]):
+    footprints = [
+        footprint
+        for footprint in (mesh_xy_footprint(mesh) for mesh in meshes)
+        if footprint is not None and not footprint.is_empty
+    ]
+    if not footprints:
+        return None
+    try:
+        return road_gen.clean_polygonal(unary_union(footprints))
+    except Exception:
+        return None
+
+
+def sidewalk_conflict_meshes_from_groups(
+    component_mesh_groups: dict[str, list[trimesh.Trimesh]],
+    junction_surface_meshes: list[trimesh.Trimesh],
+) -> list[trimesh.Trimesh]:
+    conflict_meshes: list[trimesh.Trimesh] = list(junction_surface_meshes)
+    for layer_name in sorted(SIDEWALK_CONFLICT_LAYERS - {"Junction_Surface"}):
+        conflict_meshes.extend(component_mesh_groups.get(layer_name, []))
+    return conflict_meshes
+
+
+def sidewalk_conflict_footprint(
+    component_mesh_groups: dict[str, list[trimesh.Trimesh]],
+    junction_surface_meshes: list[trimesh.Trimesh],
+):
+    return footprint_union_for_meshes(
+        sidewalk_conflict_meshes_from_groups(component_mesh_groups, junction_surface_meshes)
+    )
+
+
+def conflict_index_for_meshes(meshes: Iterable[trimesh.Trimesh]) -> dict[str, Any]:
+    parts: list[Polygon] = []
+    for mesh in meshes:
+        parts.extend(mesh_footprint_polygon_parts(mesh, min_area_m2=SIDEWALK_MIN_FRAGMENT_AREA_M2))
+    return {
+        "parts": parts,
+        "tree": STRtree(parts) if parts else None,
+    }
+
+
+def sidewalk_conflict_index(
+    component_mesh_groups: dict[str, list[trimesh.Trimesh]],
+    junction_surface_meshes: list[trimesh.Trimesh],
+) -> dict[str, Any]:
+    return conflict_index_for_meshes(
+        sidewalk_conflict_meshes_from_groups(component_mesh_groups, junction_surface_meshes)
+    )
+
+
+def sidewalk_conflict_index_from_road_meshes(road_meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
+    return conflict_index_for_meshes(
+        mesh
+        for object_name, mesh in road_meshes.items()
+        if road_mesh_layer_name(object_name, mesh) in SIDEWALK_CONFLICT_LAYERS
+    )
+
+
+def indexed_conflict_candidates(index: dict[str, Any], geom) -> list[Polygon]:
+    tree = index.get("tree")
+    parts = index.get("parts") or []
+    if tree is None or not parts or geom is None or geom.is_empty:
+        return []
+    try:
+        hits = tree.query(geom.envelope)
+    except Exception:
+        return []
+    candidates: list[Polygon] = []
+    for item in hits:
+        try:
+            candidate = parts[int(item)] if isinstance(item, (int, np.integer)) else item
+        except Exception:
+            continue
+        if candidate is not None and not candidate.is_empty:
+            candidates.append(candidate)
+    return candidates
+
+
+def indexed_local_conflict_geom(
+    index: dict[str, Any],
+    geom,
+    *,
+    clearance_m: float = 0.0,
+):
+    if geom is None or geom.is_empty:
+        return None
+    query_geom = geom
+    if clearance_m > 0.0:
+        try:
+            query_geom = geom.envelope.buffer(float(clearance_m), resolution=1, join_style=1)
+        except Exception:
+            query_geom = geom.envelope
+    local_parts = []
+    for candidate in indexed_conflict_candidates(index, query_geom):
+        try:
+            if clearance_m > 0.0:
+                if float(candidate.distance(geom)) > float(clearance_m):
+                    continue
+                local_parts.append(candidate.buffer(float(clearance_m), resolution=1, join_style=1))
+            elif candidate.intersects(geom):
+                local_parts.append(candidate)
+        except Exception:
+            continue
+    if not local_parts:
+        return None
+    try:
+        return road_gen.clean_polygonal(unary_union(local_parts))
+    except Exception:
+        return None
+
+
+def trim_sidewalk_meshes_against_conflicts(
+    meshes: list[trimesh.Trimesh],
+    conflict_geom,
+    *,
+    clearance_m: float = SIDEWALK_CONFLICT_CLEARANCE_M,
+    overlap_tolerance_m2: float = SIDEWALK_CONFLICT_OVERLAP_TOLERANCE_M2,
+    min_fragment_area_m2: float = SIDEWALK_MIN_FRAGMENT_AREA_M2,
+) -> tuple[list[trimesh.Trimesh], dict[str, Any]]:
+    stats: dict[str, Any] = {
+        "input_count": len(meshes),
+        "output_count": len(meshes),
+        "trimmed_count": 0,
+        "removed_count": 0,
+        "overlap_area_m2": 0.0,
+        "removed_area_m2": 0.0,
+        "examples": [],
+    }
+    if conflict_geom is None or conflict_geom.is_empty or not meshes:
+        return meshes, stats
+    try:
+        conflict = (
+            road_gen.clean_polygonal(conflict_geom.buffer(float(clearance_m), resolution=2, join_style=1))
+            if clearance_m > 0.0
+            else conflict_geom
+        )
+    except Exception:
+        conflict = conflict_geom
+    if conflict is None or conflict.is_empty:
+        return meshes, stats
+
+    cleaned_meshes: list[trimesh.Trimesh] = []
+    for mesh in meshes:
+        footprint = mesh_xy_footprint(mesh)
+        if footprint is None or footprint.is_empty or not conflict.intersects(footprint):
+            cleaned_meshes.append(mesh)
+            continue
+        try:
+            overlap_area = float(footprint.intersection(conflict).area)
+        except Exception:
+            overlap_area = 0.0
+        if overlap_area <= float(overlap_tolerance_m2):
+            cleaned_meshes.append(mesh)
+            continue
+
+        try:
+            remaining = road_gen.clean_polygonal(footprint.difference(conflict))
+        except Exception:
+            remaining = None
+        remaining = polygonal_parts_above_area(remaining, min_fragment_area_m2)
+        original_area = float(footprint.area)
+        remaining_area = float(remaining.area) if remaining is not None and not remaining.is_empty else 0.0
+        removed_area = max(original_area - remaining_area, 0.0)
+        stats["overlap_area_m2"] += overlap_area
+        stats["removed_area_m2"] += removed_area
+        if remaining is None or remaining.is_empty:
+            stats["removed_count"] += 1
+            if len(stats["examples"]) < 10:
+                point = footprint.representative_point()
+                stats["examples"].append(
+                    {
+                        "name": str((mesh.metadata or {}).get("name") or ""),
+                        "action": "removed",
+                        "x": round(float(point.x), 3),
+                        "y": round(float(point.y), 3),
+                        "overlap_area_m2": round(overlap_area, 4),
+                    }
+                )
+            continue
+
+        remeshed = remesh_planar_footprint_like(mesh, remaining)
+        if remeshed is None or len(remeshed.vertices) == 0:
+            stats["removed_count"] += 1
+            continue
+        cleaned_meshes.append(remeshed)
+        stats["trimmed_count"] += 1
+        if len(stats["examples"]) < 10:
+            point = footprint.intersection(conflict).representative_point()
+            stats["examples"].append(
+                {
+                    "name": str((mesh.metadata or {}).get("name") or ""),
+                    "action": "trimmed",
+                    "x": round(float(point.x), 3),
+                    "y": round(float(point.y), 3),
+                    "overlap_area_m2": round(overlap_area, 4),
+                }
+            )
+
+    stats["output_count"] = len(cleaned_meshes)
+    stats["overlap_area_m2"] = round(float(stats["overlap_area_m2"]), 6)
+    stats["removed_area_m2"] = round(float(stats["removed_area_m2"]), 6)
+    return cleaned_meshes, stats
+
+
+def trim_sidewalk_meshes_against_indexed_conflicts(
+    meshes: list[trimesh.Trimesh],
+    conflict_index: dict[str, Any],
+    *,
+    clearance_m: float = SIDEWALK_CONFLICT_CLEARANCE_M,
+    overlap_tolerance_m2: float = SIDEWALK_CONFLICT_OVERLAP_TOLERANCE_M2,
+    min_fragment_area_m2: float = SIDEWALK_MIN_FRAGMENT_AREA_M2,
+) -> tuple[list[trimesh.Trimesh], dict[str, Any]]:
+    stats: dict[str, Any] = {
+        "input_count": len(meshes),
+        "output_count": len(meshes),
+        "trimmed_count": 0,
+        "removed_count": 0,
+        "overlap_area_m2": 0.0,
+        "removed_area_m2": 0.0,
+        "examples": [],
+    }
+    if not meshes or not conflict_index.get("parts"):
+        return meshes, stats
+
+    cleaned_meshes: list[trimesh.Trimesh] = []
+    for mesh in meshes:
+        footprint_parts = mesh_footprint_polygon_parts(mesh, min_area_m2=min_fragment_area_m2)
+        if not footprint_parts:
+            cleaned_meshes.append(mesh)
+            continue
+        remaining_parts: list[Polygon] = []
+        mesh_overlap_area = 0.0
+        mesh_changed = False
+        for footprint in footprint_parts:
+            local_conflict = indexed_local_conflict_geom(
+                conflict_index,
+                footprint,
+                clearance_m=clearance_m,
+            )
+            if local_conflict is None or local_conflict.is_empty or not local_conflict.intersects(footprint):
+                remaining_parts.append(footprint)
+                continue
+            try:
+                overlap = footprint.intersection(local_conflict)
+                overlap_area = float(overlap.area)
+            except Exception:
+                overlap = None
+                overlap_area = 0.0
+            if overlap_area <= float(overlap_tolerance_m2):
+                remaining_parts.append(footprint)
+                continue
+            mesh_changed = True
+            mesh_overlap_area += overlap_area
+            try:
+                remaining = road_gen.clean_polygonal(footprint.difference(local_conflict))
+            except Exception:
+                remaining = None
+            if remaining is None or remaining.is_empty:
+                if len(stats["examples"]) < 10 and overlap is not None and not overlap.is_empty:
+                    point = overlap.representative_point()
+                    stats["examples"].append(
+                        {
+                            "name": str((mesh.metadata or {}).get("name") or ""),
+                            "action": "removed_part",
+                            "x": round(float(point.x), 3),
+                            "y": round(float(point.y), 3),
+                            "overlap_area_m2": round(overlap_area, 4),
+                        }
+                    )
+                continue
+            for part in iter_polygons(remaining):
+                if part is not None and not part.is_empty and float(part.area) >= float(min_fragment_area_m2):
+                    remaining_parts.append(part)
+            if len(stats["examples"]) < 10 and overlap is not None and not overlap.is_empty:
+                point = overlap.representative_point()
+                stats["examples"].append(
+                    {
+                        "name": str((mesh.metadata or {}).get("name") or ""),
+                        "action": "trimmed",
+                        "x": round(float(point.x), 3),
+                        "y": round(float(point.y), 3),
+                        "overlap_area_m2": round(overlap_area, 4),
+                    }
+                )
+
+        if not mesh_changed:
+            cleaned_meshes.append(mesh)
+            continue
+
+        original_area = sum(float(part.area) for part in footprint_parts)
+        remaining_area = sum(float(part.area) for part in remaining_parts)
+        stats["overlap_area_m2"] += mesh_overlap_area
+        stats["removed_area_m2"] += max(original_area - remaining_area, 0.0)
+        if not remaining_parts:
+            stats["removed_count"] += 1
+            continue
+        try:
+            remaining_geom = road_gen.clean_polygonal(unary_union(remaining_parts))
+        except Exception:
+            remaining_geom = None
+        remeshed = remesh_planar_footprint_like(mesh, remaining_geom)
+        if remeshed is None or len(remeshed.vertices) == 0:
+            stats["removed_count"] += 1
+            continue
+        cleaned_meshes.append(remeshed)
+        stats["trimmed_count"] += 1
+
+    stats["output_count"] = len(cleaned_meshes)
+    stats["overlap_area_m2"] = round(float(stats["overlap_area_m2"]), 6)
+    stats["removed_area_m2"] = round(float(stats["removed_area_m2"]), 6)
+    return cleaned_meshes, stats
+
+
+def trim_output_sidewalk_meshes_against_conflicts(
+    road_meshes: dict[str, trimesh.Trimesh],
+) -> dict[str, Any]:
+    conflict_index = sidewalk_conflict_index_from_road_meshes(road_meshes)
+    stats: dict[str, Any] = {
+        "input_count": 0,
+        "output_count": 0,
+        "trimmed_count": 0,
+        "removed_count": 0,
+        "overlap_area_m2": 0.0,
+        "removed_area_m2": 0.0,
+        "examples": [],
+    }
+    if not conflict_index.get("parts"):
+        return stats
+
+    for mesh_name, mesh in list(road_meshes.items()):
+        if road_mesh_layer_name(mesh_name, mesh) != "Sidewalk":
+            continue
+        stats["input_count"] += 1
+        cleaned, item_stats = trim_sidewalk_meshes_against_indexed_conflicts([mesh], conflict_index)
+        stats["trimmed_count"] += int(item_stats.get("trimmed_count", 0) or 0)
+        stats["removed_count"] += int(item_stats.get("removed_count", 0) or 0)
+        stats["overlap_area_m2"] += float(item_stats.get("overlap_area_m2", 0.0) or 0.0)
+        stats["removed_area_m2"] += float(item_stats.get("removed_area_m2", 0.0) or 0.0)
+        for example in item_stats.get("examples", []):
+            if len(stats["examples"]) < 10:
+                stats["examples"].append(example)
+        if not cleaned:
+            road_meshes.pop(mesh_name, None)
+            continue
+        output_mesh = cleaned[0]
+        output_mesh.metadata["name"] = mesh_name
+        output_mesh.metadata["layer_name"] = "Sidewalk"
+        road_meshes[mesh_name] = output_mesh
+
+    stats["output_count"] = sum(
+        1 for mesh_name, mesh in road_meshes.items() if road_mesh_layer_name(mesh_name, mesh) == "Sidewalk"
+    )
+    stats["overlap_area_m2"] = round(float(stats["overlap_area_m2"]), 6)
+    stats["removed_area_m2"] = round(float(stats["removed_area_m2"]), 6)
+    return stats
+
+
+def is_shared_sidewalk_output_mesh(mesh_name: str, mesh: trimesh.Trimesh) -> bool:
+    return road_mesh_layer_name(mesh_name, mesh) == "Sidewalk" and str(mesh_name).startswith("Sidewalk_Shared_")
+
+
+def trim_shared_sidewalk_overlaps(
+    road_meshes: dict[str, trimesh.Trimesh],
+) -> dict[str, Any]:
+    reference_meshes = [
+        mesh
+        for mesh_name, mesh in road_meshes.items()
+        if road_mesh_layer_name(mesh_name, mesh) == "Sidewalk"
+        and not is_shared_sidewalk_output_mesh(mesh_name, mesh)
+    ]
+    reference_index = conflict_index_for_meshes(reference_meshes)
+    stats: dict[str, Any] = {
+        "input_count": 0,
+        "output_count": 0,
+        "trimmed_count": 0,
+        "removed_count": 0,
+        "overlap_area_m2": 0.0,
+        "removed_area_m2": 0.0,
+        "examples": [],
+    }
+    if not reference_index.get("parts"):
+        return stats
+
+    for mesh_name, mesh in list(road_meshes.items()):
+        if not is_shared_sidewalk_output_mesh(mesh_name, mesh):
+            continue
+        stats["input_count"] += 1
+        cleaned, item_stats = trim_sidewalk_meshes_against_indexed_conflicts(
+            [mesh],
+            reference_index,
+            clearance_m=0.0,
+            overlap_tolerance_m2=SIDEWALK_OVERLAP_AREA_TOLERANCE_M2,
+        )
+        stats["trimmed_count"] += int(item_stats.get("trimmed_count", 0) or 0)
+        stats["removed_count"] += int(item_stats.get("removed_count", 0) or 0)
+        stats["overlap_area_m2"] += float(item_stats.get("overlap_area_m2", 0.0) or 0.0)
+        stats["removed_area_m2"] += float(item_stats.get("removed_area_m2", 0.0) or 0.0)
+        for example in item_stats.get("examples", []):
+            if len(stats["examples"]) < 10:
+                stats["examples"].append(example)
+        if not cleaned:
+            road_meshes.pop(mesh_name, None)
+            continue
+        output_mesh = cleaned[0]
+        output_mesh.metadata["name"] = mesh_name
+        output_mesh.metadata["layer_name"] = "Sidewalk"
+        road_meshes[mesh_name] = output_mesh
+
+    stats["output_count"] = sum(
+        1 for mesh_name, mesh in road_meshes.items() if is_shared_sidewalk_output_mesh(mesh_name, mesh)
+    )
+    stats["overlap_area_m2"] = round(float(stats["overlap_area_m2"]), 6)
+    stats["removed_area_m2"] = round(float(stats["removed_area_m2"]), 6)
+    return stats
+
+
+def sidewalk_mesh_priority(mesh_name: str, mesh: trimesh.Trimesh) -> tuple[int, float, str]:
+    metadata = mesh.metadata or {}
+    try:
+        priority = int(metadata.get("road_priority", 0) or 0)
+    except (TypeError, ValueError):
+        priority = 0
+    try:
+        area = float(mesh_xy_footprint(mesh).area)
+    except Exception:
+        area = 0.0
+    if is_shared_sidewalk_output_mesh(mesh_name, mesh):
+        priority -= 1000
+    return priority, area, str(mesh_name)
+
+
+def trim_sidewalk_pair_overlaps_by_priority(
+    road_meshes: dict[str, trimesh.Trimesh],
+) -> dict[str, Any]:
+    sidewalk_items = [
+        (mesh_name, mesh)
+        for mesh_name, mesh in road_meshes.items()
+        if road_mesh_layer_name(mesh_name, mesh) == "Sidewalk"
+    ]
+    priority_by_name = {
+        mesh_name: sidewalk_mesh_priority(mesh_name, mesh)
+        for mesh_name, mesh in sidewalk_items
+    }
+    sidewalk_items.sort(
+        key=lambda item: (
+            -priority_by_name[item[0]][0],
+            -priority_by_name[item[0]][1],
+            priority_by_name[item[0]][2],
+        )
+    )
+    accepted_parts: list[Polygon] = []
+    stats: dict[str, Any] = {
+        "input_count": len(sidewalk_items),
+        "output_count": len(sidewalk_items),
+        "trimmed_count": 0,
+        "removed_count": 0,
+        "overlap_area_m2": 0.0,
+        "removed_area_m2": 0.0,
+        "examples": [],
+    }
+
+    for mesh_name, mesh in sidewalk_items:
+        if accepted_parts:
+            accepted_index = {"parts": accepted_parts, "tree": STRtree(accepted_parts)}
+            cleaned, item_stats = trim_sidewalk_meshes_against_indexed_conflicts(
+                [mesh],
+                accepted_index,
+                clearance_m=0.0,
+                overlap_tolerance_m2=SIDEWALK_OVERLAP_AREA_TOLERANCE_M2,
+            )
+        else:
+            cleaned = [mesh]
+            item_stats = {}
+
+        stats["trimmed_count"] += int(item_stats.get("trimmed_count", 0) or 0)
+        stats["removed_count"] += int(item_stats.get("removed_count", 0) or 0)
+        stats["overlap_area_m2"] += float(item_stats.get("overlap_area_m2", 0.0) or 0.0)
+        stats["removed_area_m2"] += float(item_stats.get("removed_area_m2", 0.0) or 0.0)
+        for example in item_stats.get("examples", []):
+            if len(stats["examples"]) < 10:
+                stats["examples"].append(example)
+        if not cleaned:
+            road_meshes.pop(mesh_name, None)
+            continue
+
+        output_mesh = cleaned[0]
+        output_mesh.metadata["name"] = mesh_name
+        output_mesh.metadata["layer_name"] = "Sidewalk"
+        road_meshes[mesh_name] = output_mesh
+        accepted_parts.extend(mesh_footprint_polygon_parts(output_mesh, min_area_m2=SIDEWALK_MIN_FRAGMENT_AREA_M2))
+
+    stats["output_count"] = sum(
+        1 for mesh_name, mesh in road_meshes.items() if road_mesh_layer_name(mesh_name, mesh) == "Sidewalk"
+    )
+    stats["overlap_area_m2"] = round(float(stats["overlap_area_m2"]), 6)
+    stats["removed_area_m2"] = round(float(stats["removed_area_m2"]), 6)
+    return stats
 
 
 def line_intersection_distance_ranges(line: LineString, geom) -> list[tuple[float, float]]:
@@ -5479,12 +6106,52 @@ def variable_width_curve_band(
         return None, []
 
 
+def clamp_sidewalk_curve_control_point(
+    control_point: tuple[float, float],
+    start_point: tuple[float, float],
+    end_point: tuple[float, float],
+    reference_point: Point,
+    max_outward_m: float | None,
+) -> tuple[float, float]:
+    if max_outward_m is None or max_outward_m <= 0.0:
+        return control_point
+    chord = (float(end_point[0]) - float(start_point[0]), float(end_point[1]) - float(start_point[1]))
+    chord_length_sq = chord[0] * chord[0] + chord[1] * chord[1]
+    if chord_length_sq <= 1e-6:
+        return control_point
+    t = (
+        (float(control_point[0]) - float(start_point[0])) * chord[0]
+        + (float(control_point[1]) - float(start_point[1])) * chord[1]
+    ) / chord_length_sq
+    t = max(0.0, min(1.0, t))
+    base_point = (
+        float(start_point[0]) + chord[0] * t,
+        float(start_point[1]) + chord[1] * t,
+    )
+    midpoint = ((float(start_point[0]) + float(end_point[0])) * 0.5, (float(start_point[1]) + float(end_point[1])) * 0.5)
+    outward = normalize_xy((midpoint[0] - reference_point.x, midpoint[1] - reference_point.y))
+    if outward is None:
+        return control_point
+    outward_distance = (
+        (float(control_point[0]) - base_point[0]) * outward[0]
+        + (float(control_point[1]) - base_point[1]) * outward[1]
+    )
+    if outward_distance <= max_outward_m:
+        return control_point
+    excess = outward_distance - max_outward_m
+    return (
+        float(control_point[0]) - outward[0] * excess,
+        float(control_point[1]) - outward[1] * excess,
+    )
+
+
 def sidewalk_curve_control_point(
     start_point: tuple[float, float],
     start_direction: tuple[float, float],
     end_point: tuple[float, float],
     end_direction: tuple[float, float],
     reference_point: Point,
+    max_outward_m: float | None = None,
 ) -> tuple[float, float]:
     chord = math.hypot(end_point[0] - start_point[0], end_point[1] - start_point[1])
     candidate = line_intersection_point(start_point, start_direction, end_point, (-end_direction[0], -end_direction[1]))
@@ -5492,7 +6159,7 @@ def sidewalk_curve_control_point(
         start_distance = math.hypot(candidate[0] - start_point[0], candidate[1] - start_point[1])
         end_distance = math.hypot(candidate[0] - end_point[0], candidate[1] - end_point[1])
         if chord * 0.12 <= start_distance <= chord * 3.0 and chord * 0.12 <= end_distance <= chord * 3.0:
-            return candidate
+            return clamp_sidewalk_curve_control_point(candidate, start_point, end_point, reference_point, max_outward_m)
 
     midpoint = ((start_point[0] + end_point[0]) * 0.5, (start_point[1] + end_point[1]) * 0.5)
     outward = normalize_xy((midpoint[0] - reference_point.x, midpoint[1] - reference_point.y))
@@ -5500,10 +6167,29 @@ def sidewalk_curve_control_point(
         outward = normalize_xy((start_direction[0] - end_direction[0], start_direction[1] - end_direction[1]))
     if outward is None:
         return midpoint
-    return (
+    fallback = (
         midpoint[0] + outward[0] * max(chord * 0.35, 2.0),
         midpoint[1] + outward[1] * max(chord * 0.35, 2.0),
     )
+    return clamp_sidewalk_curve_control_point(fallback, start_point, end_point, reference_point, max_outward_m)
+
+
+def surface_has_target_outer_sidewalk_source(
+    prepared_roads: gpd.GeoDataFrame,
+    arms: list[dict[str, Any]],
+) -> bool:
+    target_ids = {str(item) for item in JUNCTION_TARGET_OUTER_SIDEWALK_SOURCE_IDS}
+    for arm in arms:
+        source_id = str(arm.get("source_road_id", "") or "").strip()
+        if source_id in target_ids:
+            return True
+        road_idx = prepared_road_index_from_arm(prepared_roads, arm)
+        if road_idx is None or road_idx not in prepared_roads.index:
+            continue
+        row_source_id = str(prepared_roads.loc[road_idx].get("road_id", "") or "").strip()
+        if row_source_id in target_ids:
+            return True
+    return False
 
 
 def simple_junction_outer_sidewalk_connection_geometries(
@@ -5521,6 +6207,7 @@ def simple_junction_outer_sidewalk_connection_geometries(
         return [], []
     if len(arms) < 2:
         return [], []
+    tighten_target_sidewalk = surface_has_target_outer_sidewalk_source(prepared_roads, arms)
 
     endpoint_by_arm_side: dict[tuple[str, str], dict[str, Any]] = {}
     for arm in arms:
@@ -5548,6 +6235,11 @@ def simple_junction_outer_sidewalk_connection_geometries(
         stop_distance = junction_approach_element_stop_distance(line, row, rule, arm, arms)
         if boundary_distance is None:
             continue
+        if tighten_target_sidewalk and stop_distance is not None:
+            landing_delta = float(boundary_distance) - float(stop_distance)
+            max_landing = max(float(JUNCTION_TARGET_OUTER_SIDEWALK_LANDING_MAX_M), 0.0)
+            if max_landing > 0.0 and abs(landing_delta) > max_landing:
+                boundary_distance = float(stop_distance) + math.copysign(max_landing, landing_delta)
         boundary_point, _, line_normal = road_gen.line_frame_at_distance(line, boundary_distance)
         direction = arm_direction_vector(arm)
         if direction is None:
@@ -5629,6 +6321,11 @@ def simple_junction_outer_sidewalk_connection_geometries(
             end_point,
             next_endpoint["direction"],
             point,
+            max_outward_m=(
+                float(JUNCTION_TARGET_OUTER_SIDEWALK_CONTROL_MAX_OUTWARD_M)
+                if tighten_target_sidewalk
+                else None
+            ),
         )
         curve_points = quadratic_curve_points(
             start_point,
@@ -7193,6 +7890,20 @@ def build_road_surface_meshes(
         f"{junction_marking_stats.get('crosswalk_stripe_count', 0)} crosswalk stripes from simple junction boundaries."
     )
 
+    sidewalk_conflicts = sidewalk_conflict_index(component_mesh_groups, junction_surface_meshes)
+    cleaned_sidewalk_meshes, sidewalk_cleanup_stats = trim_sidewalk_meshes_against_indexed_conflicts(
+        component_mesh_groups.get("Sidewalk", []),
+        sidewalk_conflicts,
+    )
+    component_mesh_groups["Sidewalk"] = cleaned_sidewalk_meshes
+    if sidewalk_cleanup_stats["trimmed_count"] or sidewalk_cleanup_stats["removed_count"]:
+        road_generation_log(
+            "Removed abrupt sidewalk intrusions into road/junction surfaces: "
+            f"{sidewalk_cleanup_stats['trimmed_count']} trimmed, "
+            f"{sidewalk_cleanup_stats['removed_count']} removed, "
+            f"{sidewalk_cleanup_stats['removed_area_m2']:.2f} m2 affected."
+        )
+
     if GENERATE_JUNCTION_DEBUG_MODELS:
         junction_debug_manifest = write_junction_debug_models(
             prepared_roads,
@@ -7295,6 +8006,30 @@ def build_road_surface_meshes(
             "Closed "
             f"{closed_output_road_component_gap_count} road-component output gaps "
             f"({closed_output_road_component_gap_area:.2f} m2 total)."
+        )
+    final_sidewalk_cleanup_stats = trim_output_sidewalk_meshes_against_conflicts(combined_meshes)
+    if final_sidewalk_cleanup_stats["trimmed_count"] or final_sidewalk_cleanup_stats["removed_count"]:
+        road_generation_log(
+            "Final sidewalk output cleanup removed road/junction intrusions: "
+            f"{final_sidewalk_cleanup_stats['trimmed_count']} trimmed, "
+            f"{final_sidewalk_cleanup_stats['removed_count']} removed, "
+            f"{final_sidewalk_cleanup_stats['removed_area_m2']:.2f} m2 affected."
+        )
+    shared_sidewalk_overlap_stats = trim_shared_sidewalk_overlaps(combined_meshes)
+    if shared_sidewalk_overlap_stats["trimmed_count"] or shared_sidewalk_overlap_stats["removed_count"]:
+        road_generation_log(
+            "Final shared sidewalk overlap cleanup preserved road sidewalks: "
+            f"{shared_sidewalk_overlap_stats['trimmed_count']} shared mesh(es) trimmed, "
+            f"{shared_sidewalk_overlap_stats['removed_count']} removed, "
+            f"{shared_sidewalk_overlap_stats['removed_area_m2']:.2f} m2 affected."
+        )
+    sidewalk_pair_overlap_stats = trim_sidewalk_pair_overlaps_by_priority(combined_meshes)
+    if sidewalk_pair_overlap_stats["trimmed_count"] or sidewalk_pair_overlap_stats["removed_count"]:
+        road_generation_log(
+            "Final sidewalk pair-overlap cleanup preserved higher-priority sidewalks: "
+            f"{sidewalk_pair_overlap_stats['trimmed_count']} trimmed, "
+            f"{sidewalk_pair_overlap_stats['removed_count']} removed, "
+            f"{sidewalk_pair_overlap_stats['removed_area_m2']:.2f} m2 affected."
         )
     road_generation_log(f"Finished road mesh generation with {len(combined_meshes)} merged output layers.")
     return combined_meshes
@@ -8223,6 +8958,306 @@ def road_mesh_layer_metadata_max(
         ]
         or [0]
     )
+
+
+def road_mesh_layer_name(mesh_name: str, mesh: trimesh.Trimesh) -> str:
+    metadata = mesh.metadata or {}
+    layer_name = str(metadata.get("layer_name") or "").strip()
+    return layer_name or road_output_layer_name(mesh_name)
+
+
+def sidewalk_footprint_records(road_meshes: dict[str, trimesh.Trimesh]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for object_name, mesh in sorted(road_meshes.items()):
+        if road_mesh_layer_name(object_name, mesh) != "Sidewalk":
+            continue
+        footprint = mesh_xy_footprint(mesh)
+        if footprint is None or footprint.is_empty:
+            continue
+        for part_idx, polygon in enumerate(iter_polygons(footprint)):
+            if polygon is None or polygon.is_empty or float(polygon.area) <= 1e-6:
+                continue
+            records.append(
+                {
+                    "object_name": str(object_name),
+                    "part_index": int(part_idx),
+                    "geometry": polygon,
+                    "bounds": tuple(float(value) for value in polygon.bounds),
+                    "area_m2": float(polygon.area),
+                }
+            )
+    return records
+
+
+def sidewalk_conflict_union_from_road_meshes(road_meshes: dict[str, trimesh.Trimesh]):
+    conflict_meshes = [
+        mesh
+        for object_name, mesh in road_meshes.items()
+        if road_mesh_layer_name(object_name, mesh) in SIDEWALK_CONFLICT_LAYERS
+    ]
+    return footprint_union_for_meshes(conflict_meshes)
+
+
+def connected_component_ids_for_polygons(
+    records: list[dict[str, Any]],
+    tolerance_m: float,
+) -> list[int]:
+    count = len(records)
+    parents = list(range(count))
+
+    def find(idx: int) -> int:
+        while parents[idx] != idx:
+            parents[idx] = parents[parents[idx]]
+            idx = parents[idx]
+        return idx
+
+    def union(a: int, b: int) -> None:
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            parents[root_b] = root_a
+
+    tolerance = max(float(tolerance_m), 0.0)
+    for idx_a in range(count):
+        geom_a = records[idx_a]["geometry"]
+        bounds_a = records[idx_a]["bounds"]
+        for idx_b in range(idx_a + 1, count):
+            if bounds_gap_distance_m(bounds_a, records[idx_b]["bounds"]) > tolerance:
+                continue
+            try:
+                distance = float(geom_a.distance(records[idx_b]["geometry"]))
+            except Exception:
+                continue
+            if distance <= tolerance:
+                union(idx_a, idx_b)
+
+    root_to_component: dict[int, int] = {}
+    component_ids: list[int] = []
+    for idx in range(count):
+        root = find(idx)
+        if root not in root_to_component:
+            root_to_component[root] = len(root_to_component)
+        component_ids.append(root_to_component[root])
+    return component_ids
+
+
+def summarize_sidewalk_connectivity(
+    records: list[dict[str, Any]],
+    *,
+    tolerance_m: float = SIDEWALK_CONNECTIVITY_TOLERANCE_M,
+    near_gap_max_m: float = SIDEWALK_NEAR_GAP_MAX_M,
+) -> dict[str, Any]:
+    component_ids = connected_component_ids_for_polygons(records, tolerance_m)
+    component_areas: dict[int, float] = defaultdict(float)
+    component_part_counts: dict[int, int] = defaultdict(int)
+    for record, component_id in zip(records, component_ids):
+        component_areas[int(component_id)] += float(record["area_m2"])
+        component_part_counts[int(component_id)] += 1
+
+    near_gap_count = 0
+    max_near_gap_m = 0.0
+    examples: list[dict[str, Any]] = []
+    for idx_a in range(len(records)):
+        geom_a = records[idx_a]["geometry"]
+        bounds_a = records[idx_a]["bounds"]
+        for idx_b in range(idx_a + 1, len(records)):
+            if component_ids[idx_a] == component_ids[idx_b]:
+                continue
+            if bounds_gap_distance_m(bounds_a, records[idx_b]["bounds"]) > float(near_gap_max_m):
+                continue
+            try:
+                distance = float(geom_a.distance(records[idx_b]["geometry"]))
+            except Exception:
+                continue
+            if not (float(tolerance_m) < distance <= float(near_gap_max_m)):
+                continue
+            near_gap_count += 1
+            max_near_gap_m = max(max_near_gap_m, distance)
+            if len(examples) < 10:
+                point_a, point_b = nearest_points(geom_a, records[idx_b]["geometry"])
+                examples.append(
+                    {
+                        "from": records[idx_a]["object_name"],
+                        "to": records[idx_b]["object_name"],
+                        "gap_m": round(distance, 3),
+                        "x": round(float((point_a.x + point_b.x) * 0.5), 3),
+                        "y": round(float((point_a.y + point_b.y) * 0.5), 3),
+                    }
+                )
+
+    component_summaries = [
+        {
+            "component_id": int(component_id),
+            "part_count": int(component_part_counts[component_id]),
+            "area_m2": round(float(area), 3),
+        }
+        for component_id, area in sorted(component_areas.items(), key=lambda item: item[1], reverse=True)
+    ]
+    return {
+        "tolerance_m": round(float(tolerance_m), 3),
+        "near_gap_max_m": round(float(near_gap_max_m), 3),
+        "sidewalk_part_count": len(records),
+        "component_count": len(component_areas),
+        "largest_component_area_m2": round(max(component_areas.values() or [0.0]), 3),
+        "near_gap_count": int(near_gap_count),
+        "max_near_gap_m": round(float(max_near_gap_m), 3),
+        "examples": examples,
+        "largest_components": component_summaries[:10],
+    }
+
+
+def summarize_sidewalk_overlaps(
+    records: list[dict[str, Any]],
+    conflict_source,
+    *,
+    overlap_area_tolerance_m2: float = SIDEWALK_OVERLAP_AREA_TOLERANCE_M2,
+) -> dict[str, Any]:
+    sidewalk_pair_overlap_count = 0
+    sidewalk_pair_overlap_area = 0.0
+    sidewalk_examples: list[dict[str, Any]] = []
+    tolerance = max(float(overlap_area_tolerance_m2), 0.0)
+    sidewalk_geoms = [record["geometry"] for record in records]
+    sidewalk_tree = STRtree(sidewalk_geoms) if sidewalk_geoms else None
+    for idx_a, geom_a in enumerate(sidewalk_geoms):
+        if sidewalk_tree is None:
+            break
+        try:
+            hits = sidewalk_tree.query(geom_a.envelope)
+        except Exception:
+            hits = []
+        for item in hits:
+            try:
+                idx_b = int(item) if isinstance(item, (int, np.integer)) else sidewalk_geoms.index(item)
+            except Exception:
+                continue
+            if idx_b <= idx_a:
+                continue
+            try:
+                overlap = geom_a.intersection(records[idx_b]["geometry"])
+                overlap_area = float(overlap.area)
+            except Exception:
+                continue
+            if overlap_area <= tolerance:
+                continue
+            sidewalk_pair_overlap_count += 1
+            sidewalk_pair_overlap_area += overlap_area
+            if len(sidewalk_examples) < 10:
+                point = overlap.representative_point()
+                sidewalk_examples.append(
+                    {
+                        "a": records[idx_a]["object_name"],
+                        "b": records[idx_b]["object_name"],
+                        "overlap_area_m2": round(overlap_area, 4),
+                        "x": round(float(point.x), 3),
+                        "y": round(float(point.y), 3),
+                    }
+                )
+
+    road_or_junction_overlap_count = 0
+    road_or_junction_overlap_area = 0.0
+    conflict_examples: list[dict[str, Any]] = []
+    conflict_is_index = isinstance(conflict_source, dict) and "parts" in conflict_source
+    if conflict_is_index or (conflict_source is not None and not conflict_source.is_empty):
+        for record in records:
+            geom = record["geometry"]
+            if conflict_is_index:
+                local_conflict = indexed_local_conflict_geom(conflict_source, geom, clearance_m=0.0)
+            else:
+                local_conflict = conflict_source
+            if local_conflict is None or local_conflict.is_empty or not local_conflict.intersects(geom):
+                continue
+            try:
+                overlap = geom.intersection(local_conflict)
+                overlap_area = float(overlap.area)
+            except Exception:
+                continue
+            if overlap_area <= tolerance:
+                continue
+            road_or_junction_overlap_count += 1
+            road_or_junction_overlap_area += overlap_area
+            if len(conflict_examples) < 10:
+                point = overlap.representative_point()
+                conflict_examples.append(
+                    {
+                        "object_name": record["object_name"],
+                        "overlap_area_m2": round(overlap_area, 4),
+                        "x": round(float(point.x), 3),
+                        "y": round(float(point.y), 3),
+                    }
+                )
+
+    return {
+        "overlap_area_tolerance_m2": round(float(tolerance), 4),
+        "sidewalk_pair_overlap_count": int(sidewalk_pair_overlap_count),
+        "sidewalk_pair_overlap_area_m2": round(float(sidewalk_pair_overlap_area), 6),
+        "road_or_junction_overlap_count": int(road_or_junction_overlap_count),
+        "road_or_junction_overlap_area_m2": round(float(road_or_junction_overlap_area), 6),
+        "sidewalk_pair_examples": sidewalk_examples,
+        "road_or_junction_examples": conflict_examples,
+    }
+
+
+def build_city_sidewalk_topology_qc(
+    road_meshes: dict[str, trimesh.Trimesh],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+    *,
+    connectivity_tolerance_m: float = SIDEWALK_CONNECTIVITY_TOLERANCE_M,
+    near_gap_max_m: float = SIDEWALK_NEAR_GAP_MAX_M,
+    overlap_area_tolerance_m2: float = SIDEWALK_OVERLAP_AREA_TOLERANCE_M2,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    records = sidewalk_footprint_records(road_meshes)
+    conflict_index = sidewalk_conflict_index_from_road_meshes(road_meshes)
+    total_area = sum(float(record["area_m2"]) for record in records)
+    connectivity = summarize_sidewalk_connectivity(
+        records,
+        tolerance_m=connectivity_tolerance_m,
+        near_gap_max_m=near_gap_max_m,
+    )
+    overlap = summarize_sidewalk_overlaps(
+        records,
+        conflict_index,
+        overlap_area_tolerance_m2=overlap_area_tolerance_m2,
+    )
+    issue_count = (
+        int(connectivity["near_gap_count"])
+        + int(overlap["sidewalk_pair_overlap_count"])
+        + int(overlap["road_or_junction_overlap_count"])
+    )
+    return {
+        "project": "cim_road_poc",
+        "model": f"{road_output_stem(profile)}_sidewalk_qc",
+        "generation_profile": {
+            "name": profile.name,
+            "mesh_granularity": profile.mesh_granularity,
+            "semantic_level": profile.semantic_level,
+        },
+        "summary": {
+            "sidewalk_object_count": sum(
+                1 for name, mesh in road_meshes.items() if road_mesh_layer_name(name, mesh) == "Sidewalk"
+            ),
+            "sidewalk_part_count": len(records),
+            "sidewalk_area_m2": round(float(total_area), 3),
+            "issue_count": int(issue_count),
+            "has_issues": bool(issue_count),
+        },
+        "connectivity": connectivity,
+        "overlap": overlap,
+    }
+
+
+def write_city_sidewalk_topology_qc(
+    road_meshes: dict[str, trimesh.Trimesh],
+    profile: RoadGenerationProfile = CIM4_PROFILE,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    profile = road_generation_profile(profile)
+    report = build_city_sidewalk_topology_qc(road_meshes, profile)
+    output_path = path or road_sidewalk_qc_path_for_profile(profile)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return report
 
 
 def build_city_road_model_score(prepared_roads: gpd.GeoDataFrame, road_meshes: dict[str, trimesh.Trimesh]) -> dict[str, Any]:
@@ -11494,6 +12529,7 @@ def generate_roads_only(
     road_score = None
     junction_score = None
     marking_qc = None
+    sidewalk_qc = None
     if RUN_GENERATION_QC:
         road_score = write_city_road_model_score(prepared_roads_for_qc, road_meshes)
         junction_score = write_city_junction_score(
@@ -11503,6 +12539,8 @@ def generate_roads_only(
             profile,
         )
         marking_qc = write_city_marking_alignment_qc(prepared_roads_for_qc)
+    if RUN_SIDEWALK_TOPOLOGY_QC:
+        sidewalk_qc = write_city_sidewalk_topology_qc(road_meshes, profile)
 
     print("CIM road OBJ generated:")
     print(f"- roads OBJ: {road_obj_path if road_meshes else 'skipped (no geometry)'}")
@@ -11525,7 +12563,15 @@ def generate_roads_only(
         print(f"- road model score: {road_score['score']} ({road_score['grade']}) -> {CITY_ROAD_SCORE_PATH}")
         print(f"- junction score: {junction_score['score']} ({junction_score['grade']}) -> {CITY_JUNCTION_SCORE_PATH}")
         print(f"- marking alignment qc: {marking_qc['score']} ({marking_qc['grade']}) -> {CITY_MARKING_QC_PATH}")
+    if RUN_SIDEWALK_TOPOLOGY_QC:
+        sidewalk_qc_path = road_sidewalk_qc_path_for_profile(profile)
+        print(
+            "- sidewalk connectivity/overlap qc: "
+            f"{sidewalk_qc['summary']['issue_count']} issue(s) -> {sidewalk_qc_path}"
+        )
     else:
+        print("- sidewalk qc: skipped (set CIM_ROAD_RUN_SIDEWALK_QC=1 to enable)")
+    if not RUN_GENERATION_QC:
         print("- qc reports: skipped (set CIM_ROAD_RUN_QC=1 to enable)")
     return {
         "road_obj_path": road_obj_path if road_meshes else None,
@@ -11538,6 +12584,7 @@ def generate_roads_only(
         "road_score": road_score,
         "junction_score": junction_score,
         "marking_qc": marking_qc,
+        "sidewalk_qc": sidewalk_qc,
     }
 
 
