@@ -862,14 +862,14 @@ JUNCTION_ROADSIDE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_RETREAT_M = 0.0
 JUNCTION_SIDE_COMPONENT_EDGE_OVERLAP_M = 0.0
 JUNCTION_MARKING_RETREAT_M = 0.35
-SHORT_JUNCTION_DIRECT_SURFACE_MIN_GAP_M = 18.0
-SHORT_JUNCTION_DIRECT_SURFACE_MAX_GAP_M = 48.0
-SHORT_JUNCTION_DIRECT_SURFACE_MIN_OUTSIDE_RATIO = 0.35
+SHORT_JUNCTION_GAP_AS_JUNCTION_MAX_LENGTH_M = 8.0
+SHORT_JUNCTION_CONNECTOR_AS_JUNCTION_MAX_LENGTH_M = 48.0
 JUNCTION_COMPONENT_WIDTH_BUCKET_M = 0.05
 JUNCTION_CHAINAGE_EPSILON_M = 0.02
 JUNCTION_APPROACH_MARKING_MAX_OFFSET_M = 52.0
 JUNCTION_MARKING_SURFACE_CLEARANCE_M = 2.6
 JUNCTION_DESIGN_SCORE_THRESHOLD = 72.0
+JUNCTION_TRANSVERSE_MARKING_MIN_APPROACH_SURFACE_M = 6.0
 CROSSWALK_BAND_LENGTH_M = 4.0
 CROSSWALK_STRIPE_WIDTH_M = 0.45
 CROSSWALK_STRIPE_GAP_M = 0.60
@@ -4563,6 +4563,16 @@ def merge_clip_ranges_by_road(
     return merged_by_road
 
 
+def merge_clip_range_maps(
+    *range_maps: dict[Any, list[tuple[float, float]]],
+) -> dict[Any, list[tuple[float, float]]]:
+    combined: dict[Any, list[tuple[float, float]]] = defaultdict(list)
+    for ranges_by_road in range_maps:
+        for road_idx, ranges in ranges_by_road.items():
+            combined[road_idx].extend(ranges)
+    return merge_clip_ranges_by_road(combined)
+
+
 def merge_distance_ranges(
     ranges: list[tuple[float, float]],
     merge_tolerance: float = 0.25,
@@ -4581,87 +4591,267 @@ def merge_distance_ranges(
     return merged
 
 
-@dataclass(frozen=True)
-class RoadClipSegment:
-    line: LineString
-    distance_offset: float
-    use_junction_clip_mask: bool = True
-    short_junction_surface_fallback: bool = False
+def padded_distance_ranges(
+    ranges: list[tuple[float, float]],
+    line_length: float,
+    padding_m: float,
+) -> list[tuple[float, float]]:
+    if not ranges:
+        return []
+    line_length = max(float(line_length), 0.0)
+    padding_m = max(float(padding_m), 0.0)
+    padded = [
+        (
+            max(0.0, min(line_length, float(start) - padding_m)),
+            max(0.0, min(line_length, float(end) + padding_m)),
+        )
+        for start, end in ranges
+    ]
+    return merge_distance_ranges(padded)
 
 
-def short_junction_direct_surface_gap_threshold_m(row: pd.Series, rule: Any) -> float:
-    try:
-        class_clip = road_gen.road_class_clip_distance(row, rule)
-    except Exception:
-        class_clip = JUNCTION_PATCH_MIN_THROAT_M
-    try:
-        drivable_width = drivable_width_for_row(row, rule)
-    except Exception:
-        drivable_width = float(getattr(rule, "road_width", 0.0) or 0.0)
-    threshold = max(
-        SHORT_JUNCTION_DIRECT_SURFACE_MIN_GAP_M,
-        float(class_clip) * 1.4,
-        float(drivable_width) * 1.15,
+def outward_unclipped_approach_length(
+    boundary_distance: float,
+    side_sign: float,
+    line_length: float,
+    clip_ranges: list[tuple[float, float]],
+) -> float:
+    boundary_distance = max(0.0, min(float(line_length), float(boundary_distance)))
+    line_length = max(float(line_length), 0.0)
+    side_sign = -1.0 if float(side_sign) < 0.0 else 1.0
+    ranges = merge_distance_ranges(clip_ranges)
+    epsilon = max(float(JUNCTION_CHAINAGE_EPSILON_M), 0.02)
+    if side_sign > 0.0:
+        next_clip_start = line_length
+        for start, _end in ranges:
+            if float(start) > boundary_distance + epsilon:
+                next_clip_start = float(start)
+                break
+        return max(0.0, next_clip_start - boundary_distance)
+
+    previous_clip_end = 0.0
+    for start, end in ranges:
+        if float(end) < boundary_distance - epsilon:
+            previous_clip_end = float(end)
+            continue
+        if float(start) >= boundary_distance - epsilon:
+            break
+    return max(0.0, boundary_distance - previous_clip_end)
+
+
+def transverse_marking_has_approach_surface(
+    boundary_distance: float,
+    side_sign: float,
+    line_length: float,
+    stop_distance: float,
+    crosswalk_distance: float,
+    approach_clip_ranges: list[tuple[float, float]],
+) -> bool:
+    available_length = outward_unclipped_approach_length(
+        boundary_distance,
+        side_sign,
+        line_length,
+        approach_clip_ranges,
     )
-    return min(SHORT_JUNCTION_DIRECT_SURFACE_MAX_GAP_M, threshold)
+    required_marking_extent = max(
+        abs(float(stop_distance) - float(boundary_distance)) + STOP_LINE_WIDTH_M * 0.5,
+        abs(float(crosswalk_distance) - float(boundary_distance)) + CROSSWALK_BAND_LENGTH_M * 0.5,
+    )
+    required_length = required_marking_extent + max(float(JUNCTION_TRANSVERSE_MARKING_MIN_APPROACH_SURFACE_M), 0.0)
+    return available_length + 0.05 >= required_length
 
 
-def should_use_direct_road_surface_for_short_junction_gap(
+def transverse_marking_is_inside_merged_junction_clip(
+    boundary_distance: float,
+    line_length: float,
+    approach_clip_ranges: list[tuple[float, float]],
+) -> bool:
+    boundary_distance = max(0.0, min(float(line_length), float(boundary_distance)))
+    line_length = max(float(line_length), 0.0)
+    epsilon = max(float(JUNCTION_CHAINAGE_EPSILON_M), 0.02)
+    for start, end in merge_distance_ranges(approach_clip_ranges):
+        start = max(0.0, min(line_length, float(start)))
+        end = max(0.0, min(line_length, float(end)))
+        if start + epsilon < boundary_distance < end - epsilon:
+            return True
+    return False
+
+
+def is_outermost_sidewalk_span(
+    spans: list[tuple[dict[str, Any], float, float]],
+    component_idx: int,
+) -> bool:
+    if component_idx < 0 or component_idx >= len(spans):
+        return False
+    component, left_offset, right_offset = spans[component_idx]
+    if str(component.get("type", "")) != "sidewalk":
+        return False
+    valid_edges = [
+        (float(left), float(right))
+        for _component, left, right in spans
+        if float(right) - float(left) > 0.05
+    ]
+    if not valid_edges:
+        return False
+    min_left = min(left for left, _right in valid_edges)
+    max_right = max(right for _left, right in valid_edges)
+    return abs(float(left_offset) - min_left) <= 0.01 or abs(float(right_offset) - max_right) <= 0.01
+
+
+def short_road_junction_surface_mesh(
     row: pd.Series,
     line: LineString,
     rule: Any,
-    clip_ranges: list[tuple[float, float]],
-    outside_segments: list[tuple[LineString, float]],
-) -> bool:
-    if line is None or line.is_empty or not clip_ranges:
-        return False
-    junction_distances = sorted(
+    components: list[dict[str, Any]],
+    line_idx: int,
+) -> trimesh.Trimesh | None:
+    spans = component_spans(components)
+    valid_spans = [
+        (float(left_offset), float(right_offset))
+        for component_idx, (_component, left_offset, right_offset) in enumerate(spans)
+        if not is_outermost_sidewalk_span(spans, component_idx)
+        and float(right_offset) - float(left_offset) > 0.05
+    ]
+    if not valid_spans:
+        half_width = max(float(rule.road_width) * 0.5, 0.5)
+        valid_spans = [(-half_width, half_width)]
+    left_offset = min(left for left, _right in valid_spans)
+    right_offset = max(right for _left, right in valid_spans)
+    geom = swept_band_polygon(line, left_offset, right_offset)
+    if geom is None or geom.is_empty:
+        return None
+    z = road_gen.elevation_at_distance(
+        row,
+        min(float(row.get("length_m", line.length)), line.length * 0.5),
+        default_z=float(row.get("road_z_mean", row.get("elevation", 0.0))),
+    )
+    name = f"Junction_Surface_Short_Road_{row.name}_{line_idx}"
+    mesh = road_gen.polygon_to_top_mesh(
+        geom,
+        z + JUNCTION_SURFACE_Z_OFFSET_M,
+        name,
+        visual_color=COLORS["road_surface_main"],
+    )
+    if mesh is None or len(mesh.vertices) == 0:
+        return None
+    apply_road_feature_metadata(
+        mesh,
+        row,
+        rule,
+        layer_name="Junction_Surface",
+        component_type="short_road_junction_surface",
+        component_idx=line_idx,
+    )
+    mesh.metadata.update(
         {
-            max(0.0, min(float(line.length), float(distance)))
-            for distance in road_gen.row_junction_distances(row)
+            "name": name,
+            "cim_entity_type": "junction_surface",
+            "short_junction_gap_surface": True,
+            "source_line_length_m": round(float(line.length), 3),
         }
     )
-    if len(junction_distances) < 2:
-        return False
-    adjacent_gap = min(
-        right - left
-        for left, right in zip(junction_distances, junction_distances[1:])
-        if right >= left
-    )
-    threshold = short_junction_direct_surface_gap_threshold_m(row, rule)
-    if adjacent_gap > threshold or float(line.length) > threshold * 1.25:
-        return False
-    longest_outside = max((float(segment.length) for segment, _ in outside_segments), default=0.0)
-    return longest_outside <= threshold * SHORT_JUNCTION_DIRECT_SURFACE_MIN_OUTSIDE_RATIO
+    return mesh
 
 
-def road_clip_segments_for_profile(
-    row: pd.Series,
-    line: LineString,
-    rule: Any,
-    clip_profile: str,
-    clip_ranges: list[tuple[float, float]],
-) -> list[RoadClipSegment]:
-    if not clip_ranges:
-        return [RoadClipSegment(line, 0.0)]
+def short_junction_gap_surface_meshes_and_clip_ranges(
+    prepared_roads: gpd.GeoDataFrame,
+    rules: dict[str, Any],
+    existing_clip_profiles: dict[str, dict[Any, list[tuple[float, float]]]] | None = None,
+) -> tuple[list[trimesh.Trimesh], dict[str, dict[Any, list[tuple[float, float]]]]]:
+    meshes: list[trimesh.Trimesh] = []
+    raw_ranges: dict[str, dict[Any, list[tuple[float, float]]]] = {
+        "drivable": {},
+        "roadside": {},
+        "divider": {},
+        "marking": {},
+    }
+    for road_idx, row in prepared_roads.iterrows():
+        line = row.geometry
+        if line is None or line.is_empty or not isinstance(line, LineString):
+            continue
+        existing_road_clip_ranges = (
+            merge_distance_ranges(existing_clip_profiles.get("drivable", {}).get(road_idx, []))
+            if existing_clip_profiles
+            else []
+        )
+        junction_distances = sorted(
+            {
+                max(0.0, min(float(line.length), float(distance)))
+                for distance in road_gen.row_junction_distances(row)
+            }
+        )
+        if not junction_distances and not existing_road_clip_ranges:
+            continue
+        rule = road_gen.get_road_rule(row, rules)
+        components = road_gen.cross_section_components_for_row(row)
+        if not components:
+            components = fallback_cross_section_components(rule)
+        source_row = row.copy()
+        source_row.name = road_idx
+        gap_idx = 0
+        emitted_ranges: set[tuple[float, float]] = set()
 
-    outside_segments = road_gen.line_segments_outside_ranges(line, clip_ranges)
-    if clip_profile == "drivable" and should_use_direct_road_surface_for_short_junction_gap(
-        row,
-        line,
-        rule,
-        clip_ranges,
-        outside_segments,
-    ):
-        return [
-            RoadClipSegment(
-                line,
-                0.0,
-                use_junction_clip_mask=False,
-                short_junction_surface_fallback=True,
+        def add_short_gap_surface(start: float, end: float, max_length_m: float) -> None:
+            nonlocal gap_idx
+            start = max(0.0, min(float(line.length), float(start)))
+            end = max(0.0, min(float(line.length), float(end)))
+            if end < start:
+                start, end = end, start
+            gap_length = float(end) - float(start)
+            if gap_length <= 0.05 or gap_length > float(max_length_m):
+                return
+            key = (round(float(start), 3), round(float(end), 3))
+            if key in emitted_ranges:
+                return
+            try:
+                segment = substring(line, float(start), float(end))
+            except Exception:
+                return
+            if segment is None or segment.is_empty or not isinstance(segment, LineString):
+                return
+            mesh = short_road_junction_surface_mesh(
+                source_row,
+                segment,
+                rule,
+                components,
+                gap_idx,
             )
-        ]
-    return [RoadClipSegment(segment, offset) for segment, offset in outside_segments]
+            if mesh is None or len(mesh.vertices) == 0:
+                return
+            mesh.metadata.update(
+                {
+                    "component_type": "short_junction_gap_surface",
+                    "short_junction_gap_start_m": round(float(start), 3),
+                    "short_junction_gap_end_m": round(float(end), 3),
+                    "short_junction_gap_length_m": round(gap_length, 3),
+                    "short_junction_gap_threshold_m": round(float(max_length_m), 3),
+                }
+            )
+            meshes.append(mesh)
+            for profile in ("drivable", "roadside", "divider", "marking"):
+                raw_ranges[profile].setdefault(road_idx, []).append((float(start), float(end)))
+            emitted_ranges.add(key)
+            gap_idx += 1
+
+        breakpoints = sorted({0.0, *junction_distances, float(line.length)})
+        for start, end in zip(breakpoints, breakpoints[1:]):
+            touches_junction = start in junction_distances or end in junction_distances
+            if touches_junction:
+                add_short_gap_surface(float(start), float(end), SHORT_JUNCTION_GAP_AS_JUNCTION_MAX_LENGTH_M)
+
+        if existing_road_clip_ranges:
+            for left_range, right_range in zip(existing_road_clip_ranges, existing_road_clip_ranges[1:]):
+                start = float(left_range[1])
+                end = float(right_range[0])
+                add_short_gap_surface(start, end, SHORT_JUNCTION_CONNECTOR_AS_JUNCTION_MAX_LENGTH_M)
+
+    return (
+        meshes,
+        {
+            profile: merge_clip_ranges_by_road(ranges)
+            for profile, ranges in raw_ranges.items()
+        },
+    )
 
 
 def add_adjusted_clip_range(
@@ -6452,6 +6642,8 @@ def add_simple_junction_boundary_markings(
     surface_geometries: list[dict[str, Any]],
     crosswalk_meshes: list[trimesh.Trimesh],
     stop_line_meshes: list[trimesh.Trimesh],
+    blocked_marking_ranges_by_road: dict[Any, list[tuple[float, float]]] | None = None,
+    approach_clip_ranges_by_road: dict[Any, list[tuple[float, float]]] | None = None,
 ) -> Counter:
     stats: Counter[str] = Counter()
     if not surface_geometries:
@@ -6489,6 +6681,20 @@ def add_simple_junction_boundary_markings(
             if line is None or line.is_empty or not isinstance(line, LineString):
                 continue
             rule = road_gen.get_road_rule(row, rules)
+            blocked_marking_ranges = (
+                padded_distance_ranges(
+                    blocked_marking_ranges_by_road.get(road_idx, []),
+                    float(line.length),
+                    max(CROSSWALK_BAND_LENGTH_M * 0.5, STOP_LINE_WIDTH_M * 0.5),
+                )
+                if blocked_marking_ranges_by_road
+                else []
+            )
+            approach_clip_ranges = (
+                approach_clip_ranges_by_road.get(road_idx, [])
+                if approach_clip_ranges_by_road
+                else []
+            )
             ranges = line_intersection_distance_ranges(line, geom)
             if not ranges:
                 continue
@@ -6527,6 +6733,29 @@ def add_simple_junction_boundary_markings(
                         min_margin < stop_distance < float(line.length) - min_margin
                         and min_margin < crosswalk_distance < float(line.length) - min_margin
                     ):
+                        continue
+                    if transverse_marking_is_inside_merged_junction_clip(
+                        boundary_distance,
+                        float(line.length),
+                        approach_clip_ranges,
+                    ):
+                        stats["internal_junction_cluster_marking_suppressed"] += 1
+                        continue
+                    if not transverse_marking_has_approach_surface(
+                        boundary_distance,
+                        sign,
+                        float(line.length),
+                        stop_distance,
+                        crosswalk_distance,
+                        approach_clip_ranges,
+                    ):
+                        stats["insufficient_approach_surface_marking_suppressed"] += 1
+                        continue
+                    if road_gen.distance_in_ranges(stop_distance, blocked_marking_ranges) or road_gen.distance_in_ranges(
+                        crosswalk_distance,
+                        blocked_marking_ranges,
+                    ):
+                        stats["short_connector_marking_suppressed"] += 1
                         continue
                     stop_point, tangent, normal = road_gen.line_frame_at_distance(line, stop_distance)
                     stop_z = road_gen.elevation_at_distance(row, stop_distance, default_z=default_z)
@@ -6679,10 +6908,20 @@ def build_road_surface_meshes(
     junction_drivable_core_clip_geom = road_gen.clean_polygonal(junction_mask_geom) if junction_mask_geom is not None and not junction_mask_geom.is_empty else None
     junction_side_component_edge_clip_geom = junction_drivable_core_clip_geom
     junction_clip_profiles = simple_junction_clip_profiles_by_road(prepared_roads, junction_surface_geometries)
+    short_gap_surface_meshes, short_gap_clip_profiles = short_junction_gap_surface_meshes_and_clip_ranges(
+        prepared_roads,
+        rules,
+        junction_clip_profiles,
+    )
     drivable_clip_ranges = junction_clip_profiles.get("drivable", {})
     roadside_clip_ranges = junction_clip_profiles.get("roadside", {})
     divider_clip_ranges = junction_clip_profiles.get("divider", {})
     marking_clip_ranges = junction_clip_profiles.get("marking", {})
+    outer_sidewalk_clip_ranges = roadside_clip_ranges
+    drivable_clip_ranges = merge_clip_range_maps(drivable_clip_ranges, short_gap_clip_profiles.get("drivable", {}))
+    roadside_clip_ranges = merge_clip_range_maps(roadside_clip_ranges, short_gap_clip_profiles.get("roadside", {}))
+    divider_clip_ranges = merge_clip_range_maps(divider_clip_ranges, short_gap_clip_profiles.get("divider", {}))
+    marking_clip_ranges = merge_clip_range_maps(marking_clip_ranges, short_gap_clip_profiles.get("marking", {}))
     side_component_conflict_clip_geom = junction_drivable_core_clip_geom
     side_drivable_component_conflict_clip_geom = junction_drivable_core_clip_geom
     approach_extra_setbacks_by_road = junction_approach_extra_setbacks_by_road(
@@ -6696,6 +6935,11 @@ def build_road_surface_meshes(
         junction_surface_geometries,
         subtract_geometries_by_surface=one_sided_sidewalk_subtract,
     )
+    junction_surface_meshes.extend(short_gap_surface_meshes)
+    if short_gap_surface_meshes:
+        road_generation_log(
+            f"Converted {len(short_gap_surface_meshes)} short road gaps/connectors to junction-surface material."
+        )
     one_sided_sidewalk_meshes = one_sided_sidewalk_protection_meshes(one_sided_sidewalk_protection)
     component_mesh_groups["Sidewalk"].extend(one_sided_sidewalk_meshes)
     if one_sided_sidewalk_meshes:
@@ -6770,23 +7014,22 @@ def build_road_surface_meshes(
         white_edge_suppression = carriageway_boundary_edge_suppression(spans)
         for line_idx, line in enumerate(iter_lines(row.geometry)):
             line_spans = spans
-            segment_cache: dict[str, list[RoadClipSegment]] = {}
+            segment_cache: dict[str, list[tuple[LineString, float]]] = {}
 
-            def clipped_segments_for(clip_profile: str) -> list[RoadClipSegment]:
+            def clipped_segments_for(clip_profile: str) -> list[tuple[LineString, float]]:
                 if clip_profile not in segment_cache:
                     profile_ranges = {
                         "drivable": drivable_clip_ranges,
                         "roadside": roadside_clip_ranges,
+                        "outer_sidewalk": outer_sidewalk_clip_ranges,
                         "divider": divider_clip_ranges,
                         "marking": marking_clip_ranges,
                     }.get(clip_profile, {})
                     clip_ranges = profile_ranges.get(road_idx, [])
-                    segment_cache[clip_profile] = road_clip_segments_for_profile(
-                        row,
-                        line,
-                        rule,
-                        clip_profile,
-                        clip_ranges,
+                    segment_cache[clip_profile] = (
+                        road_gen.line_segments_outside_ranges(line, clip_ranges)
+                        if clip_ranges
+                        else [(line, 0.0)]
                     )
                 return segment_cache[clip_profile]
 
@@ -6800,16 +7043,14 @@ def build_road_surface_meshes(
                     clip_profile = "drivable"
                 elif component_type in JUNCTION_DIVIDER_COMPONENT_TYPES:
                     clip_profile = "divider"
+                elif is_outermost_sidewalk_span(line_spans, component_idx):
+                    clip_profile = "outer_sidewalk"
                 else:
                     clip_profile = "roadside"
-                for segment_idx, clip_segment in enumerate(clipped_segments_for(clip_profile)):
-                    segment = clip_segment.line
-                    distance_offset = clip_segment.distance_offset
+                for segment_idx, (segment, distance_offset) in enumerate(clipped_segments_for(clip_profile)):
                     if segment is None or segment.is_empty:
                         continue
-                    if not clip_segment.use_junction_clip_mask:
-                        component_clip_mask = None
-                    elif component_type in JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES:
+                    if component_type in JUNCTION_CONTINUOUS_ROADSIDE_COMPONENT_TYPES:
                         component_clip_mask = side_component_conflict_clip_geom
                     elif component_type in RAISED_COMPONENT_TYPES:
                         component_clip_mask = side_component_conflict_clip_geom
@@ -6848,9 +7089,7 @@ def build_road_surface_meshes(
             # 2. Lane markings are generated on the marking profile so they
             # stop earlier than road surfaces near intersections.
             if profile.generate_lane_markings:
-                for clip_segment in clipped_segments_for("marking"):
-                    segment = clip_segment.line
-                    distance_offset = clip_segment.distance_offset
+                for segment, distance_offset in clipped_segments_for("marking"):
                     if segment is None or segment.is_empty:
                         continue
                     for component_idx, (component, left_offset, right_offset) in enumerate(line_spans):
@@ -6881,9 +7120,7 @@ def build_road_surface_meshes(
             # together with raised roadside components; divider curbs use the
             # divider profile so medians reach the stop line.
             if profile.generate_curbs:
-                for clip_segment in clipped_segments_for("roadside"):
-                    segment = clip_segment.line
-                    distance_offset = clip_segment.distance_offset
+                for segment, distance_offset in clipped_segments_for("roadside"):
                     if segment is None or segment.is_empty:
                         continue
                     add_component_curbs(
@@ -6896,9 +7133,7 @@ def build_road_surface_meshes(
                         clip_mask=side_component_conflict_clip_geom,
                         exclude_boundary_component_types=JUNCTION_DIVIDER_COMPONENT_TYPES,
                     )
-                for clip_segment in clipped_segments_for("divider"):
-                    segment = clip_segment.line
-                    distance_offset = clip_segment.distance_offset
+                for segment, distance_offset in clipped_segments_for("divider"):
                     if segment is None or segment.is_empty:
                         continue
                     add_component_curbs(
@@ -6948,6 +7183,8 @@ def build_road_surface_meshes(
                 junction_surface_geometries,
                 crosswalk_meshes,
                 stop_line_meshes,
+                short_gap_clip_profiles.get("marking", {}),
+                drivable_clip_ranges,
             )
         )
     road_generation_log(

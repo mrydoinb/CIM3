@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 import unittest
 
 import geopandas as gpd
@@ -26,7 +25,6 @@ from city.pipeline import (  # noqa: E402
     build_rounded_junction_surface_meshes,
     junction_surface_base_z,
     prepare_roads_for_surfaces,
-    road_clip_segments_for_profile,
     road_generation_profile_with_tree_switch,
     subway_tunnel_semantic_record,
 )
@@ -204,72 +202,6 @@ class RoadTreeSwitchTests(unittest.TestCase):
 
         self.assertIn("generate_trees", semantic["generation_profile"])
         self.assertEqual(semantic["generation_profile"]["generate_trees"], CIM4_PROFILE.generate_trees)
-
-
-class ShortJunctionRoadSurfaceFallbackTests(unittest.TestCase):
-    def test_short_drivable_gap_uses_full_road_surface_without_junction_clip_mask(self):
-        line = LineString([(0.0, 0.0), (20.0, 0.0)])
-        row = pd.Series(
-            {
-                "geometry": line,
-                "junction_distances_json": "[2.0, 18.0]",
-                "road_class": "secondary",
-                "road_id": "short-gap",
-            }
-        )
-        rule = SimpleNamespace(
-            road_width=12.0,
-            lane_width=3.2,
-            lane_count=2,
-            sidewalk_width=2.0,
-            curb_width=0.2,
-            curb_height=0.12,
-            lane_marking_z_offset=0.04,
-        )
-
-        segments = road_clip_segments_for_profile(
-            row,
-            line,
-            rule,
-            "drivable",
-            [(0.0, 10.0), (10.0, 20.0)],
-        )
-
-        self.assertEqual(len(segments), 1)
-        self.assertAlmostEqual(float(segments[0].line.length), 20.0)
-        self.assertEqual(float(segments[0].distance_offset), 0.0)
-        self.assertFalse(segments[0].use_junction_clip_mask)
-        self.assertTrue(segments[0].short_junction_surface_fallback)
-
-    def test_short_roadside_gap_stays_clipped(self):
-        line = LineString([(0.0, 0.0), (20.0, 0.0)])
-        row = pd.Series(
-            {
-                "geometry": line,
-                "junction_distances_json": "[2.0, 18.0]",
-                "road_class": "secondary",
-                "road_id": "short-gap",
-            }
-        )
-        rule = SimpleNamespace(
-            road_width=12.0,
-            lane_width=3.2,
-            lane_count=2,
-            sidewalk_width=2.0,
-            curb_width=0.2,
-            curb_height=0.12,
-            lane_marking_z_offset=0.04,
-        )
-
-        segments = road_clip_segments_for_profile(
-            row,
-            line,
-            rule,
-            "roadside",
-            [(0.0, 10.0), (10.0, 20.0)],
-        )
-
-        self.assertEqual(segments, [])
 
 
 class UtilityWellTests(unittest.TestCase):
