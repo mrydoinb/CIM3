@@ -4520,12 +4520,31 @@ def mesh_xy_footprint(mesh: trimesh.Trimesh):
         except Exception:
             continue
     if face_polygons:
+        footprint = None
         try:
             footprint = road_gen.clean_polygonal(unary_union(face_polygons))
-            if footprint is not None and not footprint.is_empty:
-                return footprint
         except Exception:
-            pass
+            try:
+                footprint = unary_union(face_polygons)
+            except Exception:
+                footprint = None
+        if footprint is not None and not footprint.is_empty:
+            return footprint
+
+        # For combined road-layer meshes the face list can contain many
+        # separated strips. A global convex hull would turn those strips into a
+        # large false cover and make later sidewalk cleanup delete valid walks.
+        valid_parts = [
+            polygon
+            for polygon in face_polygons
+            if polygon is not None and not polygon.is_empty and float(polygon.area) > 1e-8
+        ]
+        if valid_parts:
+            try:
+                return MultiPolygon(valid_parts)
+            except Exception:
+                return valid_parts[0]
+        return None
 
     points = []
     seen = set()

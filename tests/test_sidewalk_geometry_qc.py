@@ -3,8 +3,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, MultiPolygon, Polygon
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,22 @@ class SidewalkGeometryQcTests(unittest.TestCase):
         self.assertIsNotNone(footprint)
         self.assertAlmostEqual(float(footprint.area), float(concave.area), places=5)
         self.assertLess(float(footprint.area), float(concave.convex_hull.area))
+
+    def test_mesh_xy_footprint_does_not_fallback_to_convex_hull_for_separated_parts(self):
+        separated = MultiPolygon(
+            [
+                Polygon([(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)]),
+                Polygon([(100.0, 0.0), (102.0, 0.0), (102.0, 1.0), (100.0, 1.0)]),
+            ]
+        )
+        mesh = top_mesh("Separated_Non_Motor_Lane", separated, layer_name="Non_Motor_Lane")
+
+        with patch("city.pipeline.road_gen.clean_polygonal", side_effect=RuntimeError("forced union cleanup failure")):
+            footprint = mesh_xy_footprint(mesh)
+
+        self.assertIsNotNone(footprint)
+        self.assertAlmostEqual(float(footprint.area), float(separated.area), places=5)
+        self.assertLess(float(footprint.area), float(separated.convex_hull.area))
 
     def test_trim_sidewalk_removes_parts_entering_road_or_junction(self):
         sidewalk = top_mesh("Sidewalk_Test", Polygon([(0, 0), (6, 0), (6, 2), (0, 2)]))
