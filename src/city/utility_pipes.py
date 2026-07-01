@@ -36,6 +36,10 @@ UTILITY_WELL_DEFAULT_RADIUS_M = UTILITY_WELL_CHAMBER_DIAMETER_M * 0.5
 UTILITY_WELL_MIN_RADIUS_M = UTILITY_WELL_DEFAULT_RADIUS_M
 UTILITY_WELL_DEFAULT_DEPTH_M = 3.0
 UTILITY_WELL_MESH_SECTIONS = 24
+UTILITY_WELL_COVER_RIB_COUNT = 10
+UTILITY_WELL_COVER_LIFT_MARKER_COUNT = 2
+UTILITY_WELL_BOLT_COUNT = 8
+UTILITY_WELL_LADDER_RUNG_COUNT = 5
 UTILITY_SUBWAY_HORIZONTAL_PROXIMITY_M = 1.0
 UTILITY_WELL_PIPE_CONNECTION_SEARCH_M = 10.0
 UTILITY_CROSS_TYPE_WELL_SEPARATION_M = UTILITY_WELL_CHAMBER_DIAMETER_M * 1.1
@@ -602,6 +606,81 @@ def _well_cover_detail_meshes(
     return details
 
 
+def _box_detail_mesh(
+    center: tuple[float, float, float],
+    extents: tuple[float, float, float],
+    color: list[int],
+) -> trimesh.Trimesh:
+    mesh = trimesh.creation.box(extents=extents)
+    mesh.apply_translation(center)
+    mesh.visual.face_colors = color
+    return mesh
+
+
+def _well_anchor_bolt_meshes(
+    center_xy: tuple[float, float],
+    cover_top_z: float,
+    count: int = UTILITY_WELL_BOLT_COUNT,
+) -> list[trimesh.Trimesh]:
+    bolts: list[trimesh.Trimesh] = []
+    bolt_radius = 0.018
+    bolt_center_radius = UTILITY_WELL_COVER_DIAMETER_M * 0.5 * 0.78
+    for index in range(int(count)):
+        angle = math.tau * index / int(count)
+        bolt = _cylinder_between_z(
+            bolt_radius,
+            cover_top_z - 0.024,
+            cover_top_z,
+            (
+                center_xy[0] + math.cos(angle) * bolt_center_radius,
+                center_xy[1] + math.sin(angle) * bolt_center_radius,
+            ),
+            10,
+        )
+        bolt.visual.face_colors = [34, 36, 38, 255]
+        bolts.append(bolt)
+    return bolts
+
+
+def _well_hinge_plate_mesh(center_xy: tuple[float, float], cover_top_z: float) -> trimesh.Trimesh:
+    cover_radius = UTILITY_WELL_COVER_DIAMETER_M * 0.5
+    return _box_detail_mesh(
+        (
+            center_xy[0],
+            center_xy[1] + cover_radius * 0.78,
+            cover_top_z - 0.012,
+        ),
+        (0.22, 0.075, 0.024),
+        [36, 38, 40, 255],
+    )
+
+
+def _well_ladder_rung_meshes(
+    center_xy: tuple[float, float],
+    z_bottom: float,
+    z_top: float,
+    chamber_radius_m: float,
+    count: int = UTILITY_WELL_LADDER_RUNG_COUNT,
+) -> list[trimesh.Trimesh]:
+    if int(count) <= 0:
+        return []
+    rung_meshes: list[trimesh.Trimesh] = []
+    available_height = max(float(z_top) - float(z_bottom) - 0.8, 0.4)
+    spacing = available_height / max(int(count) - 1, 1)
+    x = center_xy[0] + float(chamber_radius_m) - 0.075
+    for index in range(int(count)):
+        z = float(z_top) - 0.45 - spacing * index
+        if z <= float(z_bottom) + 0.25:
+            continue
+        rung = _box_detail_mesh(
+            (x, center_xy[1], z),
+            (0.055, 0.42, 0.035),
+            [74, 78, 82, 255],
+        )
+        rung_meshes.append(rung)
+    return rung_meshes
+
+
 def build_utility_well_mesh(
     name: str,
     center_xy: tuple[float, float],
@@ -679,13 +758,34 @@ def build_utility_well_mesh(
         neck.visual.face_colors = [128, 132, 136, 255]
         cover_recess.visual.face_colors = [112, 116, 120, 255]
         cover.visual.face_colors = [62, 66, 70, 255]
+        cover_details = _well_cover_detail_meshes(center_xy, z_top)
+        bolts = _well_anchor_bolt_meshes(center_xy, z_top)
+        hinge_plate = _well_hinge_plate_mesh(center_xy, z_top)
+        ladder_rungs = _well_ladder_rung_meshes(
+            center_xy,
+            body_bottom_z,
+            top_shoulder_bottom_z,
+            chamber_radius,
+        )
         mesh = trimesh.util.concatenate(
-            [base_foot, base_flange, chamber, top_shoulder, neck, cover_recess, cover]
+            [
+                base_foot,
+                base_flange,
+                chamber,
+                top_shoulder,
+                neck,
+                cover_recess,
+                cover,
+                *cover_details,
+                *bolts,
+                hinge_plate,
+                *ladder_rungs,
+            ]
         )
     mesh.metadata["name"] = name
     mesh.metadata["object_type"] = "MEP_Well"
     mesh.metadata["well_style"] = (
-        "straight_chamber_with_raised_rims_and_flat_cover"
+        "straight_chamber_with_raised_rims_and_detailed_access_cover"
         if detail_level == "cim4"
         else "simplified_precast_concrete_with_flat_cover"
     )
@@ -694,7 +794,16 @@ def build_utility_well_mesh(
     mesh.metadata["well_base_flange_diameter_m"] = base_flange_diameter_m
     mesh.metadata["well_top_shoulder_diameter_m"] = top_shoulder_diameter_m
     mesh.metadata["well_has_tapered_cone"] = detail_level != "cim4"
-    mesh.metadata["well_top_cover_style"] = "plain_recessed_disc" if detail_level == "cim4" else "flat_cover"
+    mesh.metadata["well_top_cover_style"] = (
+        "ribbed_recessed_disc_with_lift_markers" if detail_level == "cim4" else "flat_cover"
+    )
+    mesh.metadata["well_cover_rib_count"] = UTILITY_WELL_COVER_RIB_COUNT if detail_level == "cim4" else 0
+    mesh.metadata["well_cover_lift_marker_count"] = (
+        UTILITY_WELL_COVER_LIFT_MARKER_COUNT if detail_level == "cim4" else 0
+    )
+    mesh.metadata["well_bolt_count"] = UTILITY_WELL_BOLT_COUNT if detail_level == "cim4" else 0
+    mesh.metadata["well_ladder_rung_count"] = UTILITY_WELL_LADDER_RUNG_COUNT if detail_level == "cim4" else 0
+    mesh.metadata["well_has_hinge_plate"] = detail_level == "cim4"
     return mesh
 
 
@@ -735,7 +844,26 @@ def build_utility_well_semantic_record(
         "well_base_flange_diameter_m": round(UTILITY_WELL_CHAMBER_DIAMETER_M + 0.24, 3),
         "well_top_shoulder_diameter_m": round(UTILITY_WELL_CHAMBER_DIAMETER_M + 0.10, 3),
         "well_has_tapered_cone": False,
-        "well_top_cover_style": "plain_recessed_disc",
+        "well_top_cover_style": "ribbed_recessed_disc_with_lift_markers",
+        "well_detail_components": [
+            "base_foot",
+            "base_flange",
+            "straight_chamber",
+            "top_shoulder",
+            "neck",
+            "cover_recess",
+            "cover_disc",
+            "cover_ribs",
+            "lift_markers",
+            "anchor_bolts",
+            "hinge_plate",
+            "interior_ladder_rungs",
+        ],
+        "well_cover_rib_count": UTILITY_WELL_COVER_RIB_COUNT,
+        "well_cover_lift_marker_count": UTILITY_WELL_COVER_LIFT_MARKER_COUNT,
+        "well_bolt_count": UTILITY_WELL_BOLT_COUNT,
+        "well_ladder_rung_count": UTILITY_WELL_LADDER_RUNG_COUNT,
+        "well_has_hinge_plate": True,
         "source_ring_radius_m": round(float(source_ring_radius_m), 3)
         if source_ring_radius_m is not None
         else None,
@@ -1175,7 +1303,7 @@ def build_utility_pipe_meshes(
                     "source_point_to_well",
                 )
             )
-    combined_wells = combine_mesh_list("Utility_MEP_Well_All", well_meshes, UTILITY_WELL_COLOR)
+    combined_wells = combine_mesh_list("Utility_MEP_Well_All", well_meshes)
     if combined_wells is not None:
         combined_wells.metadata["object_type"] = "MEP_Well"
         combined_wells.metadata["feature_count"] = len(well_meshes)

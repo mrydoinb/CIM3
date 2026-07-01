@@ -218,15 +218,26 @@ class UtilityWellTests(unittest.TestCase):
         self.assertGreater(float(mesh.extents[0]), UTILITY_WELL_CHAMBER_DIAMETER_M)
         self.assertGreater(float(mesh.extents[1]), UTILITY_WELL_CHAMBER_DIAMETER_M)
         self.assertAlmostEqual(float(mesh.bounds[1, 2]), -0.05, places=6)
-        self.assertEqual(mesh.metadata["well_style"], "straight_chamber_with_raised_rims_and_flat_cover")
+        self.assertEqual(mesh.metadata["well_style"], "straight_chamber_with_raised_rims_and_detailed_access_cover")
         self.assertEqual(mesh.metadata["well_has_tapered_cone"], False)
-        self.assertEqual(mesh.metadata["well_top_cover_style"], "plain_recessed_disc")
+        self.assertEqual(mesh.metadata["well_top_cover_style"], "ribbed_recessed_disc_with_lift_markers")
 
     def test_cim4_well_is_more_detailed_than_cim3(self):
         cim3 = build_utility_well_mesh("Well_CIM3", (0.0, 0.0), 0.5, 3.0, "cim3")
         cim4 = build_utility_well_mesh("Well_CIM4", (0.0, 0.0), 0.5, 3.0, "cim4")
 
         self.assertGreater(len(cim4.faces), len(cim3.faces))
+
+    def test_cim4_well_has_cover_and_access_details(self):
+        mesh = build_utility_well_mesh("Well_CIM4", (0.0, 0.0), 0.5, 3.0, "cim4")
+
+        self.assertEqual(mesh.metadata["well_top_cover_style"], "ribbed_recessed_disc_with_lift_markers")
+        self.assertGreaterEqual(int(mesh.metadata["well_cover_rib_count"]), 10)
+        self.assertGreaterEqual(int(mesh.metadata["well_cover_lift_marker_count"]), 2)
+        self.assertGreaterEqual(int(mesh.metadata["well_bolt_count"]), 8)
+        self.assertGreaterEqual(int(mesh.metadata["well_ladder_rung_count"]), 4)
+        self.assertEqual(mesh.metadata["well_has_hinge_plate"], True)
+        self.assertGreater(len(mesh.faces), 900)
 
     def test_well_semantics_preserve_source_ring_size_and_standard_dimensions(self):
         record = build_utility_well_semantic_record(
@@ -242,11 +253,31 @@ class UtilityWellTests(unittest.TestCase):
 
         self.assertEqual(record["well_type"], "straight_precast_concrete_chamber")
         self.assertEqual(record["well_has_tapered_cone"], False)
-        self.assertEqual(record["well_top_cover_style"], "plain_recessed_disc")
+        self.assertEqual(record["well_top_cover_style"], "ribbed_recessed_disc_with_lift_markers")
         self.assertEqual(record["well_chamber_diameter_m"], UTILITY_WELL_CHAMBER_DIAMETER_M)
         self.assertEqual(record["well_cover_diameter_m"], UTILITY_WELL_COVER_DIAMETER_M)
         self.assertEqual(record["well_cover_thickness_m"], UTILITY_WELL_COVER_THICKNESS_M)
         self.assertEqual(record["source_ring_diameter_m"], 2.8)
+
+    def test_well_semantics_describe_cim4_detail_components(self):
+        record = build_utility_well_semantic_record(
+            "ring-1",
+            "source_shp_ring",
+            (1.0, 2.0),
+            UTILITY_WELL_CHAMBER_DIAMETER_M * 0.5,
+            3.0,
+            "Sewer",
+            source_rule="closed_ring_to_well",
+            source_ring_radius_m=1.4,
+        )
+
+        self.assertEqual(record["well_top_cover_style"], "ribbed_recessed_disc_with_lift_markers")
+        self.assertIn("cover_ribs", record["well_detail_components"])
+        self.assertIn("lift_markers", record["well_detail_components"])
+        self.assertIn("anchor_bolts", record["well_detail_components"])
+        self.assertIn("interior_ladder_rungs", record["well_detail_components"])
+        self.assertGreaterEqual(record["well_cover_rib_count"], 10)
+        self.assertGreaterEqual(record["well_ladder_rung_count"], 4)
 
     def test_pipe_endpoint_near_well_extends_into_well_chamber(self):
         coords, extension_count, connections = extend_pipe_line_to_well_connections(

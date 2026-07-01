@@ -125,6 +125,23 @@ MATERIALS = {
     "Utility_Power": ("CIM_Utility_Power_Yellow", (0.94, 0.68, 0.06, 1.0), 0.28),
     "Utility_Telecom": ("CIM_Utility_Telecom_Magenta", (0.88, 0.12, 0.64, 1.0), 0.34),
     "Utility_MEP_Well": ("CIM_Utility_MEP_Well_Concrete", (0.34, 0.36, 0.38, 1.0), 0.62),
+    "Underground_Sewer_Pipe": ("CIM_Underground_Sewer_Pipe", (1.0, 0.0, 1.0, 1.0), 0.5528),
+    "Underground_Water_Pipe": ("CIM_Underground_Water_Pipe", (1.0, 0.0, 0.0, 1.0), 0.5528),
+    "Underground_Storm_Pipe": ("CIM_Underground_Storm_Pipe", (0.0, 1.0, 1.0, 1.0), 0.5528),
+    "Underground_Box_Culvert": ("CIM_Underground_Box_Culvert", (0.0, 1.0, 1.0, 1.0), 0.5528),
+    "Underground_Well_Chamber": ("CIM_Underground_Well_Chamber", (1.0, 1.0, 1.0, 1.0), 0.5528),
+    "Underground_Well_Cover_White": ("CIM_Underground_Well_Cover_White", (1.0, 1.0, 1.0, 1.0), 0.5528),
+    "Underground_Well_Cover_Medium_Gray": (
+        "CIM_Underground_Well_Cover_Medium_Gray",
+        (0.5176, 0.5176, 0.5176, 1.0),
+        0.5528,
+    ),
+    "Underground_Well_Cover_Dark_Gray": (
+        "CIM_Underground_Well_Cover_Dark_Gray",
+        (0.2392, 0.2392, 0.2392, 1.0),
+        0.5528,
+    ),
+    "Underground_Well": ("CIM_Underground_Well_Chamber", (1.0, 1.0, 1.0, 1.0), 0.5528),
 }
 
 DEFAULT_MATERIAL = ("CIM_Default", (0.58, 0.58, 0.58, 1.0), 0.6)
@@ -362,6 +379,9 @@ def attribute_sidecar_for_obj(obj_path: Path) -> Path | None:
         return sidecar if sidecar.exists() else None
     if obj_path.parent.name in {"cim3", "cim4"} and obj_path.name == "city_utility_pipes.obj":
         sidecar = SEMANTIC_DIR / obj_path.parent.name / "city_utility_pipes_mesh_attributes.json"
+        return sidecar if sidecar.exists() else None
+    if obj_path.parent.name in {"cim3", "cim4"} and obj_path.stem.startswith("city_underground_pipelines_"):
+        sidecar = SEMANTIC_DIR / obj_path.parent.name / f"{obj_path.stem}_mesh_attributes.json"
         return sidecar if sidecar.exists() else None
     if obj_path.name in {"cim3_city_roads.obj", "cim4_city_roads.obj", "cim_city_roads.obj"}:
         sidecar = SEMANTIC_DIR / f"{obj_path.stem}_mesh_attributes.json"
