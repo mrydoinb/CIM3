@@ -27,19 +27,19 @@ ROAD_SECTION_REQUIREMENTS = {
     # section: road class, default total section width, modeled carriageway
     # lane count, and lane width. The total width is also overridden by the
     # source width field when present in data/Data/road50kms.
-    "A1": {"road_class": "trunk", "grade": "expressway", "total_width": 138.0, "lane_count": 8, "lane_width": 3.75},
-    "A2": {"road_class": "trunk", "grade": "expressway", "total_width": 100.0, "lane_count": 8, "lane_width": 3.75},
+    "A1": {"road_class": "trunk", "grade": "expressway", "total_width": 118.0, "lane_count": 10, "lane_width": 3.75},
+    "A2": {"road_class": "trunk", "grade": "expressway", "total_width": 70.0, "lane_count": 6, "lane_width": 3.75},
     "A3": {"road_class": "trunk", "grade": "expressway", "total_width": 72.0, "lane_count": 6, "lane_width": 3.75},
-    "B1": {"road_class": "primary", "grade": "arterial", "total_width": 197.0, "lane_count": 8, "lane_width": 3.5},
-    "B2": {"road_class": "primary", "grade": "arterial", "total_width": 70.0, "lane_count": 6, "lane_width": 3.5},
-    "B3": {"road_class": "primary", "grade": "arterial", "total_width": 50.0, "lane_count": 4, "lane_width": 3.5},
-    "B4": {"road_class": "secondary", "grade": "secondary", "total_width": 40.0, "lane_count": 4, "lane_width": 3.25},
-    "B5": {"road_class": "secondary", "grade": "secondary", "total_width": 30.0, "lane_count": 4, "lane_width": 3.25},
-    "C1": {"road_class": "secondary", "grade": "secondary", "total_width": 35.0, "lane_count": 4, "lane_width": 3.25},
-    "C2": {"road_class": "secondary", "grade": "secondary", "total_width": 28.0, "lane_count": 4, "lane_width": 3.25},
-    "C3": {"road_class": "secondary", "grade": "secondary", "total_width": 26.0, "lane_count": 4, "lane_width": 3.25},
-    "C4": {"road_class": "secondary", "grade": "secondary", "total_width": 64.0, "lane_count": 6, "lane_width": 3.25},
-    "C5": {"road_class": "secondary", "grade": "secondary", "total_width": 45.0, "lane_count": 4, "lane_width": 3.25},
+    "B1": {"road_class": "primary", "grade": "arterial", "total_width": 70.0, "lane_count": 6, "lane_width": 3.75},
+    "B2": {"road_class": "primary", "grade": "arterial", "total_width": 70.0, "lane_count": 6, "lane_width": 3.75},
+    "B3": {"road_class": "primary", "grade": "arterial", "total_width": 50.0, "lane_count": 6, "lane_width": 3.75},
+    "B4": {"road_class": "secondary", "grade": "secondary", "total_width": 40.0, "lane_count": 4, "lane_width": 3.75},
+    "B5": {"road_class": "secondary", "grade": "secondary", "total_width": 30.0, "lane_count": 4, "lane_width": 3.5},
+    "C1": {"road_class": "secondary", "grade": "secondary", "total_width": 35.0, "lane_count": 4, "lane_width": 3.75},
+    "C2": {"road_class": "secondary", "grade": "secondary", "total_width": 27.0, "lane_count": 4, "lane_width": 3.75},
+    "C3": {"road_class": "secondary", "grade": "secondary", "total_width": 26.0, "lane_count": 4, "lane_width": 3.5},
+    "C4": {"road_class": "secondary", "grade": "secondary", "total_width": 64.0, "lane_count": 8, "lane_width": 3.75},
+    "C5": {"road_class": "secondary", "grade": "secondary", "total_width": 45.0, "lane_count": 4, "lane_width": 3.5},
     "D1": {"road_class": "tertiary", "grade": "branch", "total_width": 20.0, "lane_count": 2, "lane_width": 3.25},
     "D2": {"road_class": "tertiary", "grade": "branch", "total_width": 20.0, "lane_count": 2, "lane_width": 3.25},
     "D3": {"road_class": "tertiary", "grade": "branch", "total_width": 20.0, "lane_count": 2, "lane_width": 3.25},
@@ -55,7 +55,7 @@ ROAD_SECTION_REQUIREMENTS = {
     "D6": {
         "road_class": "tertiary",
         "grade": "branch",
-        "total_width": 7.0,
+        "total_width": 9.0,
         "lane_count": 1,
         "lane_width": 5.0,
         "road_width": 5.0,
@@ -87,9 +87,8 @@ SYMMETRIC_SECTION_FALLBACKS = {
     "A2": "A3",
     "C4": "C5",
     "D2": "D1",
-    "D6": "D5",
 }
-SYMMETRIC_FALLBACK_KEEP_MODEL_WIDTH = {"D6"}
+SYMMETRIC_FALLBACK_KEEP_MODEL_WIDTH = set()
 SYMMETRIC_DEFAULT_SECTION_BY_CATEGORY = {
     "expressway": "A3",
     "arterial": "B3",
@@ -533,13 +532,13 @@ def normalize_outer_sidewalk_components(
     components: list[dict[str, Any]],
     section_code: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep sidewalks as the outermost components except for D6 one-side roads."""
+    """Keep sidewalks as the outermost components."""
     normalized = [
         dict(component)
         for component in components
         if float(component.get("width", 0.0) or 0.0) > 0.01
     ]
-    if not normalized or safe_str(section_code).upper() == "D6":
+    if not normalized:
         return normalized
 
     def is_sidewalk(component: dict[str, Any]) -> bool:

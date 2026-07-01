@@ -193,15 +193,17 @@ class SidewalkGeometryQcTests(unittest.TestCase):
             sum(float(component["width"]) for component in components),
         )
 
-    def test_d6_cross_section_keeps_one_sided_sidewalk(self):
+    def test_d6_cross_section_uses_two_sided_sidewalk(self):
         components = [
+            {"type": "sidewalk", "width": 2.0},
             {"type": "main_carriageway", "width": 5.0},
             {"type": "sidewalk", "width": 2.0},
         ]
 
         normalized = normalize_outer_sidewalk_components(components, "D6")
 
-        self.assertEqual([component["type"] for component in normalized], ["main_carriageway", "sidewalk"])
+        self.assertEqual([component["type"] for component in normalized], ["sidewalk", "main_carriageway", "sidewalk"])
+        self.assertAlmostEqual(sum(float(component["width"]) for component in normalized), 9.0)
 
 
 if __name__ == "__main__":
